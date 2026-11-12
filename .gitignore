@@ -21,3 +21,4 @@ secrets/
 # Local deployment state
 deploy/.env
 deploy/jwt/
+!.env.example
