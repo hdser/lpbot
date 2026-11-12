@@ -194,6 +194,10 @@ fn the_series_follows_the_position_through_its_states() {
     assert!(beyond.fees > 0.0);
     // Token decimals are equal here, so the price is 1.0001^-tick.
     assert!((beyond.price - 1.0001f64.powi(50)).abs() < 1e-6);
+    // The range as prices: ticks -20 and 0, low price first.
+    assert_eq!(beyond.price_lower, Some(1.0));
+    assert!((beyond.price_upper.unwrap() - 1.0001f64.powi(20)).abs() < 1e-12);
+    assert_eq!(out.series[0].price_lower, None);
     assert!(out.series.windows(2).all(|w| w[0].time < w[1].time));
     assert!(out.summary.max_drawdown_pct > 0.3 && out.summary.max_drawdown_pct < 0.5);
 }

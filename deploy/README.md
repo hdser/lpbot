@@ -82,6 +82,14 @@ cargo run --release -p lpbot -- run experiments/width-and-patience-eth.yml
 
 It trades the pool that ranks highest for the value token, once per combination in the file's `sweep`, and writes six result tables per run under `runs/`. Capital and the loss limit come from the file's `run` block or from `--capital` and `--loss-limit`. The runs with `patience.mode: adaptive` are skipped for now; the three fixed rules run.
 
+To see the results, load them into Postgres and open Grafana:
+
+```sh
+make load
+```
+
+Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has three dashboards: every run of an experiment side by side, one run in detail, and what a run saw of pools and zones. Backtests lie in the past, so set the time range to the run's window. Loading is safe to repeat; a run loaded twice replaces itself.
+
 `make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 
 All of these commands only read the chain. They need no keys and send no transactions.

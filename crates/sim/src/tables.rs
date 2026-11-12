@@ -301,6 +301,14 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                     "tick_upper",
                     int_or_empty(t.iter().map(|r| r.tick_upper.map(i64::from))),
                 ),
+                (
+                    "price_lower",
+                    float_or_empty(t.iter().map(|r| r.price_lower)),
+                ),
+                (
+                    "price_upper",
+                    float_or_empty(t.iter().map(|r| r.price_upper)),
+                ),
             ],
         ),
         table(
@@ -575,6 +583,8 @@ mod tests {
                 state: "flat".into(),
                 tick_lower: None,
                 tick_upper: None,
+                price_lower: None,
+                price_upper: None,
             }],
             zones: vec![ZoneLook {
                 time: 100,

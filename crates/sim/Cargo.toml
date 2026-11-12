@@ -16,4 +16,5 @@ alloy-primitives.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 parquet.workspace = true
+postgres.workspace = true
 thiserror.workspace = true

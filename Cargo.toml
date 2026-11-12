@@ -36,6 +36,7 @@ lpbot-strategy = { path = "crates/strategy" }
 lpbot-risk = { path = "crates/risk" }
 lpbot-exec = { path = "crates/exec" }
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
+postgres = "0.19"
 arrow-array = "60"
 arrow-schema = "60"
 parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }

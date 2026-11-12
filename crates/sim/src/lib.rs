@@ -7,6 +7,7 @@
 //! See `docs/DESIGN.md`, "Simulation and backtesting".
 
 pub mod engine;
+pub mod loader;
 pub mod tables;
 
 #[cfg(test)]

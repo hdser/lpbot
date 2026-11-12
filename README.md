@@ -11,11 +11,11 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Works today | Not built yet |
 | --- | --- |
 | One-command setup of the node and services (`make up`) | Paper mode |
-| Experiment files: base config, overrides, sweeps, config hashing | Loading the result tables into Postgres; viewer dashboards |
-| Run-input checks (capital and loss limit are required) | Adaptive patience decision and calibrator |
+| Experiment files: base config, overrides, sweeps, config hashing | Adaptive patience decision and calibrator |
+| Run-input checks (capital and loss limit are required) | Paper mode |
 | Uniswap v3 pool math, checked against the reference test vectors | Live subscriptions, reorg handling |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Executor, Safe roles policy |
-| Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | |
+| Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Watchdog |
 | `lpbot pools`, `lpbot verify-pool` and `lpbot rank` (pools ranked by implied volatility) | |
 | Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
@@ -23,6 +23,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
 | Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
 | `lpbot run`: backtests of the zone round trip with the three fixed patience rules, written as the six result tables | |
+| Viewer: `lpbot load-results` puts the tables in Postgres; three Grafana dashboards read them (runs, run detail, pools and zones) | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
 The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `lpbot verify-pool` is that check, and it is the first thing to run once the node is synced.
@@ -51,6 +52,14 @@ cargo run --release -p lpbot -- run experiments/demo-fixed-rules.yml --data-dir 
 ```
 
 The last command runs nine backtests (three range widths against always wait, always flip and always close) and writes their result tables under `runs/`.
+
+To look at the results, the services have to be up (`make up` starts them along with the node):
+
+```sh
+make load               # result tables into Postgres
+```
+
+Then open Grafana on http://127.0.0.1:3000, folder `lpbot`. The dashboards' queries were checked against a Postgres loaded with these demo runs; the dashboards themselves have not been opened in Grafana yet, so expect to adjust a panel or two.
 
 Once the node is synced:
 

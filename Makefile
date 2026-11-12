@@ -7,7 +7,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up down restart status logs build test check demo history rank backtest
+.PHONY: up down restart status logs build test check demo history rank backtest load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -52,6 +52,13 @@ rank:
 EXPERIMENT ?= experiments/width-and-patience-eth.yml
 backtest:
 	cargo run --release -p lpbot -- run $(EXPERIMENT)
+
+## Load the result tables under RESULTS into Postgres, for the dashboards.
+## Safe to run again: a run that is loaded twice replaces itself.
+RESULTS ?= runs
+load:
+	@LPBOT_DB_URL="postgres://lpbot:$(POSTGRES_PASSWORD)@127.0.0.1:5432/lpbot" \
+		cargo run --release -p lpbot -- load-results --results-dir $(RESULTS)
 
 ## Run the unit tests.
 test:

@@ -631,6 +631,7 @@ risk:
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |
+| `lpbot load-results` | Loads the result tables into Postgres for the viewer. Tables are created from the files, and a run loaded twice replaces itself |
 | `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests with the fixed patience rules run today |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
 | `lpbot live` --loss-limit \<pct> --autonomy \<mode> | Runs with real funds through the Safe |

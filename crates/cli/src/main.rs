@@ -52,10 +52,23 @@ enum Command {
     Backfill(BackfillArgs),
     /// Compare the replica's fees with what real positions collected.
     VerifyFees(VerifyFeesArgs),
+    /// Load the result tables into Postgres, where the viewer reads them.
+    LoadResults(LoadArgs),
     /// Write a simulated pool history, to try the pipeline without a node.
     DemoData(DemoArgs),
     /// Show a pool's zone map: how often price crosses each candidate range.
     Zones(ZonesArgs),
+}
+
+#[derive(Args)]
+struct LoadArgs {
+    /// Folder the result tables were written to.
+    #[arg(long, default_value = "runs")]
+    results_dir: PathBuf,
+    /// Database to load into, as postgres://user:password@host:port/name.
+    /// Defaults to LPBOT_DB_URL.
+    #[arg(long)]
+    db: Option<String>,
 }
 
 #[derive(Args)]
@@ -316,6 +329,35 @@ fn real_main() -> Result<()> {
                     args.days,
                 )
             }
+        }
+        Command::LoadResults(args) => {
+            let url = args
+                .db
+                .or_else(|| std::env::var("LPBOT_DB_URL").ok())
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no database given: pass --db or set LPBOT_DB_URL \
+                         (`make load` takes it from deploy/.env)"
+                    )
+                })?;
+            // The URL holds the password, so it is never printed.
+            let mut client = postgres::Client::connect(&url, postgres::NoTls)
+                .map_err(|e| anyhow::anyhow!("cannot connect to the database: {e}"))?;
+            let report = lpbot_sim::loader::load_results(&mut client, &args.results_dir)?;
+            if report.runs == 0 {
+                bail!(
+                    "no runs found under {}; run `lpbot run <experiment.yml>` first",
+                    args.results_dir.display()
+                );
+            }
+            println!(
+                "loaded {} run(s), {} rows, from {}",
+                report.runs,
+                report.rows,
+                args.results_dir.display()
+            );
+            Ok(())
         }
         Command::VerifyFees(args) => {
             let passed = fees_cmd::run(

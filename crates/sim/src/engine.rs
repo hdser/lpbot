@@ -188,6 +188,9 @@ pub struct SeriesRow {
     pub state: String,
     pub tick_lower: Option<Tick>,
     pub tick_upper: Option<Tick>,
+    /// The range's bounds as prices of the value token, low then high.
+    pub price_lower: Option<f64>,
+    pub price_upper: Option<f64>,
 }
 
 /// What the zone map said about a range when the engine looked at it.
@@ -336,6 +339,16 @@ impl<'a> Engine<'a> {
         let scale = 10f64.powi(i32::from(self.s.decimals0) - i32::from(self.s.decimals1));
         let sqrt = to_f64(self.pool.sqrt_price_x96()) / 2f64.powi(96);
         let token1_per_token0 = sqrt * sqrt * scale;
+        match self.s.value {
+            Token::One => 1.0 / token1_per_token0,
+            Token::Zero => token1_per_token0,
+        }
+    }
+
+    /// Price of the value token in the other token at a tick.
+    fn price_at(&self, tick: Tick) -> f64 {
+        let scale = 10f64.powi(i32::from(self.s.decimals0) - i32::from(self.s.decimals1));
+        let token1_per_token0 = 1.0001f64.powi(tick) * scale;
         match self.s.value {
             Token::One => 1.0 / token1_per_token0,
             Token::Zero => token1_per_token0,
@@ -767,6 +780,10 @@ impl<'a> Engine<'a> {
 
         if time >= self.next_series {
             let unit = self.value_unit;
+            let bounds = self.leg.as_ref().map(|leg| {
+                let (a, b) = (self.price_at(leg.lower), self.price_at(leg.upper));
+                (a.min(b), a.max(b))
+            });
             self.out.series.push(SeriesRow {
                 time,
                 block,
@@ -783,6 +800,8 @@ impl<'a> Engine<'a> {
                 state: state.to_string(),
                 tick_lower: self.leg.as_ref().map(|l| l.lower),
                 tick_upper: self.leg.as_ref().map(|l| l.upper),
+                price_lower: bounds.map(|b| b.0),
+                price_upper: bounds.map(|b| b.1),
             });
             self.next_series =
                 time - time % self.s.series_every.max(1) + self.s.series_every.max(1);

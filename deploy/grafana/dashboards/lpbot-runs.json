@@ -1,0 +1,175 @@
+{
+  "uid": "lpbot-runs",
+  "title": "lpbot: runs",
+  "description": "Every run of an experiment side by side. Results, fees and gas are in the value token.",
+  "tags": [
+    "lpbot"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-2y",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "experiment",
+        "label": "Experiment",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct experiment from runs order by 1",
+        "definition": "select distinct experiment from runs order by 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Runs",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Result by run, in percent of the starting capital",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select patience || ' / ' || width_ticks as run, result_pct\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Result by range width and patience rule",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select width_ticks,\n  max(result_pct) filter (where patience = 'adaptive') as adaptive,\n  max(result_pct) filter (where patience = 'wait') as wait,\n  max(result_pct) filter (where patience = 'flip') as flip,\n  max(result_pct) filter (where patience = 'close') as close\nfrom runs\nwhere experiment = '$experiment'\ngroup by width_ticks\norder by width_ticks"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "One row per width, one column per rule. The adaptive decision has to beat the three fixed rules."
+    },
+    {
+      "id": 4,
+      "title": "How campaigns ended",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.patience, r.width_ticks, c.exit_reason, count(*) as campaigns, sum(c.result) as result, sum(c.fees) as fees, sum(c.passes) as passes\nfrom campaigns c join runs r using (run_id)\nwhere r.experiment = '$experiment'\ngroup by 1, 2, 3\norder by 2, 1, 3"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

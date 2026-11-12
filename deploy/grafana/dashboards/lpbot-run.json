@@ -1,0 +1,257 @@
+{
+  "uid": "lpbot-run",
+  "title": "lpbot: run detail",
+  "description": "One run: price with the bot's range, value against holding, fees, campaigns and patience decisions. Set the time range to the run's window.",
+  "tags": [
+    "lpbot"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-2y",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "experiment",
+        "label": "Experiment",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct experiment from runs order by 1",
+        "definition": "select distinct experiment from runs order by 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "run",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select run_id from runs where experiment = '$experiment' order by run_index",
+        "definition": "select run_id from runs where experiment = '$experiment' order by run_index",
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Price of the value token, with the range the bot is in",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, price, price_lower as range_low, price_upper as range_high\nfrom series\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Value against simply holding, in the value token",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, equity as value, hold\nfrom series\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Fees earned so far, in the value token",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, fees\nfrom series\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Position state",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_timestamp(time) as time, state\nfrom series\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "flat: no position. resting: all in the value token. in_range: price inside the range. beyond: all in the other token. flipped: the proceeds sit in a range next to the price."
+    },
+    {
+      "id": 5,
+      "title": "Campaigns",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select campaign, to_timestamp(opened_time) as opened, to_timestamp(closed_time) as closed, tick_lower, tick_upper, exit_reason, amount_in, result, fees, gas, passes, flips, round(seconds_held / 3600.0, 1) as hours_held, round(seconds_beyond / 3600.0, 1) as hours_beyond\nfrom campaigns\nwhere run_id = '$run'\norder by campaign"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Patience decisions",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_timestamp(time) as time, campaign, leg, tick, round(seconds_stranded / 3600.0, 1) as hours_stranded, action, target_lower, target_upper, expected_wait, expected_flip, expected_close\nfrom decisions\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "The expected results are filled in by the adaptive decision. A fixed rule expects nothing."
+    }
+  ]
+}
