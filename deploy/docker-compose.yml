@@ -1,0 +1,112 @@
+# Everything the bot needs on the home machine: an Ethereum node (Reth plus
+# Lighthouse), Postgres for result tables, Prometheus and Grafana.
+#
+# Start it with `make up` from the repository root. That runs scripts/up.sh,
+# which creates deploy/.env and the engine secret on first use.
+#
+# Only the peer-to-peer ports are open to the network. Every RPC, database and
+# dashboard port is bound to 127.0.0.1.
+
+name: lpbot
+
+services:
+  reth:
+    image: ghcr.io/paradigmxyz/reth:${RETH_VERSION}
+    restart: unless-stopped
+    # Reth's own compose file sets this to avoid concurrent database access errors.
+    pid: host
+    stop_grace_period: 5m
+    ports:
+      - "30303:30303/tcp"        # peer-to-peer
+      - "30303:30303/udp"        # peer discovery
+      - "127.0.0.1:8545:8545"    # HTTP RPC
+      - "127.0.0.1:8546:8546"    # WebSocket RPC
+      - "127.0.0.1:9001:9001"    # metrics
+    volumes:
+      - ${DATA_DIR}/reth:/root/.local/share/reth/mainnet
+      - ./jwt:/root/jwt:ro
+    command: >
+      node
+      --chain mainnet
+      ${RETH_EXTRA_ARGS}
+      --metrics 0.0.0.0:9001
+      --authrpc.addr 0.0.0.0
+      --authrpc.port 8551
+      --authrpc.jwtsecret /root/jwt/jwt.hex
+      --http --http.addr 0.0.0.0 --http.port 8545
+      --http.api eth,net,web3,debug,trace
+      --ws --ws.addr 0.0.0.0 --ws.port 8546
+      --ws.api eth,net,web3
+
+  lighthouse:
+    image: sigp/lighthouse:${LIGHTHOUSE_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - reth
+    ports:
+      - "9000:9000/tcp"          # peer-to-peer
+      - "9000:9000/udp"          # peer discovery
+      - "127.0.0.1:5052:5052"    # beacon API
+    volumes:
+      - ${DATA_DIR}/lighthouse:/root/.lighthouse
+      - ./jwt:/root/jwt:ro
+    command: >
+      lighthouse bn
+      --network mainnet
+      --http --http-address 0.0.0.0
+      --execution-endpoint http://reth:8551
+      --execution-jwt /root/jwt/jwt.hex
+      --metrics --metrics-address 0.0.0.0
+      --checkpoint-sync-url ${CHECKPOINT_SYNC_URL}
+      --checkpoint-sync-url-timeout=300
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lpbot
+      POSTGRES_DB: lpbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ${DATA_DIR}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lpbot -d lpbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus
+    restart: unless-stopped
+    depends_on:
+      - reth
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - ${DATA_DIR}/prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    # The data directory is a bind mount owned by whoever ran `make up`.
+    user: "${HOST_UID}:${HOST_GID}"
+
+  grafana:
+    image: grafana/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - postgres
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ${DATA_DIR}/grafana:/var/lib/grafana
+    user: "${HOST_UID}:${HOST_GID}"

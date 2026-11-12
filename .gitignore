@@ -17,3 +17,7 @@ secrets/
 .DS_Store
 .idea/
 .vscode/
+
+# Local deployment state
+deploy/.env
+deploy/jwt/
