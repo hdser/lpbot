@@ -6,6 +6,7 @@
 pub mod config;
 pub mod experiment;
 pub mod metrics;
+pub mod ranking;
 pub mod types;
 
 pub use config::{

@@ -29,6 +29,7 @@ chains:
 
 universe:
   tokens: [WETH, WBTC, USDC, USDT]   # blue chips only; both tokens of a pool must be listed
+  usd_stables: [USDC, USDT]          # counted as one dollar when valuing volume and liquidity
   venues: [uniswap_v3]
   fee_tiers: all
   floors:                            # placeholders

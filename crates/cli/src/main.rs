@@ -2,11 +2,13 @@
 //!
 //! Working today: `plan` (resolve an experiment file into its runs), `iv`
 //! (implied volatility from fee, volume and in-range liquidity), `pools`
-//! (list the universe's pools from the node) and `verify-pool` (check the
-//! replica against a deployed pool). `run` resolves and validates, then
-//! stops, because the replay engine is not built yet.
+//! (list the universe's pools from the node), `verify-pool` (check the
+//! replica against a deployed pool) and `rank` (rank the pools by implied
+//! volatility). `run` resolves and validates, then stops, because the
+//! replay engine is not built yet.
 
 mod chain_cmd;
+mod rank_cmd;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,6 +41,20 @@ enum Command {
     Pools(ChainArgs),
     /// Replay a pool's recent events and compare the replica with the chain.
     VerifyPool(VerifyArgs),
+    /// Rank the universe's pools by implied volatility.
+    Rank(RankArgs),
+}
+
+#[derive(Args)]
+struct RankArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// Length of the volume window in days.
+    #[arg(long, default_value_t = 7)]
+    days: u64,
+    /// Blocks per log request. Shrinks by itself when the node refuses.
+    #[arg(long, default_value_t = 2_000)]
+    log_chunk: u64,
 }
 
 #[derive(Args)]
@@ -159,6 +175,15 @@ fn real_main() -> Result<()> {
             } else {
                 bail!("the replica does not match the chain")
             }
+        }
+        Command::Rank(args) => {
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            rank_cmd::run(&chain, &config, args.days, args.log_chunk)
         }
         Command::Iv(args) => {
             let l_sqrt_p = l_sqrt_p_from_depth_1pct(args.depth_1pct);

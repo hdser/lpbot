@@ -239,6 +239,34 @@ pub fn fetch_events(
     decode_pool_logs(&logs)
 }
 
+/// Fetches only a pool's swaps in a block range, in chain order, each with
+/// its block number. Cheaper than `fetch_events` when only volume and the
+/// price path are needed.
+pub fn fetch_swaps(
+    client: &RpcClient,
+    pool: Address,
+    from_block: u64,
+    to_block: u64,
+    chunk: u64,
+    on_progress: impl FnMut(u64, usize),
+) -> ChainResult<Vec<(u64, lpbot_venues::uniswap_v3::pool::SwapEvent)>> {
+    let logs = client.get_logs_chunked(
+        pool,
+        &[topics::swap()],
+        from_block,
+        to_block,
+        chunk,
+        on_progress,
+    )?;
+    Ok(decode_pool_logs(&logs)?
+        .into_iter()
+        .filter_map(|log| match log.event {
+            PoolEvent::Swap(swap) => Some((log.block_number, swap)),
+            _ => None,
+        })
+        .collect())
+}
+
 // --- discovery ----------------------------------------------------------
 
 /// Fee tiers the Uniswap v3 factory has enabled, in hundredths of a basis point.

@@ -49,7 +49,15 @@ cargo run --release -p lpbot -- verify-pool <pool address from the list>
 
 `pools` lists every Uniswap v3 pool whose two tokens are both in the universe. `verify-pool` reads a pool's state 2,000 blocks back, replays every event since, and compares the result with the pool's current state, down to every tick. It prints PASS or the list of differences. Run it on several pools and with a larger `--blocks` before trusting anything built on top.
 
-Both commands only read. They need no keys and send no transactions.
+Then rank the universe:
+
+```sh
+cargo run --release -p lpbot -- rank
+```
+
+`rank` reads each pool's swaps over the last 7 days (`--days` changes that) and prints the pools ordered by implied volatility, with volume and the value within 1% of the price. Pools under the floors in `universe.floors` are listed last with the reason. It needs the logs of the whole window, so on a pruned node it warns when the early days come back empty.
+
+All three commands only read. They need no keys and send no transactions.
 
 ## Upgrades
 

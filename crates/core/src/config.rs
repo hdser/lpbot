@@ -49,10 +49,24 @@ pub struct RunInputs {
     pub autonomy: Autonomy,
 }
 
+/// Minimums a pool must clear before it is ranked, in dollars.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FloorsConfig {
+    /// Average daily volume.
+    pub volume_usd_per_day: f64,
+    /// Value within 1% of the price.
+    pub in_range_liquidity_usd: f64,
+}
+
 /// Tokens the bot may hold. A pool qualifies only if both its tokens are listed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Universe {
     pub tokens: Vec<String>,
+    /// Tokens counted as one dollar when valuing volume and liquidity.
+    #[serde(default)]
+    pub usd_stables: Vec<String>,
+    #[serde(default)]
+    pub floors: Option<FloorsConfig>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
