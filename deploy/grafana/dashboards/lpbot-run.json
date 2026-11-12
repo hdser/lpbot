@@ -1,7 +1,7 @@
 {
   "uid": "lpbot-run",
   "title": "lpbot: run detail",
-  "description": "One run: price with the bot's range, value against holding, fees, campaigns and patience decisions. Set the time range to the run's window.",
+  "description": "One run: price with the bot's range, value against holding, fees, campaigns and patience decisions. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
   "tags": [
     "lpbot"
   ],
@@ -180,10 +180,56 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "flat": {
+                  "color": "#6e7781",
+                  "index": 0,
+                  "text": "flat"
+                },
+                "resting": {
+                  "color": "#3274d9",
+                  "index": 1,
+                  "text": "resting"
+                },
+                "in_range": {
+                  "color": "#37872d",
+                  "index": 2,
+                  "text": "in range"
+                },
+                "beyond": {
+                  "color": "#e0752d",
+                  "index": 3,
+                  "text": "beyond"
+                },
+                "flipped": {
+                  "color": "#8f3bb8",
+                  "index": 4,
+                  "text": "flipped"
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
         "overrides": []
       },
-      "options": {},
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
       "description": "flat: no position. resting: all in the value token. in_range: price inside the range. beyond: all in the other token. flipped: the proceeds sit in a range next to the price."
     },
     {

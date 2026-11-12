@@ -68,7 +68,7 @@ make viewer             # Postgres and Grafana only
 make load               # result tables into Postgres
 ```
 
-Then open Grafana on http://127.0.0.1:3000, folder `lpbot`. The dashboards' queries were checked against a Postgres loaded with these demo runs; the dashboards themselves have not been opened in Grafana yet, so expect to adjust a panel or two.
+Then open Grafana on http://127.0.0.1:3000, folder `lpbot`, dashboard `lpbot: runs`. Click a run id to open that run in detail with the time range set to its window.
 
 Once the node is synced:
 

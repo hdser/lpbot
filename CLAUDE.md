@@ -67,7 +67,7 @@ Status: all seven items are written and unit tested, and `experiments/demo-patie
 - Item 6: `lpbot verify-fees <pool>` on a busy pool with a few months stored. It follows every position that starts inside the stored history and compares what it collected with the replica's fee growth inside its range (`lpbot_data::fee_check`). This checks the replica's fee accounting, which the engine's fee share is built on.
 - Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history.
 
-The viewer exists too: `lpbot load-results` (`lpbot_sim::loader`) creates the Postgres tables from the Parquet files and replaces a run's rows on reload; the dashboards are in `deploy/grafana/dashboards/`. Their SQL was run against a real Postgres loaded with demo runs. They were never opened in Grafana, so the panel JSON is unverified.
+The viewer exists too: `lpbot load-results` (`lpbot_sim::loader`) creates the Postgres tables from the Parquet files and replaces a run's rows on reload; the dashboards are in `deploy/grafana/dashboards/`. All three were opened in Grafana 13.3 on the owner's laptop with the demo runs loaded (`make viewer`, `make load`), and every panel renders. Open a run from its id on the runs dashboard: the link sets the time range to the run's window.
 
 Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range choice in `lpbot_strategy::zone_round_trip`, the engine and tables in `lpbot_sim`. The run's `pool_rank` and `zone_map` tables hold what the engine looked at, not the full maps. Gas is charged at the fixed price in the `costs` block, and positions are marked at the pool price, until block headers and exchange feeds are stored.
 

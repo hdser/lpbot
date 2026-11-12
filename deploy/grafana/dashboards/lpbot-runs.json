@@ -62,14 +62,69 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct,\n  (extract(epoch from window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
         }
       ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run in detail",
+                    "url": "/d/lpbot-run?var-experiment=${experiment}&var-run=${__value.raw}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_drawdown_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
       },
-      "options": {}
+      "options": {},
+      "description": "Click a run id to open that run in detail, with the time range set to its window."
     },
     {
       "id": 2,
@@ -99,10 +154,21 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
         "overrides": []
       },
-      "options": {}
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        },
+        "xField": "run",
+        "barWidth": 0.8
+      }
     },
     {
       "id": 3,
@@ -132,8 +198,28 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "unit": "percent",
+          "decimals": 3
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "width_ticks"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
       },
       "options": {},
       "description": "One row per width, one column per rule. The adaptive decision has to beat the three fixed rules."
