@@ -6,6 +6,11 @@
 #
 # Set LPBOT_DRY_RUN=1 to prepare everything and validate the compose file
 # without starting any container.
+#
+# Set LPBOT_SERVICES to start only some services, without what they depend
+# on. `make viewer` uses it to start Postgres and Grafana on a laptop:
+#
+#   LPBOT_SERVICES="postgres grafana" ./scripts/up.sh
 
 set -euo pipefail
 
@@ -65,6 +70,13 @@ export DATA_DIR
 
 mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
 
+SERVICES="${LPBOT_SERVICES:-}"
+# The node runs unless a list of services leaves it out.
+with_node=1
+if [[ -n "$SERVICES" && " $SERVICES " != *" reth "* ]]; then
+  with_node=0
+fi
+
 if [[ "${RETH_EXTRA_ARGS:-}" == *--full* ]]; then
   need_gb=1500
   kind="a full"
@@ -73,7 +85,7 @@ else
   kind="an archive"
 fi
 avail_gb="$(df -Pk "$DATA_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
-if [[ -z "$(ls -A "$DATA_DIR/reth" 2>/dev/null)" && "$avail_gb" -lt "$need_gb" ]]; then
+if [[ "$with_node" == 1 && -z "$(ls -A "$DATA_DIR/reth" 2>/dev/null)" && "$avail_gb" -lt "$need_gb" ]]; then
   warn "$DATA_DIR has ${avail_gb} GB free; ${kind} node needs about ${need_gb} GB."
   warn "Point DATA_DIR in deploy/.env at a larger drive, or set RETH_EXTRA_ARGS=--full."
 fi
@@ -96,6 +108,38 @@ compose() {
 if [[ "${LPBOT_DRY_RUN:-0}" == "1" ]]; then
   compose config --quiet
   say "Dry run: configuration is valid. Nothing was started."
+  exit 0
+fi
+
+if [[ -n "$SERVICES" ]]; then
+  say "Starting only: $SERVICES"
+  # shellcheck disable=SC2086
+  compose up -d --no-deps $SERVICES
+
+  if [[ " $SERVICES " == *" postgres "* ]]; then
+    printf 'Waiting for Postgres'
+    for _ in $(seq 1 60); do
+      if compose exec -T postgres pg_isready -U lpbot -d lpbot >/dev/null 2>&1; then
+        ready=1
+        break
+      fi
+      printf '.'
+      sleep 1
+    done
+    printf '\n'
+    [[ "${ready:-0}" == 1 ]] \
+      || die "Postgres did not come up within a minute. See: docker compose -f deploy/docker-compose.yml logs postgres"
+  fi
+
+  cat <<EOF
+
+Started: $SERVICES. Data lives in $DATA_DIR.
+
+  make load       load the result tables under runs/ into Postgres
+  make down       stop everything (data is kept)
+
+Grafana:  http://127.0.0.1:3000   user admin, password GRAFANA_PASSWORD in deploy/.env
+EOF
   exit 0
 fi
 

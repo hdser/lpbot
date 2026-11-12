@@ -88,7 +88,7 @@ To see the results, load them into Postgres and open Grafana:
 make load
 ```
 
-Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has three dashboards: every run of an experiment side by side, one run in detail, and what a run saw of pools and zones. Backtests lie in the past, so set the time range to the run's window. Loading is safe to repeat; a run loaded twice replaces itself.
+On a machine without the node, `make viewer` starts only Postgres and Grafana, which is enough to load and look at results. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has three dashboards: every run of an experiment side by side, one run in detail, and what a run saw of pools and zones. Backtests lie in the past, so set the time range to the run's window. Loading is safe to repeat; a run loaded twice replaces itself.
 
 `make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 

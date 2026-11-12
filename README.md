@@ -61,9 +61,10 @@ cargo run --release -p lpbot -- calibrate experiments/demo-patience.yml --data-d
 
 On this made-up price waiting wins, because the price always comes back; the calibrator says so and ships the fixed rule.
 
-To look at the results, the services have to be up (`make up` starts them along with the node):
+To look at the results, Postgres and Grafana have to be up. `make viewer` starts just those two, which is what you want on a laptop; `make up` starts them along with the node.
 
 ```sh
+make viewer             # Postgres and Grafana only
 make load               # result tables into Postgres
 ```
 

@@ -7,11 +7,16 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up down restart status logs build test check demo history rank backtest calibrate load
+.PHONY: up viewer down restart status logs build test check demo history rank backtest calibrate load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
 	./scripts/up.sh
+
+## Start only Postgres and Grafana, to look at results without a node.
+## For a laptop: `make demo`, `make viewer`, `make load`.
+viewer:
+	LPBOT_SERVICES="postgres grafana" ./scripts/up.sh
 
 ## Stop everything. Data is kept.
 down:
