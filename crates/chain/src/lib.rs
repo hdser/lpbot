@@ -6,10 +6,11 @@
 //! No decision is ever made on public-endpoint data alone.
 //!
 //! What exists: the JSON-RPC client, log fetching with adaptive chunking,
-//! pool snapshots, pool discovery through the factory, and the check that
+//! pool snapshots, block times, pool discovery through the factory, and the check that
 //! the replica agrees with a deployed pool. Live subscriptions, reorg
 //! handling and transaction submission are not built yet.
 
+pub mod clock;
 pub mod eth;
 pub mod rpc;
 pub mod uniswap_v3;

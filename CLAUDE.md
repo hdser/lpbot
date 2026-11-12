@@ -60,7 +60,7 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 In this order. Each item lists the gate it must pass.
 
-Status: items 1 and 2 are written and unit tested, including an end-to-end run against a simulated node. Their gates against a real pool are still open: run `lpbot verify-pool` on the owner's machine. The log fetching and pool discovery parts of item 3 exist in `crates/chain`; the Parquet sink does not. Item 4 works straight from the node (`lpbot rank`, with the ranking itself in `lpbot_core::ranking`); it does not yet write the `pool_rank` table or read from local Parquet.
+Status: items 1 and 2 are written and unit tested, including an end-to-end run against a simulated node. Their gates against a real pool are still open: run `lpbot verify-pool` on the owner's machine. The log fetching and pool discovery parts of item 3 exist in `crates/chain`; the Parquet sink does not. Item 4 works straight from the node (`lpbot rank`, with the ranking itself in `lpbot_core::ranking`); it does not yet write the `pool_rank` table or read from local Parquet. Item 5 is written and passes its gate (`lpbot_data::zone_map`, shown by `lpbot zones`); like the ranking it reads from the node and does not yet write its table.
 
 1. **Uniswap v3 math** in `crates/venues` (`uniswap_v3::math`): TickMath, FullMath, SqrtPriceMath, SwapMath, LiquidityAmounts, fee growth inside a range.
    - Gate: unit tests from the reference vectors in the Uniswap v3 test suite pass; a differential test against the deployed pool on a mainnet fork agrees exactly on randomized swaps and mints.

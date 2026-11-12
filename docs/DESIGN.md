@@ -86,6 +86,9 @@ Two things stay outside the adaptive part:
 - Full passes through the range per day.
 - Share of time price spent inside it.
 - How long price took to come back after leaving, as a median and a 90th percentile.
+- How long a full pass waited for the pass back, as a median and a 90th percentile. This is the wait a position faces once price has run through it.
+
+A full pass is counted when price goes from one side of the range to the other, however long it lingers inside on the way; dipping in and leaving on the same side is a visit, not a pass. Stays outside that the lookback cuts off are kept apart from the ones that ended, so an unfinished wait is never counted as a return.
 
 Inside the top-ranked pools, zones are ranked by passes per day and by the implied volatility of the zone's own liquidity, marked down for long return times. The long lookbacks decide where to stand. The short ones decide when to enter and how long to expect to stay. That is the bot's version of looking at longer price ranges even when going in for a short time.
 

@@ -57,7 +57,15 @@ cargo run --release -p lpbot -- rank
 
 `rank` reads each pool's swaps over the last 7 days (`--days` changes that) and prints the pools ordered by implied volatility, with volume and the value within 1% of the price. Pools under the floors in `universe.floors` are listed last with the reason. It needs the logs of the whole window, so on a pruned node it warns when the early days come back empty.
 
-All three commands only read. They need no keys and send no transactions.
+And look at the zone map of a pool from the top of the ranking:
+
+```sh
+cargo run --release -p lpbot -- zones <pool address>
+```
+
+`zones` reads the pool's swaps over 90 days and, for 7, 30 and 90 day lookbacks, lists the price ranges that were crossed most: full passes per day, the fee a position there earned per day, the share of time price spent inside, and how long price stayed away after leaving. `--widths` sets the range widths to try, in tick spacings. The first run takes a while on a busy pool, because it reads every swap of the window from the node.
+
+These commands only read. They need no keys and send no transactions.
 
 ## Upgrades
 

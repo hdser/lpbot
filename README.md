@@ -10,13 +10,14 @@ Read-only so far. The bot reads pools from a node; nothing here sends a transact
 
 | Works today | Not built yet |
 | --- | --- |
-| One-command setup of the node and services (`make up`) | Backfill to Parquet, zone map |
+| One-command setup of the node and services (`make up`) | Backfill to Parquet; `pool_rank` and `zone_map` written as tables |
 | Experiment files: base config, overrides, sweeps, config hashing | Replay engine and result tables |
 | Run-input checks (capital and loss limit are required) | Adaptive patience decision and calibrator |
 | Uniswap v3 pool math, checked against the reference test vectors | Live subscriptions, reorg handling |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Executor, Safe roles policy |
 | Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Viewer dashboards |
 | `lpbot pools`, `lpbot verify-pool` and `lpbot rank` (pools ranked by implied volatility) | |
+| Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
 The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `lpbot verify-pool` is that check, and it is the first thing to run once the node is synced.
@@ -46,6 +47,9 @@ cargo run --release -p lpbot -- verify-pool <pool address from the list above>
 
 # The universe ranked by implied volatility over the last 7 days
 cargo run --release -p lpbot -- rank
+
+# A pool's zone map on 7, 30 and 90 day lookbacks
+cargo run --release -p lpbot -- zones <pool address>
 ```
 
 `lpbot run <experiment.yml>` resolves and validates the file, then stops with a clear message, because the replay engine is the next thing to build.

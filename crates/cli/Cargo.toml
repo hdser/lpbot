@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 lpbot-core.workspace = true
 lpbot-chain.workspace = true
+lpbot-data.workspace = true
 lpbot-venues.workspace = true
 alloy-primitives.workspace = true
 anyhow.workspace = true

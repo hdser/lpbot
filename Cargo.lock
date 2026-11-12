@@ -1501,6 +1501,7 @@ dependencies = [
  "clap",
  "lpbot-chain",
  "lpbot-core",
+ "lpbot-data",
  "lpbot-venues",
  "serde_yaml",
 ]

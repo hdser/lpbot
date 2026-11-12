@@ -3,12 +3,13 @@
 //! Working today: `plan` (resolve an experiment file into its runs), `iv`
 //! (implied volatility from fee, volume and in-range liquidity), `pools`
 //! (list the universe's pools from the node), `verify-pool` (check the
-//! replica against a deployed pool) and `rank` (rank the pools by implied
-//! volatility). `run` resolves and validates, then stops, because the
+//! replica against a deployed pool), `rank` (rank the pools by implied
+//! volatility) and `zones` (a pool's zone map). `run` resolves and validates, then stops, because the
 //! replay engine is not built yet.
 
 mod chain_cmd;
 mod rank_cmd;
+mod zones_cmd;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -43,6 +44,28 @@ enum Command {
     VerifyPool(VerifyArgs),
     /// Rank the universe's pools by implied volatility.
     Rank(RankArgs),
+    /// Show a pool's zone map: how often price crosses each candidate range.
+    Zones(ZonesArgs),
+}
+
+#[derive(Args)]
+struct ZonesArgs {
+    /// Address of the pool.
+    pool: String,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// Lookbacks in days.
+    #[arg(long, value_delimiter = ',', default_value = "7,30,90")]
+    days: Vec<u32>,
+    /// Range widths to try, as multiples of the pool's tick spacing.
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16")]
+    widths: Vec<u32>,
+    /// Ranges to show per lookback.
+    #[arg(long, default_value_t = 15)]
+    top: usize,
+    /// Blocks per log request. Shrinks by itself when the node refuses.
+    #[arg(long, default_value_t = 2_000)]
+    log_chunk: u64,
 }
 
 #[derive(Args)]
@@ -184,6 +207,25 @@ fn real_main() -> Result<()> {
                 args.chain.rpc.as_deref(),
             )?;
             rank_cmd::run(&chain, &config, args.days, args.log_chunk)
+        }
+        Command::Zones(args) => {
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            zones_cmd::run(
+                &chain,
+                &config,
+                &zones_cmd::ZonesArgs {
+                    pool: chain_cmd::checked_address("pool", &args.pool)?,
+                    lookbacks: &args.days,
+                    width_steps: &args.widths,
+                    top: args.top,
+                    log_chunk: args.log_chunk,
+                },
+            )
         }
         Command::Iv(args) => {
             let l_sqrt_p = l_sqrt_p_from_depth_1pct(args.depth_1pct);

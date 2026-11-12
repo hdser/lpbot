@@ -1,5 +1,8 @@
-//! Data: Parquet sinks, exchange price feeds and backfill.
+//! Data: the zone map, and later the Parquet sinks and backfill.
 //!
-//! Not implemented yet. Phase 1 adds the event backfill for the ranked pools
-//! and the `pool_rank` and `zone_map` tables. See `docs/DESIGN.md`,
-//! "Data ingestion and storage" and "Experiments and results".
+//! The zone map is built from a pool's price path. The event backfill and
+//! the `pool_rank` and `zone_map` tables on disk are not implemented yet.
+//! See `docs/DESIGN.md`, "Data ingestion and storage" and "Experiments and
+//! results".
+
+pub mod zone_map;
