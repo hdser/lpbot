@@ -7,7 +7,7 @@ use lpbot_venues::uniswap_v3::events::PoolEvent;
 use lpbot_venues::uniswap_v3::pool::{Pool, PoolSnapshot, SwapEvent};
 use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
-use crate::engine::{run, GasModel, Output, Settings, Token};
+use crate::engine::{run, GasModel, Output, Policy, Settings, Token};
 
 const T0: u64 = 1_800_000_000;
 const HOUR: u64 = 3_600;
@@ -53,7 +53,7 @@ fn settings(rule: FixedRule) -> Settings {
         capital: U256::from(10u128.pow(18)),
         capital_share: 1.0,
         loss_limit: LossLimit::new(50.0).unwrap(),
-        rule,
+        policy: Policy::Fixed(rule),
         decide_every: HOUR,
         check_every: HOUR,
         latency_blocks: 1,
@@ -334,7 +334,7 @@ fn a_simulated_month_runs_under_every_rule_and_adds_up() {
     };
     for rule in [FixedRule::Wait, FixedRule::Flip, FixedRule::Close] {
         let s = Settings {
-            rule,
+            policy: Policy::Fixed(rule),
             ..base.clone()
         };
         let out = run(history.snapshot.state.clone(), &history.events, &s).unwrap();
@@ -360,4 +360,171 @@ fn a_simulated_month_runs_under_every_rule_and_adds_up() {
         );
         assert_conserved(&out);
     }
+}
+
+// --- the adaptive decision ----------------------------------------------
+
+use lpbot_strategy::adaptive::AdaptiveParams;
+
+/// Hours of history in which price swings between two ticks, followed by
+/// the usual entry and a drop below the first range.
+fn swinging_then_stranded(low: i32, high: i32, tail: &[i32]) -> (PoolSnapshot, Vec<TimedEvent>) {
+    let mut targets: Vec<i32> = (0..48)
+        .map(|i| if i % 2 == 0 { high } else { low })
+        .collect();
+    targets.extend_from_slice(tail);
+    history(&targets)
+}
+
+fn adaptive(params: AdaptiveParams) -> Settings {
+    Settings {
+        policy: Policy::Adaptive(params),
+        // The swings are history only; trading starts after them.
+        trade_from: T0 + 48 * HOUR + 1,
+        lookbacks_days: vec![1, 2],
+        ..settings(FixedRule::Wait)
+    }
+}
+
+fn params() -> AdaptiveParams {
+    AdaptiveParams {
+        horizon: 4 * HOUR,
+        switch_margin: 0.000_5,
+        reinvest_credit: 0.0,
+        lookback_days: 2,
+    }
+}
+
+#[test]
+fn with_a_history_of_coming_back_the_adaptive_decision_waits() {
+    // Price has swung between -60 and 10 every hour for two days. After
+    // the entry at [-20, 0) it drops to -50: a move back up of 50 ticks
+    // has happened within four hours from every low in the history.
+    let (snapshot, events) = swinging_then_stranded(-60, 10, &[5, 6, -50, -52, 30, 31, 32]);
+    let out = run(snapshot, &events, &adaptive(params())).unwrap();
+    let stranded: Vec<_> = out.decisions.iter().filter(|d| d.tick <= -50).collect();
+    assert!(!stranded.is_empty());
+    for decision in &stranded {
+        assert_eq!(decision.action, "wait", "{decision:?}");
+        let (wait, close) = (
+            decision.expected_wait.unwrap(),
+            decision.expected_close.unwrap(),
+        );
+        assert!(wait > close, "{decision:?}");
+        assert!(decision.expected_flip.is_some());
+    }
+    // And price did come back: the campaign made its round trip.
+    let first = &out.campaigns[0];
+    assert_eq!((first.passes, first.flips), (2, 0));
+    assert!(first.result > 0.0);
+    assert_conserved(&out);
+}
+
+#[test]
+fn where_price_has_never_been_nothing_is_expected_to_beat_waiting() {
+    // Price has only ever swung between 0 and 12. A drop to -300 leaves
+    // the range 300 ticks away, in a region with no history at all: no
+    // return of that size, no pass through a range down there, no zone
+    // to redeploy into. Every option comes down to the swap at about
+    // this price, so nothing clears the margin and the bot stays put.
+    let (snapshot, events) = swinging_then_stranded(0, 12, &[25, 26, -300, -302, -304, -306]);
+    let out = run(snapshot, &events, &adaptive(params())).unwrap();
+    let first = out.decisions.iter().find(|d| d.tick <= -300).unwrap();
+    assert_eq!(first.action, "wait", "{first:?}");
+    let (wait, close) = (first.expected_wait.unwrap(), first.expected_close.unwrap());
+    assert!((wait - close).abs() / close < 0.000_2, "{first:?}");
+    assert!((first.expected_flip.unwrap() - close).abs() / close < 0.000_2);
+    assert_conserved(&out);
+}
+
+/// Two days of swings between -60 and -20, a jump up to 45 where the bot
+/// enters, and a drop back to `stranded_at` in the swinging region.
+fn stranded_in_a_busy_region(stranded_at: i32) -> (PoolSnapshot, Vec<TimedEvent>) {
+    swinging_then_stranded(
+        -60,
+        -20,
+        &[45, 46, stranded_at, stranded_at - 2, -20, -18, -16],
+    )
+}
+
+#[test]
+fn with_a_busy_range_next_to_the_price_the_adaptive_decision_flips() {
+    // Stranded at the bottom of the swings: the range above the price
+    // has been passed from every low in the history, while a return of
+    // 100 ticks to the entry range happened once.
+    let lean = AdaptiveParams {
+        switch_margin: 0.000_2,
+        ..params()
+    };
+    let (snapshot, events) = stranded_in_a_busy_region(-60);
+    let out = run(snapshot.clone(), &events, &adaptive(lean)).unwrap();
+    let first = out.decisions.iter().find(|d| d.tick <= -60).unwrap();
+    assert_eq!(first.action, "flip", "{first:?}");
+    assert_eq!(
+        (first.target_lower, first.target_upper),
+        (Some(-50), Some(-30))
+    );
+    let (wait, flip, close) = (
+        first.expected_wait.unwrap(),
+        first.expected_flip.unwrap(),
+        first.expected_close.unwrap(),
+    );
+    assert!(flip > wait && wait > close, "{first:?}");
+
+    // The flip was made, and price passed through it on the way to -20.
+    let campaign = &out.campaigns[0];
+    assert_eq!((campaign.flips, campaign.passes), (1, 2));
+    assert_eq!(campaign.exit_reason, "round_trip_complete");
+    // It did better than closing at -60 did.
+    let closing = Settings {
+        policy: Policy::Fixed(FixedRule::Close),
+        ..adaptive(lean)
+    };
+    let closed = run(snapshot, &events, &closing).unwrap();
+    assert_eq!(closed.campaigns[0].exit_reason, "patience_close");
+    assert!(campaign.result > closed.campaigns[0].result);
+    assert_conserved(&out);
+}
+
+#[test]
+fn the_margin_and_the_reinvest_credit_tip_the_decision() {
+    // Stranded inside the swings, with a range right below the price
+    // that every swing passes through for freed capital to go into.
+    let (snapshot, events) = stranded_in_a_busy_region(-30);
+    // A margin no option can clear: the bot stays put whatever the odds.
+    let patient = AdaptiveParams {
+        switch_margin: 0.5,
+        ..params()
+    };
+    let out = run(snapshot.clone(), &events, &adaptive(patient)).unwrap();
+    assert!(out.decisions.iter().all(|d| d.action == "wait"));
+
+    // Credit for what freed capital could earn there raises what closing
+    // is expected to leave, and nothing else.
+    let plain = run(snapshot.clone(), &events, &adaptive(patient)).unwrap();
+    let credited = AdaptiveParams {
+        reinvest_credit: 1.0,
+        ..patient
+    };
+    let with_credit = run(snapshot, &events, &adaptive(credited)).unwrap();
+    let (a, b) = (&with_credit.decisions[0], &plain.decisions[0]);
+    assert!(
+        a.expected_close.unwrap() > b.expected_close.unwrap(),
+        "{a:?} {b:?}"
+    );
+    assert_eq!(a.expected_wait, b.expected_wait);
+    assert_eq!(a.expected_flip, b.expected_flip);
+}
+
+#[test]
+fn without_enough_history_the_adaptive_decision_waits_and_expects_nothing() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let fresh = Settings {
+        policy: Policy::Adaptive(params()),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &fresh).unwrap();
+    assert_eq!(out.decisions[0].action, "wait");
+    assert_eq!(out.decisions[0].expected_wait, None);
+    assert_eq!(out.decisions[0].expected_close, None);
 }

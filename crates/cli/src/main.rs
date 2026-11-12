@@ -40,6 +40,9 @@ enum Command {
     Plan(ExperimentArgs),
     /// Run an experiment file (backtest, paper or live, as the file says).
     Run(RunArgs),
+    /// Fit the adaptive patience decision walk-forward and score it
+    /// against the fixed rules.
+    Calibrate(CalibrateArgs),
     /// Implied volatility from fee tier, daily volume and in-range liquidity.
     Iv(IvArgs),
     /// List every Uniswap v3 pool whose two tokens are both in the universe.
@@ -239,6 +242,18 @@ struct RunArgs {
     results_dir: PathBuf,
 }
 
+#[derive(Args)]
+struct CalibrateArgs {
+    #[command(flatten)]
+    run: RunArgs,
+    /// Days to fit on. Defaults to calibration.fit_window in the config.
+    #[arg(long)]
+    fit: Option<u32>,
+    /// Days to score on. Defaults to calibration.score_window in the config.
+    #[arg(long)]
+    score: Option<u32>,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum AutonomyArg {
     Auto,
@@ -284,6 +299,17 @@ fn real_main() -> Result<()> {
                 &backfill_cmd::data_dir(args.data_dir.as_deref()),
                 &args.results_dir,
                 &args.chain,
+            )
+        }
+        Command::Calibrate(args) => {
+            let runs = resolve(&args.run.experiment)?;
+            run_cmd::calibrate(
+                &runs,
+                &backfill_cmd::data_dir(args.run.data_dir.as_deref()),
+                &args.run.results_dir,
+                &args.run.chain,
+                args.fit,
+                args.score,
             )
         }
         Command::Pools(args) => {

@@ -76,6 +76,18 @@ The comparison uses four inputs:
 
 A switch needs a clear margin over the current course, so the bot does not flip back and forth. Every decision is scored afterwards against what the other two actions would have returned, and that score feeds the calibration below.
 
+**How the first version computes it.** Each option becomes one figure: what it is expected to leave in the value token, looking ahead over a horizon.
+
+| Option | If price makes the move in time | If it does not |
+| --- | --- | --- |
+| Wait | The position pays out its whole range in the value token, plus the fee on the pass | The swap back at the price history says it drifts to |
+| Flip | The same amount sold through the range next to the price, plus the fee, less the gas of moving | The same swap back, less the gas of moving |
+| Close | The swap back now, plus a share of what the freed capital would earn in the best range at hand | |
+
+The odds of a move are counted, not modelled: over the lookback, from every ten-minute starting point, did price travel that many ticks in that direction within the horizon? The drift is the average change from the starting points that did not. Four settings govern the decision, and all four are fitted by the calibrator: the horizon, the lookback, the margin a switch must clear, and how much of the best range's yield is credited to closing.
+
+What this version leaves out: the odds are the plain frequency over the lookback, not yet conditioned on how far price already is from the range, how long it has been away, or the long-horizon state of the market. A single large move in the lookback shifts them visibly. The decision table records what was expected, but decisions are not yet scored against the other two actions afterwards.
+
 Two things stay outside the adaptive part:
 
 - A loss limit in the value token, given as an input to each run. It is the backstop when history stops being a guide, which is exactly when return odds mislead.
@@ -285,19 +297,19 @@ How a run works:
 
 **Two fill models.** *Passive* assumes your liquidity is small against active liquidity, so historical swaps are unchanged and you take a pro-rata fee share. *Impact* re-runs swaps with your liquidity added and regenerates arbitrage flow from the exchange price path. Use passive first. Switch to impact once your size exceeds a few percent of active liquidity in the range.
 
-**What the first version trades.** The zone round trip with the three fixed patience rules, on one pool per run:
+**What the first version trades.** The zone round trip, with the adaptive patience decision or one of the three fixed rules, on one pool per run:
 
 - *Pool.* The stored pool holding the value token that ranks highest by implied volatility over the week before the window, unless the strategy names a `pool`.
 - *Entry.* One-sided in the value token, in a range of the run's width within `entry.max_gap_ticks` of the price (one width by default). Among those ranges it takes the one crossed most on the longest lookback, provided it was also crossed on the shortest. Without a day of history it takes the nearest.
 - *Staying.* A position that is back in the value token stays for the next pass. It moves only when price has drifted further than the gap allows, or when another range is crossed `entry.move_margin` times as often (1.5 by default).
-- *Beyond the range.* Every `patience.decide_every` the rule answers: wait, flip into the range next to the price, or close. A flipped position that price leaves behind by a full width gets the same question again.
+- *Beyond the range.* Every `patience.decide_every` the policy answers: wait, flip into the range next to the price, or close. A flipped position that price leaves behind by a full width gets the same question again.
 - *Loss limit.* Checked on every block against the run's starting capital, position marked at the pool price. When hit, everything is closed and the run stops.
 
 All of these are the fixed starting point the calibrator has to beat, not tuned choices.
 
 **Outputs per run.** Per campaign and in total, counted in the value token: amount in, amount out, fees, days held, passes completed, time spent beyond the range, gas and swap cost. Each run is compared with simply holding the value token. An arbitrage-loss figure is available as an optional diagnostic.
 
-**Calibration, not hand-tuning.** A calibrator reruns the simulator on a schedule across the search space of settings: zone ranking weights, width, fee tier, entry shape and patience margins. It fits on one window and scores on the next. A setting is promoted to simulation mode only if it beats both the one currently running and the fixed-rule baselines on the scoring window. Simulation mode (`paper` in the config) then runs it on live data before any capital follows.
+**Calibration, not hand-tuning.** A calibrator reruns the simulator on a schedule across the search space of settings: zone ranking weights, width, fee tier, entry shape and patience margins. It fits on one window and scores on the next. A setting is promoted to simulation mode only if it beats both the one currently running and the fixed-rule baselines on the scoring window. The first version calibrates the patience decision only: 18 combinations of horizon, margin and credit per fold, the adaptive decision shipping only if its out-of-sample results, summed over the folds, beat every fixed rule. Width and fee tier are compared by sweeping them in the experiment file. Running it on a schedule and promoting into simulation mode come with paper mode. Simulation mode (`paper` in the config) then runs it on live data before any capital follows.
 
 **Validation, in order of importance.**
 
@@ -631,8 +643,9 @@ risk:
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |
+| `lpbot calibrate <experiment.yml>` | Fits the adaptive decision's settings on one window and scores them on the next against the three fixed rules, fold after fold. Says which ships and writes it to `<results>/calibration/` |
 | `lpbot load-results` | Loads the result tables into Postgres for the viewer. Tables are created from the files, and a run loaded twice replaces itself |
-| `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests with the fixed patience rules run today |
+| `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests run today, with the adaptive decision or a fixed rule |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
 | `lpbot live` --loss-limit \<pct> --autonomy \<mode> | Runs with real funds through the Safe |
 | `lpbot status` | Positions, P&L breakdown, limits, node health |

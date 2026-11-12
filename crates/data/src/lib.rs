@@ -7,6 +7,7 @@ pub mod backfill;
 pub mod day;
 pub mod fee_check;
 pub mod lake;
+pub mod odds;
 pub mod snapshot;
 pub mod store;
 pub mod synth;

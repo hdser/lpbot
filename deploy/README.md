@@ -80,7 +80,7 @@ Then run a backtest. The window of `experiments/width-and-patience-eth.yml` must
 cargo run --release -p lpbot -- run experiments/width-and-patience-eth.yml
 ```
 
-It trades the pool that ranks highest for the value token, once per combination in the file's `sweep`, and writes six result tables per run under `runs/`. Capital and the loss limit come from the file's `run` block or from `--capital` and `--loss-limit`. The runs with `patience.mode: adaptive` are skipped for now; the three fixed rules run.
+It trades the pool that ranks highest for the value token, once per combination in the file's `sweep`, and writes six result tables per run under `runs/`. Capital and the loss limit come from the file's `run` block or from `--capital` and `--loss-limit`. `make calibrate` then fits the adaptive patience decision on one stretch of the window and scores it on the next, fold after fold, against always wait, always flip and always close, and says which one ships.
 
 To see the results, load them into Postgres and open Grafana:
 

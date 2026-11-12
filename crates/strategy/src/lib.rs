@@ -1,9 +1,10 @@
 //! Strategy and patience-policy interfaces, plus the fixed patience rules.
 //!
 //! A strategy only declares the positions it wants. Sizing limits, transaction
-//! building and safety live outside it. The adaptive patience decision is not
-//! implemented yet; the three fixed rules here are the baselines it has to beat.
+//! building and safety live outside it. The three fixed rules here are the
+//! baselines the adaptive patience decision in `adaptive` has to beat.
 
+pub mod adaptive;
 pub mod zone_round_trip;
 
 use lpbot_core::config::PatienceMode;

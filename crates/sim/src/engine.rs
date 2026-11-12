@@ -16,8 +16,10 @@ use std::collections::HashMap;
 use alloy_primitives::{I256, U256};
 use lpbot_core::{Campaign, EntrySide, PoolId, Tick};
 use lpbot_data::lake::TimedEvent;
+use lpbot_data::odds::TickBuckets;
 use lpbot_data::zone_map::{zone_stats, PathPoint, DAY};
 use lpbot_risk::{LossCheck, LossLimit};
+use lpbot_strategy::adaptive::{self, AdaptiveParams, Choice, Expected, Gamble, Options};
 use lpbot_strategy::zone_round_trip::{choose_zone, entry_candidates, gap, ZoneScore};
 use lpbot_strategy::{FixedRule, MarketView, PatienceAction, PatiencePolicy};
 use lpbot_venues::uniswap_v3::events::PoolEvent;
@@ -79,6 +81,18 @@ impl GasModel {
     }
 }
 
+/// How the run decides when price has left a position behind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Policy {
+    /// Always the same action: the baselines.
+    Fixed(FixedRule),
+    /// Compare waiting, flipping and closing each time.
+    Adaptive(AdaptiveParams),
+}
+
+/// Seconds per step of the price history the adaptive decision counts on.
+const ODDS_STEP: u64 = 600;
+
 /// Everything that defines one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -95,7 +109,7 @@ pub struct Settings {
     /// Share of the free capital put into a campaign.
     pub capital_share: f64,
     pub loss_limit: LossLimit,
-    pub rule: FixedRule,
+    pub policy: Policy,
     /// Seconds between patience decisions.
     pub decide_every: u64,
     /// Seconds between looks at where to enter or whether to move.
@@ -169,6 +183,12 @@ pub struct DecisionRow {
     pub action: String,
     pub target_lower: Option<Tick>,
     pub target_upper: Option<Tick>,
+    /// What the adaptive decision expected from each option, in whole
+    /// value tokens. Empty for a fixed rule, and for flipping when there
+    /// was nowhere nearer to move to.
+    pub expected_wait: Option<f64>,
+    pub expected_flip: Option<f64>,
+    pub expected_close: Option<f64>,
 }
 
 /// One row of the run's time series.
@@ -305,6 +325,7 @@ struct Engine<'a> {
     next_series: u64,
     halted: bool,
     scores: HashMap<(Tick, Tick, u64), ZoneScore>,
+    buckets: TickBuckets,
     out: Output,
     campaigns_opened: u32,
     fees_total: f64,
@@ -714,6 +735,114 @@ impl<'a> Engine<'a> {
         choose_zone(&candidates, |_, _| next.next().expect("one score each"))
     }
 
+    /// The adaptive patience decision for a leg that is wholly in the
+    /// other token: what waiting, flipping and closing are each expected to
+    /// leave in the value token, and the choice. Without enough history to
+    /// count odds on it waits and expects nothing.
+    fn adaptive_decision(
+        &mut self,
+        params: &AdaptiveParams,
+        leg: &Leg,
+        view: &Campaign,
+        market: &MarketView,
+        now: u64,
+    ) -> Result<(PatienceAction, Option<Expected>), SimError> {
+        let tick = market.current_tick;
+        let fee = f64::from(self.pool.fee_pips()) / 1_000_000.0;
+        let per_other = self.value_per_other();
+        let (held_value, held_other) = self.holdings(leg)?;
+        let (fee_value, fee_other) = self.split(leg.fee0, leg.fee1);
+        let other = to_f64(held_other + fee_other);
+        let kept = to_f64(held_value + fee_value);
+        let gas = |units: u64| to_f64(self.s.gas.cost(units));
+        let (open, close, swap) = (
+            self.s.gas.open_units,
+            self.s.gas.close_units,
+            self.s.gas.swap_units,
+        );
+        // The other token is worth 1.0001^ticks more of the value token
+        // for every tick the price moves towards the value side.
+        let toward_value = |ticks: f64| match self.s.value {
+            Token::One => 1.0001f64.powf(ticks),
+            Token::Zero => 1.0001f64.powf(-ticks),
+        };
+        // Ticks price has to travel to pass through a range to the value side.
+        let pass_through = |lower: Tick, upper: Tick| match self.s.value {
+            Token::One => upper - tick,
+            Token::Zero => lower - 1 - tick,
+        };
+        let swapped_at = |ticks_moved: f64| {
+            other * per_other * toward_value(ticks_moved) * (1.0 - fee) + kept - gas(close + swap)
+        };
+        let lookback = u64::from(params.lookback_days) * DAY;
+
+        // Waiting: the leg pays out its whole range in the value token,
+        // plus the fee on the pass, if price comes back through it.
+        let back = pass_through(leg.lower, leg.upper);
+        let Some(back_odds) = self.buckets.move_odds(now, lookback, back, params.horizon) else {
+            return Ok((PatienceAction::Wait, None));
+        };
+        let whole_range = to_f64(match self.s.value {
+            Token::Zero => get_amount0_delta(leg.sqrt_lower, leg.sqrt_upper, leg.liquidity, false)?,
+            Token::One => get_amount1_delta(leg.sqrt_lower, leg.sqrt_upper, leg.liquidity, false)?,
+        });
+        let wait = Gamble {
+            odds: back_odds.p_hit,
+            if_made: whole_range * (1.0 + fee) + kept + to_f64(fee_other) * per_other,
+            if_missed: swapped_at(back_odds.drift_if_missed),
+        };
+
+        // Flipping: the same token in the range next to the price.
+        let target = match FixedRule::Flip.decide(view, market) {
+            PatienceAction::Flip { target }
+                if (target.tick_lower, target.tick_upper) != (leg.lower, leg.upper) =>
+            {
+                Some(target)
+            }
+            _ => None,
+        };
+        let flip = target.as_ref().and_then(|target| {
+            let through = pass_through(target.tick_lower, target.tick_upper);
+            let odds = self
+                .buckets
+                .move_odds(now, lookback, through, params.horizon)?;
+            let middle = f64::from(target.tick_lower + target.tick_upper) / 2.0 - f64::from(tick);
+            Some(Gamble {
+                odds: odds.p_hit,
+                if_made: other * per_other * toward_value(middle) * (1.0 + fee) + kept
+                    - gas(close + open)
+                    - gas(close),
+                if_missed: swapped_at(odds.drift_if_missed) - gas(close + open),
+            })
+        });
+
+        // Closing: the swap now, plus what the freed capital can earn in
+        // the best range at hand over the same horizon.
+        let closed = swapped_at(0.0);
+        let best_yield = match self.best_entry(now) {
+            Some((lower, upper)) => self.score(lower, upper, now).passes_per_day_long * fee,
+            None => 0.0,
+        };
+        let horizon_days = params.horizon as f64 / DAY as f64;
+        let options = Options {
+            wait,
+            flip,
+            close: closed * (1.0 + best_yield * horizon_days * params.reinvest_credit),
+            position_value: closed,
+        };
+        let expected = adaptive::expected(&options);
+        let action = match adaptive::choose(&expected, options.position_value, params.switch_margin)
+        {
+            Choice::Wait => PatienceAction::Wait,
+            Choice::Close => PatienceAction::Close,
+            Choice::Flip => match target {
+                Some(target) => PatienceAction::Flip { target },
+                None => PatienceAction::Wait,
+            },
+        };
+        Ok((action, Some(expected)))
+    }
+
     fn schedule(&mut self, block: u64, action: Action) {
         self.pending = Some((block + self.s.latency_blocks.max(1), action));
     }
@@ -885,7 +1014,14 @@ impl<'a> Engine<'a> {
                 current_tick: tick,
                 tick_spacing: self.pool.tick_spacing(),
             };
-            let action = self.s.rule.decide(&self.campaign_view(&leg), &market);
+            let view = self.campaign_view(&leg);
+            let (action, expected) = match self.s.policy {
+                Policy::Fixed(rule) => (rule.decide(&view, &market), None),
+                Policy::Adaptive(params) => {
+                    self.adaptive_decision(&params, &leg, &view, &market, time)?
+                }
+            };
+            let unit = self.value_unit;
             let (name, target) = match &action {
                 PatienceAction::Wait => ("wait", None),
                 PatienceAction::Flip { target } => {
@@ -903,6 +1039,9 @@ impl<'a> Engine<'a> {
                 action: name.to_string(),
                 target_lower: target.map(|t| t.0),
                 target_upper: target.map(|t| t.1),
+                expected_wait: expected.map(|e| e.wait / unit),
+                expected_flip: expected.and_then(|e| e.flip).map(|v| v / unit),
+                expected_close: expected.map(|e| e.close / unit),
             });
             match action {
                 PatienceAction::Wait => {}
@@ -957,6 +1096,7 @@ pub fn run(
         next_series: settings.trade_from,
         halted: false,
         scores: HashMap::new(),
+        buckets: TickBuckets::new(ODDS_STEP),
         out: Output::default(),
         campaigns_opened: 0,
         fees_total: 0.0,
@@ -1028,6 +1168,7 @@ pub fn run(
         }
 
         if let PoolEvent::Swap(swap) = &event.event {
+            engine.buckets.push(event.time, swap.tick);
             engine.path.push(PathPoint {
                 time: event.time,
                 tick: swap.tick,

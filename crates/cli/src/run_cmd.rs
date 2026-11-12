@@ -16,8 +16,9 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, GasModel, Settings, Token};
+use lpbot_sim::engine::{self, GasModel, Policy, Settings, Token};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
+use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
 use serde_yaml::Value;
 
@@ -102,6 +103,54 @@ pub fn lookbacks(strategy: &StrategyConfig) -> Result<Vec<u32>> {
     });
     days.filter(|d| !d.is_empty())
         .ok_or_else(|| anyhow!("zone.lookbacks must be a list of whole days, such as [7d, 30d]"))
+}
+
+/// How a run decides when price has left a position behind: a fixed rule,
+/// or the adaptive decision with its settings. Settings left at
+/// `calibrated` take the defaults until a calibration pins them.
+pub fn policy(strategy: &StrategyConfig) -> Result<Policy> {
+    if let Some(rule) = FixedRule::from_mode(strategy.patience.mode) {
+        return Ok(Policy::Fixed(rule));
+    }
+    let extra = &strategy.patience.extra;
+    let defaults = AdaptiveParams::default();
+    // A percentage of the position's value, or `calibrated`.
+    let switch_margin = match extra.get("switch_margin") {
+        None => defaults.switch_margin,
+        Some(value) if value.as_str() == Some("calibrated") => defaults.switch_margin,
+        Some(value) => {
+            value
+                .as_f64()
+                .filter(|pct| (0.0..=100.0).contains(pct))
+                .ok_or_else(|| {
+                    anyhow!("patience.switch_margin must be a percentage, or `calibrated`")
+                })?
+                / 100.0
+        }
+    };
+    let reinvest_credit = match number(extra, &["reinvest_credit"]) {
+        None => defaults.reinvest_credit,
+        Some(credit) if (0.0..=1.0).contains(&credit) => credit,
+        Some(_) => bail!("patience.reinvest_credit must be between 0 and 1"),
+    };
+    let lookback = duration(
+        extra,
+        &["lookback"],
+        u64::from(defaults.lookback_days) * DAY,
+    )?;
+    Ok(Policy::Adaptive(AdaptiveParams {
+        horizon: duration(extra, &["horizon"], defaults.horizon)?,
+        switch_margin,
+        reinvest_credit,
+        lookback_days: (lookback / DAY).max(1) as u32,
+    }))
+}
+
+fn policy_name(policy: &Policy) -> String {
+    match policy {
+        Policy::Fixed(rule) => format!("{rule:?}").to_lowercase(),
+        Policy::Adaptive(_) => "adaptive".to_string(),
+    }
 }
 
 /// A pool's stored history for a run, loaded once per sweep.
@@ -245,7 +294,7 @@ fn load_history(
 fn settings(
     run: &ResolvedRun,
     strategy: &StrategyConfig,
-    rule: FixedRule,
+    policy: Policy,
     history: &History,
     tokens: &Tokens,
     from: Day,
@@ -337,7 +386,7 @@ fn settings(
         capital,
         capital_share: number(&strategy.extra, &["capital_share"]).unwrap_or(1.0),
         loss_limit,
-        rule,
+        policy,
         decide_every: duration(&strategy.patience.extra, &["decide_every"], 3_600)?,
         check_every: duration(&strategy.extra, &["entry", "check_every"], 3_600)?,
         latency_blocks: number(&config.extra, &["sim", "latency_blocks"]).map_or(1, |v| v as u64),
@@ -369,10 +418,10 @@ fn window(config: &Config) -> Result<(Day, Day)> {
 pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Result<()> {
     let mut histories: HashMap<(Address, Day, Day), Rc<History>> = HashMap::new();
     let mut pools: HashMap<(String, Day), (Address, Vec<PoolRankRow>)> = HashMap::new();
-    let (mut done, mut skipped) = (0, 0);
+    let mut done = 0;
 
     println!(
-        "{:<44} {:<16} {:>6} {:>9} {:>9} {:>9} {:>6} {:>7} {:>7}",
+        "{:<44} {:<16} {:>8} {:>9} {:>9} {:>9} {:>6} {:>7} {:>7}",
         "run", "pool", "rule", "result %", "fees", "gas", "camps", "passes", "max dd"
     );
     for run in runs {
@@ -387,14 +436,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         if strategy.kind != "zone_round_trip" {
             bail!("strategy kind `{}` is not built yet", strategy.kind);
         }
-        let Some(rule) = FixedRule::from_mode(strategy.patience.mode) else {
-            println!(
-                "{:<44} skipped: the adaptive patience decision is not built yet",
-                run.run_id
-            );
-            skipped += 1;
-            continue;
-        };
+        let policy = policy(strategy)?;
         let (from, to) = window(config)?;
         let (_, tokens) = chain_addresses(config, chain)?;
 
@@ -415,7 +457,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             }
         };
 
-        let (settings, pool_name) = settings(run, strategy, rule, &history, &tokens, from, to)?;
+        let (settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
         let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
             .with_context(|| format!("run {} failed", run.run_id))?;
 
@@ -432,7 +474,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             loss_limit_pct: config.run.loss_limit_pct.unwrap_or_default(),
             autonomy: format!("{:?}", config.run.autonomy).to_lowercase(),
             strategy: strategy.id.clone(),
-            patience: format!("{rule:?}").to_lowercase(),
+            patience: policy_name(&policy),
             pool: pool_name.clone(),
             value_token: strategy.value_token.clone(),
             fee_pips: history.snapshot.state.fee_pips,
@@ -449,7 +491,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
 
         let s = &out.summary;
         println!(
-            "{:<44} {:<16} {:>6} {:>9.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
+            "{:<44} {:<16} {:>8} {:>9.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
             run.run_id,
             pool_name,
             info.patience,
@@ -474,11 +516,299 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         results.display(),
         lpbot_sim::RESULT_TABLES.len()
     );
-    if skipped > 0 {
-        println!("{skipped} run(s) skipped: the adaptive patience decision is phase 2");
-    }
-    if done == 0 && skipped == 0 {
+    if done == 0 {
         bail!("the experiment has no runs");
+    }
+    Ok(())
+}
+
+/// The settings the calibrator tries for the adaptive decision.
+pub fn calibration_grid(lookback_days: u32) -> Vec<AdaptiveParams> {
+    let mut grid = Vec::new();
+    for horizon in [6 * 3_600, 24 * 3_600, 72 * 3_600] {
+        for switch_margin in [0.001, 0.003, 0.01] {
+            for reinvest_credit in [0.0, 0.25] {
+                grid.push(AdaptiveParams {
+                    horizon,
+                    switch_margin,
+                    reinvest_credit,
+                    lookback_days,
+                });
+            }
+        }
+    }
+    grid
+}
+
+/// One step of a walk-forward calibration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fold {
+    pub fit_from: Day,
+    pub score_from: Day,
+    pub score_to: Day,
+    /// The settings that did best on the fit window.
+    pub chosen: AdaptiveParams,
+    /// Result on the fit window with those settings, in percent.
+    pub fit_result: f64,
+    /// Results on the score window, in percent: the adaptive decision
+    /// with the chosen settings, then always wait, flip and close.
+    pub adaptive: f64,
+    pub fixed: [f64; 3],
+}
+
+const FIXED: [(FixedRule, &str); 3] = [
+    (FixedRule::Wait, "wait"),
+    (FixedRule::Flip, "flip"),
+    (FixedRule::Close, "close"),
+];
+
+/// The windows of a walk-forward calibration: fit on `fit_days`, score on
+/// the `score_days` that follow, then move both on by `score_days`.
+pub fn fold_windows(from: Day, to: Day, fit_days: u32, score_days: u32) -> Vec<(Day, Day, Day)> {
+    let mut windows = Vec::new();
+    if fit_days == 0 || score_days == 0 {
+        return windows;
+    }
+    let mut fit_from = from;
+    loop {
+        let score_from = Day(fit_from.0 + fit_days);
+        let score_to = Day(score_from.0 + score_days - 1);
+        if score_to > to {
+            return windows;
+        }
+        windows.push((fit_from, score_from, score_to));
+        fit_from = Day(fit_from.0 + score_days);
+    }
+}
+
+/// What a calibration concluded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// Sum of the score-window results, in percent.
+    pub adaptive_total: f64,
+    pub fixed_totals: [f64; 3],
+    /// `adaptive`, or the fixed rule that ships instead.
+    pub ships: &'static str,
+    /// The settings fitted on the newest window.
+    pub latest: Option<AdaptiveParams>,
+}
+
+/// The adaptive decision ships only if it beat every fixed rule out of
+/// sample, summed over the folds. Otherwise the best fixed rule ships.
+pub fn verdict(folds: &[Fold]) -> Verdict {
+    let adaptive_total: f64 = folds.iter().map(|f| f.adaptive).sum();
+    let mut fixed_totals = [0.0; 3];
+    for fold in folds {
+        for (total, result) in fixed_totals.iter_mut().zip(fold.fixed) {
+            *total += result;
+        }
+    }
+    let (best, best_total) = FIXED.iter().zip(fixed_totals).fold(
+        ("wait", f64::NEG_INFINITY),
+        |best, ((_, name), total)| {
+            if total > best.1 {
+                (name, total)
+            } else {
+                best
+            }
+        },
+    );
+    Verdict {
+        adaptive_total,
+        fixed_totals,
+        ships: if !folds.is_empty() && adaptive_total > best_total {
+            "adaptive"
+        } else {
+            best
+        },
+        latest: folds.last().map(|f| f.chosen),
+    }
+}
+
+/// Walk-forward calibration of the adaptive decision for every adaptive
+/// run of an experiment: fit its settings on one window, score them on
+/// the next against the three fixed rules, and say which one ships.
+pub fn calibrate(
+    runs: &[ResolvedRun],
+    root: &Path,
+    results: &Path,
+    chain: &str,
+    fit_days: Option<u32>,
+    score_days: Option<u32>,
+) -> Result<()> {
+    let mut calibrated = 0;
+    for run in runs {
+        let config = &run.config;
+        let strategy = config
+            .strategies
+            .first()
+            .ok_or_else(|| anyhow!("the run has no strategy"))?;
+        let Policy::Adaptive(base) = policy(strategy)? else {
+            continue;
+        };
+        let window_days = |key: &str, default: u64| -> Result<u32> {
+            Ok(
+                (duration(&config.extra, &["calibration", key], default * DAY)? / DAY).max(1)
+                    as u32,
+            )
+        };
+        let fit_days = match fit_days {
+            Some(days) => days,
+            None => window_days("fit_window", 90)?,
+        };
+        let score_days = match score_days {
+            Some(days) => days,
+            None => window_days("score_window", 14)?,
+        };
+
+        let (from, to) = window(config)?;
+        let windows = fold_windows(from, to, fit_days, score_days);
+        if windows.is_empty() {
+            bail!(
+                "the window {from} to {to} is shorter than one fit window of {fit_days} days plus \
+                 one score window of {score_days} days; widen it or pass --fit and --score"
+            );
+        }
+        let (_, tokens) = chain_addresses(config, chain)?;
+        let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
+        let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let history = load_history(root, chain, pool, from, to, longest)?;
+        let (base_settings, pool_name) = settings(
+            run,
+            strategy,
+            Policy::Adaptive(base),
+            &history,
+            &tokens,
+            from,
+            to,
+        )?;
+        let result = |policy: Policy, first: Day, last: Day| -> Result<f64> {
+            let settings = Settings {
+                policy,
+                trade_from: first.start(),
+                trade_to: last.end(),
+                ..base_settings.clone()
+            };
+            Ok(
+                engine::run(history.snapshot.state.clone(), &history.events, &settings)?
+                    .summary
+                    .result_pct,
+            )
+        };
+
+        println!(
+            "{}: {pool_name}, width {} ticks, fit {fit_days} days, score {score_days} days",
+            run.run_id, base_settings.width
+        );
+        println!(
+            "  {:<24} {:>8} {:>8} {:>7} {:>9} {:>9} {:>8} {:>8} {:>8}",
+            "score window",
+            "horizon",
+            "margin",
+            "credit",
+            "fit %",
+            "adaptive",
+            "wait",
+            "flip",
+            "close"
+        );
+        let mut folds = Vec::new();
+        for (fit_from, score_from, score_to) in windows {
+            let fit_to = Day(score_from.0 - 1);
+            let mut best: Option<(AdaptiveParams, f64)> = None;
+            for params in calibration_grid(base.lookback_days) {
+                let fitted = result(Policy::Adaptive(params), fit_from, fit_to)?;
+                if best.is_none_or(|(_, top)| fitted > top) {
+                    best = Some((params, fitted));
+                }
+            }
+            let (chosen, fit_result) = best.expect("the grid is not empty");
+            let mut fixed = [0.0; 3];
+            for (slot, (rule, _)) in fixed.iter_mut().zip(FIXED) {
+                *slot = result(Policy::Fixed(rule), score_from, score_to)?;
+            }
+            let fold = Fold {
+                fit_from,
+                score_from,
+                score_to,
+                chosen,
+                fit_result,
+                adaptive: result(Policy::Adaptive(chosen), score_from, score_to)?,
+                fixed,
+            };
+            println!(
+                "  {:<24} {:>7}h {:>7.1}% {:>7.2} {:>9.3} {:>9.3} {:>8.3} {:>8.3} {:>8.3}",
+                format!("{score_from} to {score_to}"),
+                chosen.horizon / 3_600,
+                chosen.switch_margin * 100.0,
+                chosen.reinvest_credit,
+                fold.fit_result,
+                fold.adaptive,
+                fold.fixed[0],
+                fold.fixed[1],
+                fold.fixed[2]
+            );
+            folds.push(fold);
+        }
+
+        let verdict = verdict(&folds);
+        println!(
+            "  {:<24} {:>8} {:>8} {:>7} {:>9} {:>9.3} {:>8.3} {:>8.3} {:>8.3}",
+            "out of sample, summed",
+            "",
+            "",
+            "",
+            "",
+            verdict.adaptive_total,
+            verdict.fixed_totals[0],
+            verdict.fixed_totals[1],
+            verdict.fixed_totals[2]
+        );
+        let path = results
+            .join("calibration")
+            .join(format!("{}.yml", run.run_id));
+        let mut report = format!(
+            "# Walk-forward calibration of the adaptive patience decision.\nrun: {}\npool: {pool_name}\nwidth_ticks: {}\nfit_days: {fit_days}\nscore_days: {score_days}\nships: {}\nout_of_sample_pct: {{ adaptive: {:.4}, wait: {:.4}, flip: {:.4}, close: {:.4} }}\n",
+            run.run_id,
+            base_settings.width,
+            verdict.ships,
+            verdict.adaptive_total,
+            verdict.fixed_totals[0],
+            verdict.fixed_totals[1],
+            verdict.fixed_totals[2]
+        );
+        if verdict.ships == "adaptive" {
+            let p = verdict.latest.expect("a verdict for adaptive has folds");
+            println!(
+                "  the adaptive decision beat all three fixed rules out of sample: it ships, with \
+                 the settings fitted on the newest window"
+            );
+            report.push_str(&format!(
+                "patience: {{ mode: adaptive, horizon: {}h, switch_margin: {}, reinvest_credit: {}, lookback: {}d }}\n",
+                p.horizon / 3_600,
+                p.switch_margin * 100.0,
+                p.reinvest_credit,
+                p.lookback_days
+            ));
+        } else {
+            println!(
+                "  the adaptive decision did not beat always-{} out of sample: the fixed rule ships",
+                verdict.ships
+            );
+            report.push_str(&format!("patience: {{ mode: {} }}\n", verdict.ships));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
+        std::fs::write(&path, report)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("  written to {}", path.display());
+        println!();
+        calibrated += 1;
+    }
+    if calibrated == 0 {
+        bail!("the experiment has no run with `patience.mode: adaptive` to calibrate");
     }
     Ok(())
 }
@@ -504,11 +834,11 @@ mod tests {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
         let runs = resolve_experiment(
-            &repo.join("experiments/demo-fixed-rules.yml"),
+            &repo.join("experiments/demo-patience.yml"),
             &RunOverrides::default(),
         )
         .unwrap();
-        assert_eq!(runs.len(), 9);
+        assert_eq!(runs.len(), 12);
         let (_, tokens) = chain_addresses(&runs[0].config, "ethereum").unwrap();
         crate::demo_cmd::run(&lake, "ethereum", &tokens, 30, 1).unwrap();
 
@@ -550,6 +880,94 @@ mod tests {
         let error = run(&[late], &lake, &results, "ethereum").unwrap_err();
         assert!(format!("{error:#}").contains("lpbot backfill"), "{error:#}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_forward_windows_never_score_on_what_they_fitted() {
+        let day = |text: &str| text.parse::<Day>().unwrap();
+        let windows = fold_windows(day("2026-01-08"), day("2026-01-30"), 8, 5);
+        let text: Vec<String> = windows
+            .iter()
+            .map(|(a, b, c)| format!("{a} {b} {c}"))
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "2026-01-08 2026-01-16 2026-01-20",
+                "2026-01-13 2026-01-21 2026-01-25",
+                "2026-01-18 2026-01-26 2026-01-30",
+            ]
+        );
+        for (fit_from, score_from, score_to) in &windows {
+            assert!(fit_from < score_from && score_from <= score_to);
+        }
+        // Too short for a single fold, and windows of no length.
+        assert!(fold_windows(day("2026-01-08"), day("2026-01-19"), 8, 5).is_empty());
+        assert!(fold_windows(day("2026-01-08"), day("2026-01-30"), 0, 5).is_empty());
+        assert!(fold_windows(day("2026-01-08"), day("2026-01-30"), 8, 0).is_empty());
+    }
+
+    #[test]
+    fn the_adaptive_decision_ships_only_if_it_beats_every_fixed_rule() {
+        let fold = |adaptive: f64, fixed: [f64; 3]| Fold {
+            fit_from: Day(0),
+            score_from: Day(8),
+            score_to: Day(12),
+            chosen: AdaptiveParams::default(),
+            fit_result: 0.0,
+            adaptive,
+            fixed,
+        };
+        // Ahead in total, even though it lost one fold.
+        let won = verdict(&[fold(1.0, [0.5, -1.0, -2.0]), fold(0.2, [0.4, 0.0, 0.1])]);
+        assert_eq!(won.ships, "adaptive");
+        assert!((won.adaptive_total - 1.2).abs() < 1e-12);
+        assert_eq!(won.latest, Some(AdaptiveParams::default()));
+        // Behind always-close in total: that rule ships.
+        let lost = verdict(&[fold(1.0, [0.5, -1.0, 0.9]), fold(0.2, [0.4, 0.0, 0.5])]);
+        assert_eq!(lost.ships, "close");
+        // A tie is not a win, and no folds prove nothing.
+        assert_eq!(verdict(&[fold(1.0, [1.0, 0.0, 0.0])]).ships, "wait");
+        assert_eq!(verdict(&[]).ships, "wait");
+        assert_eq!(calibration_grid(30).len(), 18);
+    }
+
+    #[test]
+    fn the_patience_policy_is_a_fixed_rule_or_the_adaptive_settings() {
+        let fixed = strategy(&format!("{BASE}patience: {{ mode: flip }}\n"));
+        assert_eq!(policy(&fixed).unwrap(), Policy::Fixed(FixedRule::Flip));
+
+        // The base config's `calibrated` margin means the default for now.
+        let base = strategy(&format!(
+            "{BASE}patience: {{ mode: adaptive, decide_every: 1h, switch_margin: calibrated }}\n"
+        ));
+        assert_eq!(
+            policy(&base).unwrap(),
+            Policy::Adaptive(AdaptiveParams::default())
+        );
+        let set = strategy(&format!(
+            "{BASE}patience: {{ mode: adaptive, switch_margin: 0.5, horizon: 6h, reinvest_credit: 0, lookback: 14d }}\n"
+        ));
+        assert_eq!(
+            policy(&set).unwrap(),
+            Policy::Adaptive(AdaptiveParams {
+                horizon: 6 * 3_600,
+                switch_margin: 0.005,
+                reinvest_credit: 0.0,
+                lookback_days: 14,
+            })
+        );
+        for bad in [
+            "switch_margin: tight",
+            "switch_margin: -1",
+            "reinvest_credit: 2",
+            "horizon: soon",
+        ] {
+            let s = strategy(&format!("{BASE}patience: {{ mode: adaptive, {bad} }}\n"));
+            assert!(policy(&s).is_err(), "{bad}");
+        }
+        assert_eq!(policy_name(&policy(&base).unwrap()), "adaptive");
+        assert_eq!(policy_name(&policy(&fixed).unwrap()), "flip");
     }
 
     #[test]

@@ -60,12 +60,12 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 In this order. Each item lists the gate it must pass.
 
-Status: all seven items are written and unit tested, and `experiments/demo-fixed-rules.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine:
+Status: all seven items are written and unit tested, and `experiments/demo-patience.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine:
 
 - Items 1 and 2: `lpbot verify-pool`.
 - Item 3: `lpbot backfill --verify`; the row-count check against an independent source is still to do by hand.
 - Item 6: `lpbot verify-fees <pool>` on a busy pool with a few months stored. It follows every position that starts inside the stored history and compares what it collected with the replica's fee growth inside its range (`lpbot_data::fee_check`). This checks the replica's fee accounting, which the engine's fee share is built on.
-- Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history. The adaptive runs of that file are skipped until phase 2.
+- Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history.
 
 The viewer exists too: `lpbot load-results` (`lpbot_sim::loader`) creates the Postgres tables from the Parquet files and replaces a run's rows on reload; the dashboards are in `deploy/grafana/dashboards/`. Their SQL was run against a real Postgres loaded with demo runs. They were never opened in Grafana, so the panel JSON is unverified.
 
@@ -86,4 +86,18 @@ Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range 
 7. **`lpbot run`** wired to the replay engine for `mode: backtest`, with the three fixed patience rules.
    - Gate: `experiments/width-and-patience-eth.yml` runs end to end for the fixed rules and writes all six tables.
 
-The adaptive patience decision and the calibrator are phase 2 and build on the tables from items 5 and 6.
+## Phase 2: where it stands
+
+A first adaptive patience decision and a walk-forward calibrator exist and run on simulated history.
+
+- The comparison is in `lpbot_strategy::adaptive`; the figures it compares are worked out in `lpbot_sim::engine` (`adaptive_decision`); the odds come from `lpbot_data::odds` (how often price made a move of that size within the horizon, counted over the lookback).
+- `lpbot calibrate` fits horizon, margin and reinvest credit on one window and scores on the next against the three fixed rules. The adaptive decision ships only if it wins out of sample, summed over the folds; a tie ships the fixed rule.
+
+Known gaps, in the order they matter:
+
+1. The odds are unconditional. They do not depend on how far price already is from the range, how long it has been away, or the long-horizon state. Condition them before trusting the decision on real data.
+2. Decisions are not scored afterwards against the two options not taken (the `decisions` table has the expectations, not the outcomes).
+3. The calibrator fits the patience settings only. Width and fee tier are compared by sweeping them; zone-ranking weights and entry shape are not searched.
+4. A run trades one pool with one campaign at a time; `allocator` settings in the config are not used yet.
+
+Nothing in phase 2 has seen real data. Expect the defaults to be wrong.

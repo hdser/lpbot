@@ -7,7 +7,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up down restart status logs build test check demo history rank backtest load
+.PHONY: up down restart status logs build test check demo history rank backtest calibrate load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -36,7 +36,8 @@ build:
 ## Try the whole pipeline on a simulated pool. Needs no node.
 demo:
 	cargo run --release -p lpbot -- demo-data
-	cargo run --release -p lpbot -- run experiments/demo-fixed-rules.yml --data-dir data/demo
+	cargo run --release -p lpbot -- run experiments/demo-patience.yml --data-dir data/demo
+	cargo run --release -p lpbot -- calibrate experiments/demo-patience.yml --data-dir data/demo --fit 8 --score 5
 
 ## Once the node is synced: store pool history from FROM on, and check it
 ## against the chain. Safe to run again; it only fetches what is new.
@@ -52,6 +53,11 @@ rank:
 EXPERIMENT ?= experiments/width-and-patience-eth.yml
 backtest:
 	cargo run --release -p lpbot -- run $(EXPERIMENT)
+
+## Fit the adaptive patience decision walk-forward and score it against the
+## fixed rules, for the same experiment file.
+calibrate:
+	cargo run --release -p lpbot -- calibrate $(EXPERIMENT)
 
 ## Load the result tables under RESULTS into Postgres, for the dashboards.
 ## Safe to run again: a run that is loaded twice replaces itself.

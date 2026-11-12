@@ -275,9 +275,18 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                     int_or_empty(d.iter().map(|r| r.target_upper.map(i64::from))),
                 ),
                 // Filled by the adaptive decision; a fixed rule expects nothing.
-                ("expected_wait", float_or_empty(d.iter().map(|_| None))),
-                ("expected_flip", float_or_empty(d.iter().map(|_| None))),
-                ("expected_close", float_or_empty(d.iter().map(|_| None))),
+                (
+                    "expected_wait",
+                    float_or_empty(d.iter().map(|r| r.expected_wait)),
+                ),
+                (
+                    "expected_flip",
+                    float_or_empty(d.iter().map(|r| r.expected_flip)),
+                ),
+                (
+                    "expected_close",
+                    float_or_empty(d.iter().map(|r| r.expected_close)),
+                ),
             ],
         ),
         table(
@@ -559,6 +568,9 @@ mod tests {
                     action: "wait".into(),
                     target_lower: None,
                     target_upper: None,
+                    expected_wait: None,
+                    expected_flip: None,
+                    expected_close: None,
                 },
                 DecisionRow {
                     campaign: 1,
@@ -570,6 +582,9 @@ mod tests {
                     action: "flip".into(),
                     target_lower: Some(-40),
                     target_upper: Some(-20),
+                    expected_wait: Some(4.9),
+                    expected_flip: Some(4.95),
+                    expected_close: Some(4.92),
                 },
             ],
             series: vec![SeriesRow {
@@ -661,7 +676,7 @@ mod tests {
         );
         assert_eq!(
             decisions.column("expected_wait"),
-            Some(&Column::Float(vec![None, None]))
+            Some(&Column::Float(vec![None, Some(4.9)]))
         );
         // A table without rows is still a file with its columns.
         let rank = read_table(&paths[4]).unwrap();
