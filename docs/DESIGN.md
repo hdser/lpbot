@@ -301,7 +301,7 @@ All of these are the fixed starting point the calibrator has to beat, not tuned 
 
 **Validation, in order of importance.**
 
-- Reproduce the fees actually collected by at least 20 real historical positions in the pool, to within 0.1%.
+- Reproduce the fees actually collected by at least 20 real historical positions in the pool, to within 0.1%. `lpbot verify-fees` does this from the stored logs: it follows every position that starts empty inside the history, adds up what the replica's fee growth says the pool owed it, and compares that with its `Collect` events.
 - Differential-test the math port against the deployed pool on a local fork (revm or anvil) with randomized swaps and mints.
 - Walk-forward only: fit parameters on one window, score on the next. Never report in-sample results.
 - Choose pools by a rule fixed in advance, not by looking at which pools did well.
@@ -627,6 +627,7 @@ risk:
 | Command | Does |
 | --- | --- |
 | `lpbot backfill --pool <address> --from <date>` | Pulls history into the Parquet lake: one file per pool and day, plus a snapshot of the pool before the first day. `--verify` replays what is stored and compares it with the pool on the chain |
+| `lpbot verify-fees <address>` | Compares the replica's fees with what real positions in the stored history collected |
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |

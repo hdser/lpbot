@@ -57,6 +57,14 @@ make history
 
 That is `lpbot backfill --from 2026-02-01 --verify`: every universe pool from 1 February on, under `lake` in your `DATA_DIR`, as one Parquet file per pool and day plus a snapshot of each pool before the first day. `make history FROM=2026-06-01` starts later; `--pool` and `--data-dir` on the command itself narrow it further. The example experiment starts on 1 May and looks back 90 days, which is where 1 February comes from. `--verify` replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state months back, so this step needs the archive node; on a pruned node, start with a recent date.
 
+Check the fee accounting on the busiest pool you stored:
+
+```sh
+cargo run --release -p lpbot -- verify-fees <pool address>
+```
+
+It follows every position that was opened inside the stored history, works out from the replica what the pool owed it, and compares that with what its owner collected. It passes when at least 20 emptied positions match and none contradicts the replica.
+
 Rank the universe and look at the zone map of a pool from the top of the ranking:
 
 ```sh

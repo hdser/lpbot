@@ -10,15 +10,16 @@ Backtests only so far. The bot reads pools from a node and replays their history
 
 | Works today | Not built yet |
 | --- | --- |
-| One-command setup of the node and services (`make up`) | Loading the result tables into Postgres |
-| Experiment files: base config, overrides, sweeps, config hashing | Check of simulated fees against real positions |
+| One-command setup of the node and services (`make up`) | Paper mode |
+| Experiment files: base config, overrides, sweeps, config hashing | Loading the result tables into Postgres; viewer dashboards |
 | Run-input checks (capital and loss limit are required) | Adaptive patience decision and calibrator |
 | Uniswap v3 pool math, checked against the reference test vectors | Live subscriptions, reorg handling |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Executor, Safe roles policy |
-| Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Viewer dashboards |
+| Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | |
 | `lpbot pools`, `lpbot verify-pool` and `lpbot rank` (pools ranked by implied volatility) | |
 | Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
+| Fee check: the replica's fees against what real positions collected (`lpbot verify-fees`) | |
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
 | Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
 | `lpbot run`: backtests of the zone round trip with the three fixed patience rules, written as the six result tables | |
@@ -63,6 +64,9 @@ cargo run --release -p lpbot -- verify-pool <pool address from the list above>
 # Store every universe pool's history from February on under data/lake, then replay it
 # against the chain (the example experiment starts in May and looks back 90 days)
 make history            # or: cargo run --release -p lpbot -- backfill --from 2026-02-01 --verify
+
+# Compare the replica's fees with what real positions in a pool collected
+cargo run --release -p lpbot -- verify-fees <pool address>
 
 # The stored pools ranked by implied volatility over the last 7 days
 cargo run --release -p lpbot -- rank

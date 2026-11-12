@@ -10,6 +10,7 @@
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
+mod fees_cmd;
 mod rank_cmd;
 mod run_cmd;
 mod zones_cmd;
@@ -49,10 +50,27 @@ enum Command {
     Rank(RankArgs),
     /// Store pool history from the node in the local data folder.
     Backfill(BackfillArgs),
+    /// Compare the replica's fees with what real positions collected.
+    VerifyFees(VerifyFeesArgs),
     /// Write a simulated pool history, to try the pipeline without a node.
     DemoData(DemoArgs),
     /// Show a pool's zone map: how often price crosses each candidate range.
     Zones(ZonesArgs),
+}
+
+#[derive(Args)]
+struct VerifyFeesArgs {
+    /// Address of a pool with stored history.
+    pool: String,
+    /// Which chain the stored history belongs to.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Emptied and fully collected positions needed to pass.
+    #[arg(long, default_value_t = 20)]
+    positions: usize,
 }
 
 #[derive(Args)]
@@ -297,6 +315,19 @@ fn real_main() -> Result<()> {
                     &config,
                     args.days,
                 )
+            }
+        }
+        Command::VerifyFees(args) => {
+            let passed = fees_cmd::run(
+                &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                &args.chain,
+                chain_cmd::checked_address("pool", &args.pool)?,
+                args.positions,
+            )?;
+            if passed {
+                Ok(())
+            } else {
+                bail!("the fee check did not pass")
             }
         }
         Command::DemoData(args) => {
