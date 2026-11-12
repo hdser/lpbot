@@ -35,3 +35,4 @@ lpbot-sim = { path = "crates/sim" }
 lpbot-strategy = { path = "crates/strategy" }
 lpbot-risk = { path = "crates/risk" }
 lpbot-exec = { path = "crates/exec" }
+alloy-primitives = { version = "1", default-features = false, features = ["std"] }

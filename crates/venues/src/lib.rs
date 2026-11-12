@@ -8,6 +8,8 @@
 //! integer math (TickMath, SqrtPriceMath, SwapMath, fee growth), checked
 //! against the deployed pool on a mainnet fork.
 
+pub mod uniswap_v3;
+
 use lpbot_core::{PoolId, Tick};
 
 /// Static facts about a pool.
