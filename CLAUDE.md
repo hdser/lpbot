@@ -60,6 +60,8 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 In this order. Each item lists the gate it must pass.
 
+Status: items 1 and 2 are written and unit tested, including an end-to-end run against a simulated node. Their gates against a real pool are still open: run `lpbot verify-pool` on the owner's machine. The log fetching and pool discovery parts of item 3 exist in `crates/chain`; the Parquet sink does not.
+
 1. **Uniswap v3 math** in `crates/venues` (`uniswap_v3::math`): TickMath, FullMath, SqrtPriceMath, SwapMath, LiquidityAmounts, fee growth inside a range.
    - Gate: unit tests from the reference vectors in the Uniswap v3 test suite pass; a differential test against the deployed pool on a mainnet fork agrees exactly on randomized swaps and mints.
 2. **Pool-state replica** in `crates/venues`: rebuild `slot0`, active liquidity, the tick map and fee growth from Initialize, Mint, Burn, Swap and Collect events, with snapshots and an undo log for reorgs.

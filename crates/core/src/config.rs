@@ -102,6 +102,41 @@ pub struct StrategyConfig {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// How to reach one chain's nodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcConfig {
+    /// Your own node. Every read that feeds a decision goes here.
+    pub local: String,
+    /// Public endpoints, for cross-checks, exit-only fallback and backfill.
+    #[serde(default)]
+    pub public: Vec<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A token the bot may hold on a chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenConfig {
+    pub address: String,
+    pub decimals: u8,
+}
+
+/// One chain: how to reach it and where its contracts are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChainConfig {
+    /// Expected chain id of the endpoints; a mismatch stops the command.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    pub rpc: RpcConfig,
+    #[serde(default)]
+    pub uniswap_v3_factory: Option<String>,
+    /// Token symbol to address and decimals.
+    #[serde(default)]
+    pub tokens: BTreeMap<String, TokenConfig>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// A fully resolved run configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -110,6 +145,8 @@ pub struct Config {
     pub window: Option<Window>,
     #[serde(default)]
     pub run: RunInputs,
+    #[serde(default)]
+    pub chains: BTreeMap<String, ChainConfig>,
     pub universe: Universe,
     pub strategies: Vec<StrategyConfig>,
     #[serde(flatten)]
@@ -132,6 +169,8 @@ pub enum ConfigError {
     NoStrategy,
     #[error("strategy `{strategy}` uses value token `{token}`, which is not in universe.tokens")]
     ValueTokenNotInUniverse { strategy: String, token: String },
+    #[error("chain `{chain}` has no address for universe token `{token}`")]
+    TokenWithoutAddress { chain: String, token: String },
 }
 
 impl Config {
@@ -172,6 +211,17 @@ impl Config {
                     strategy: s.id.clone(),
                     token: s.value_token.clone(),
                 });
+            }
+        }
+
+        for (name, chain) in &self.chains {
+            for token in &self.universe.tokens {
+                if !chain.tokens.is_empty() && !chain.tokens.contains_key(token) {
+                    errors.push(ConfigError::TokenWithoutAddress {
+                        chain: name.clone(),
+                        token: token.clone(),
+                    });
+                }
             }
         }
 
@@ -265,6 +315,33 @@ risk: { max_actions_per_day: 12 }
             c.validate().unwrap_err()[0],
             ConfigError::BadWindow { .. }
         ));
+    }
+
+    #[test]
+    fn every_universe_token_needs_an_address_on_a_chain_that_lists_tokens() {
+        let mut c = base();
+        c.chains = serde_yaml::from_str(
+            r#"
+ethereum:
+  chain_id: 1
+  rpc: { local: "http://127.0.0.1:8545", public: ["https://example.org"] }
+  uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+  tokens:
+    WETH: { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", decimals: 18 }
+    USDC: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 }
+    USDT: { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.chains["ethereum"].chain_id, Some(1));
+        assert_eq!(c.chains["ethereum"].tokens["USDC"].decimals, 6);
+        assert_eq!(
+            c.validate().unwrap_err(),
+            vec![ConfigError::TokenWithoutAddress {
+                chain: "ethereum".into(),
+                token: "WBTC".into()
+            }]
+        );
     }
 
     #[test]

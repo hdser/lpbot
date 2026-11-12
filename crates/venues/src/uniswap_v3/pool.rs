@@ -141,6 +141,22 @@ pub enum Replay {
     Tolerant,
 }
 
+/// Pool state as read from the chain at one block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    pub fee_pips: u32,
+    pub tick_spacing: i32,
+    pub sqrt_price_x96: U256,
+    pub tick: i32,
+    pub liquidity: u128,
+    pub fee_growth_global0: U256,
+    pub fee_growth_global1: U256,
+    pub fee_protocol0: u8,
+    pub fee_protocol1: u8,
+    /// Every initialized tick with its state.
+    pub ticks: Vec<(i32, TickInfo)>,
+}
+
 /// The pool-state replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
@@ -178,6 +194,115 @@ impl Pool {
             fee_protocol1: 0,
             ticks: BTreeMap::new(),
         }
+    }
+
+    /// Rebuilds a pool from state read off the chain at one block.
+    pub fn from_snapshot(snapshot: PoolSnapshot) -> Self {
+        let mut pool = Self::new(snapshot.fee_pips, snapshot.tick_spacing);
+        pool.initialized = true;
+        pool.sqrt_price_x96 = snapshot.sqrt_price_x96;
+        pool.tick = snapshot.tick;
+        pool.liquidity = snapshot.liquidity;
+        pool.fee_growth_global0 = snapshot.fee_growth_global0;
+        pool.fee_growth_global1 = snapshot.fee_growth_global1;
+        pool.fee_protocol0 = snapshot.fee_protocol0;
+        pool.fee_protocol1 = snapshot.fee_protocol1;
+        pool.ticks = snapshot
+            .ticks
+            .into_iter()
+            .filter(|(_, info)| info.liquidity_gross > 0)
+            .map(|(tick, info)| {
+                (
+                    tick,
+                    TickInfo {
+                        watchers: 0,
+                        ..info
+                    },
+                )
+            })
+            .collect();
+        pool
+    }
+
+    /// Lists every way this pool differs from another, in plain words.
+    /// Watched ticks without liquidity are ignored. Empty means identical.
+    pub fn differences(&self, other: &Pool) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut field = |name: &str, a: String, b: String| {
+            if a != b {
+                out.push(format!("{name}: {a} vs {b}"));
+            }
+        };
+        field("fee", self.fee_pips.to_string(), other.fee_pips.to_string());
+        field(
+            "tick spacing",
+            self.tick_spacing.to_string(),
+            other.tick_spacing.to_string(),
+        );
+        field(
+            "sqrt price",
+            self.sqrt_price_x96.to_string(),
+            other.sqrt_price_x96.to_string(),
+        );
+        field("tick", self.tick.to_string(), other.tick.to_string());
+        field(
+            "liquidity",
+            self.liquidity.to_string(),
+            other.liquidity.to_string(),
+        );
+        field(
+            "fee growth global 0",
+            self.fee_growth_global0.to_string(),
+            other.fee_growth_global0.to_string(),
+        );
+        field(
+            "fee growth global 1",
+            self.fee_growth_global1.to_string(),
+            other.fee_growth_global1.to_string(),
+        );
+        field(
+            "protocol fee",
+            format!("{}/{}", self.fee_protocol0, self.fee_protocol1),
+            format!("{}/{}", other.fee_protocol0, other.fee_protocol1),
+        );
+
+        let with_liquidity = |pool: &Pool| -> BTreeMap<i32, TickInfo> {
+            pool.ticks
+                .iter()
+                .filter(|(_, info)| info.liquidity_gross > 0)
+                .map(|(tick, info)| {
+                    (
+                        *tick,
+                        TickInfo {
+                            watchers: 0,
+                            ..*info
+                        },
+                    )
+                })
+                .collect()
+        };
+        let (mine, theirs) = (with_liquidity(self), with_liquidity(other));
+        let all_ticks: std::collections::BTreeSet<i32> =
+            mine.keys().chain(theirs.keys()).copied().collect();
+        for tick in all_ticks {
+            match (mine.get(&tick), theirs.get(&tick)) {
+                (Some(a), Some(b)) if a != b => out.push(format!(
+                    "tick {tick}: gross {} net {} outside {}/{} vs gross {} net {} outside {}/{}",
+                    a.liquidity_gross,
+                    a.liquidity_net,
+                    a.fee_growth_outside0,
+                    a.fee_growth_outside1,
+                    b.liquidity_gross,
+                    b.liquidity_net,
+                    b.fee_growth_outside0,
+                    b.fee_growth_outside1
+                )),
+                (Some(_), None) => out.push(format!("tick {tick}: only in the first pool")),
+                (None, Some(_)) => out.push(format!("tick {tick}: only in the second pool")),
+                _ => {}
+            }
+        }
+        out
     }
 
     // --- read access ------------------------------------------------------

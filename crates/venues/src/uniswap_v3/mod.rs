@@ -11,6 +11,7 @@
 //! change date). This port is a derived work. That has no effect on private
 //! use, and it matters if this code is ever distributed.
 
+pub mod events;
 pub mod full_math;
 pub mod liquidity_amounts;
 pub mod pool;

@@ -8,4 +8,9 @@ publish.workspace = true
 
 [dependencies]
 lpbot-core.workspace = true
-anyhow.workspace = true
+lpbot-venues.workspace = true
+alloy-primitives.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true

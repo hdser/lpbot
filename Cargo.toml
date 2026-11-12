@@ -36,3 +36,5 @@ lpbot-strategy = { path = "crates/strategy" }
 lpbot-risk = { path = "crates/risk" }
 lpbot-exec = { path = "crates/exec" }
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }

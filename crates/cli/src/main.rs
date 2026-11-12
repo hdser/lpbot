@@ -1,8 +1,12 @@
 //! The `lpbot` command line.
 //!
-//! Working today: `plan` (resolve an experiment file into its runs) and `iv`
-//! (implied volatility from fee, volume and in-range liquidity). `run` resolves
-//! and validates, then stops, because the replay engine is not built yet.
+//! Working today: `plan` (resolve an experiment file into its runs), `iv`
+//! (implied volatility from fee, volume and in-range liquidity), `pools`
+//! (list the universe's pools from the node) and `verify-pool` (check the
+//! replica against a deployed pool). `run` resolves and validates, then
+//! stops, because the replay engine is not built yet.
+
+mod chain_cmd;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,6 +35,43 @@ enum Command {
     Run(ExperimentArgs),
     /// Implied volatility from fee tier, daily volume and in-range liquidity.
     Iv(IvArgs),
+    /// List every Uniswap v3 pool whose two tokens are both in the universe.
+    Pools(ChainArgs),
+    /// Replay a pool's recent events and compare the replica with the chain.
+    VerifyPool(VerifyArgs),
+}
+
+#[derive(Args)]
+struct ChainArgs {
+    /// Base config with the chain's endpoints and addresses.
+    #[arg(long, default_value = "config/mainnet.yml")]
+    config: PathBuf,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Node endpoint. Defaults to LPBOT_RPC, then the config's local endpoint.
+    #[arg(long)]
+    rpc: Option<String>,
+}
+
+#[derive(Args)]
+struct VerifyArgs {
+    /// Address of the pool.
+    pool: String,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First block of the range. Defaults to `--blocks` before the end.
+    #[arg(long)]
+    from_block: Option<u64>,
+    /// Last block of the range. Defaults to just behind the head.
+    #[arg(long)]
+    to_block: Option<u64>,
+    /// Length of the range when no start block is given.
+    #[arg(long, default_value_t = 2_000)]
+    blocks: u64,
+    /// Blocks per log request. Shrinks by itself when the node refuses.
+    #[arg(long, default_value_t = 2_000)]
+    log_chunk: u64,
 }
 
 #[derive(Args)]
@@ -94,6 +135,30 @@ fn real_main() -> Result<()> {
                 "resolved {} run(s), but the replay engine is not implemented yet (build plan, phase 1)",
                 runs.len()
             )
+        }
+        Command::Pools(args) => {
+            let chain = chain_cmd::connect(&args.config, &args.chain, args.rpc.as_deref())?;
+            chain_cmd::pools(&chain)
+        }
+        Command::VerifyPool(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let passed = chain_cmd::verify(
+                &chain,
+                &args.pool,
+                args.from_block,
+                args.to_block,
+                args.blocks,
+                args.log_chunk,
+            )?;
+            if passed {
+                Ok(())
+            } else {
+                bail!("the replica does not match the chain")
+            }
         }
         Command::Iv(args) => {
             let l_sqrt_p = l_sqrt_p_from_depth_1pct(args.depth_1pct);

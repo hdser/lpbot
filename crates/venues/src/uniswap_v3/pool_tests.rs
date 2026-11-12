@@ -725,3 +725,73 @@ fn watching_and_unwatching_leaves_no_trace() {
     assert_eq!(pool.tick_info(50).unwrap().liquidity_gross, 0);
     assert!(pool.tick_info(150).is_none());
 }
+
+// --- snapshots ----------------------------------------------------------
+
+fn snapshot_of(pool: &Pool) -> PoolSnapshot {
+    PoolSnapshot {
+        fee_pips: pool.fee_pips(),
+        tick_spacing: pool.tick_spacing(),
+        sqrt_price_x96: pool.sqrt_price_x96(),
+        tick: pool.tick(),
+        liquidity: pool.liquidity(),
+        fee_growth_global0: pool.fee_growth_global().0,
+        fee_growth_global1: pool.fee_growth_global().1,
+        fee_protocol0: pool.fee_protocol().0,
+        fee_protocol1: pool.fee_protocol().1,
+        ticks: pool.ticks().map(|(tick, info)| (tick, *info)).collect(),
+    }
+}
+
+#[test]
+fn a_pool_survives_a_snapshot_round_trip() {
+    let mut pool = pool_with_background();
+    pool.set_fee_protocol(4, 5);
+    pool.mint(100, 200, 3_000_000_000).unwrap();
+    pool.swap(
+        false,
+        pos(u128::MAX >> 2),
+        get_sqrt_ratio_at_tick(150).unwrap(),
+        &mut (),
+    )
+    .unwrap();
+    let restored = Pool::from_snapshot(snapshot_of(&pool));
+    assert_eq!(restored, pool);
+    assert!(pool.differences(&restored).is_empty());
+}
+
+#[test]
+fn differences_are_listed_in_plain_words() {
+    let a = pool_with_background();
+    let mut b = a.clone();
+    assert!(a.differences(&b).is_empty());
+
+    b.mint(100, 200, 5).unwrap();
+    b.swap(
+        true,
+        pos(1_000_000_000_000),
+        MIN_SQRT_RATIO + one(),
+        &mut (),
+    )
+    .unwrap();
+    let diffs = a.differences(&b);
+    assert!(
+        diffs.iter().any(|d| d.starts_with("sqrt price")),
+        "{diffs:?}"
+    );
+    assert!(
+        diffs.iter().any(|d| d.starts_with("fee growth global 0")),
+        "{diffs:?}"
+    );
+    assert!(
+        diffs
+            .iter()
+            .any(|d| d == "tick 100: only in the second pool"),
+        "{diffs:?}"
+    );
+
+    // A watched tick is not a difference.
+    let mut watched = a.clone();
+    watched.watch_tick(50).unwrap();
+    assert!(a.differences(&watched).is_empty());
+}

@@ -38,6 +38,19 @@ An archive node needs about 3 TB free and is what the replay checks assume. For 
 
 Lighthouse starts from a recent checkpoint and is ready within minutes. Reth then syncs the execution chain, which takes many hours to a few days depending on disk and connection. Reth also offers snapshot downloads that shorten this; see the Reth documentation for the current procedure before using one.
 
+## First check after the sync
+
+When `make status` shows both clients synced, check that the bot's pool replica agrees with the chain:
+
+```sh
+cargo run --release -p lpbot -- pools
+cargo run --release -p lpbot -- verify-pool <pool address from the list>
+```
+
+`pools` lists every Uniswap v3 pool whose two tokens are both in the universe. `verify-pool` reads a pool's state 2,000 blocks back, replays every event since, and compares the result with the pool's current state, down to every tick. It prints PASS or the list of differences. Run it on several pools and with a larger `--blocks` before trusting anything built on top.
+
+Both commands only read. They need no keys and send no transactions.
+
 ## Upgrades
 
 Client versions are pinned in `deploy/.env` (`RETH_VERSION`, `LIGHTHOUSE_VERSION`). To upgrade, change the version and run `make up`. Check the release notes first: a network upgrade needs both clients updated before its activation date.

@@ -13,12 +13,19 @@ run:                     # inputs to each run; an experiment file or command-lin
 
 chains:
   ethereum:
+    chain_id: 1
     rpc:
-      local: /data/reth/reth.ipc
+      local: http://127.0.0.1:8545   # the node started by `make up`
       public: [https://ethereum-rpc.publicnode.com, https://eth.llamarpc.com]
       max_head_lag_blocks: 2
     submit: https://rpc.flashbots.net/fast
     custody: { kind: safe_roles, safe: "0x...", roles: "0x..." }
+    uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    tokens:
+      WETH: { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", decimals: 18 }
+      WBTC: { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", decimals: 8 }
+      USDC: { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 }
+      USDT: { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6 }
 
 universe:
   tokens: [WETH, WBTC, USDC, USDT]   # blue chips only; both tokens of a pool must be listed

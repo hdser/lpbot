@@ -8,6 +8,8 @@ pub mod experiment;
 pub mod metrics;
 pub mod types;
 
-pub use config::{Autonomy, Config, ConfigError, Mode, PatienceMode, RunInputs};
+pub use config::{
+    Autonomy, ChainConfig, Config, ConfigError, Mode, PatienceMode, RunInputs, TokenConfig,
+};
 pub use experiment::{resolve_experiment, ResolvedRun, RunOverrides};
 pub use types::{Campaign, EntrySide, Event, ExitReason, Intent, PoolId, RangeTarget, Tick};
