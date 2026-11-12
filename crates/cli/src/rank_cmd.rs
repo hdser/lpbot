@@ -151,7 +151,7 @@ pub fn render(ranked: &[RankedPool], window_days: u64) -> Vec<String> {
     lines
 }
 
-fn floors(config: &Config) -> Result<Floors> {
+pub(crate) fn floors(config: &Config) -> Result<Floors> {
     let floors = config
         .universe
         .floors
@@ -165,7 +165,7 @@ fn floors(config: &Config) -> Result<Floors> {
     })
 }
 
-fn token_of(tokens: &Tokens, address: Address) -> Result<(String, u8)> {
+pub(crate) fn token_of(tokens: &Tokens, address: Address) -> Result<(String, u8)> {
     tokens
         .iter()
         .find(|(_, (a, _))| *a == address)

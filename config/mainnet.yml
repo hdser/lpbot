@@ -76,6 +76,15 @@ calibration:
   promote: beats_current_and_fixed_rules
   pinned: {}
 
+sim:                                 # backtest and paper runs
+  latency_blocks: 1                  # blocks between a decision and its fill; at least 1
+  series_every: 1h                   # spacing of the rows in the series table
+
+costs:                               # what the simulator charges; placeholders
+  gas_price_gwei: 1.0
+  gas_units: { open: 450000, close: 300000, swap: 180000 }
+  # eth_price_usd: 2000              # only for pools that hold no WETH
+
 risk:                                # placeholders
   max_notional_usd: { per_pool: 20000, per_chain: 50000, total: 80000 }
   max_actions_per_day: 12

@@ -4,13 +4,14 @@
 //! (implied volatility from fee, volume and in-range liquidity), `pools`
 //! (list the universe's pools from the node), `verify-pool` (check the
 //! replica against a deployed pool), `rank` (rank the pools by implied
-//! volatility) and `zones` (a pool's zone map). `run` resolves and validates, then stops, because the
-//! replay engine is not built yet.
+//! volatility), `zones` (a pool's zone map), `backfill` and `demo-data` (fill
+//! the data folder) and `run` (backtest an experiment on the stored history).
 
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
 mod rank_cmd;
+mod run_cmd;
 mod zones_cmd;
 
 use std::path::PathBuf;
@@ -37,7 +38,7 @@ enum Command {
     /// Resolve an experiment file and list the runs it expands into.
     Plan(ExperimentArgs),
     /// Run an experiment file (backtest, paper or live, as the file says).
-    Run(ExperimentArgs),
+    Run(RunArgs),
     /// Implied volatility from fee tier, daily volume and in-range liquidity.
     Iv(IvArgs),
     /// List every Uniswap v3 pool whose two tokens are both in the universe.
@@ -192,6 +193,21 @@ struct ExperimentArgs {
     show_config: bool,
 }
 
+#[derive(Args)]
+struct RunArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Which chain of the config the stored history belongs to.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder with the stored history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Folder the result tables are written to.
+    #[arg(long, default_value = "runs")]
+    results_dir: PathBuf,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum AutonomyArg {
     Auto,
@@ -229,11 +245,14 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::Run(args) => {
-            let runs = resolve(&args)?;
-            print_runs(&runs, args.show_config);
-            bail!(
-                "resolved {} run(s), but the replay engine is not implemented yet (build plan, phase 1)",
-                runs.len()
+            let runs = resolve(&args.experiment)?;
+            print_runs(&runs, args.experiment.show_config);
+            println!();
+            run_cmd::run(
+                &runs,
+                &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                &args.results_dir,
+                &args.chain,
             )
         }
         Command::Pools(args) => {

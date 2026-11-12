@@ -279,11 +279,21 @@ How a run works:
 1. Load the pool snapshot at the start block and the event stream for the window.
 2. Apply each block's events in log order. After each block, pass the state to the strategy.
 3. Execute any action the strategy returns at a later block (latency parameter, at least one block), at the state then. This prevents look-ahead.
-4. Accrue fees to the virtual position from the change in fee growth inside its range, times its liquidity.
-5. Charge costs: historical gas for each action (plus the L1 data fee on L2s), swap fee and price impact for rebalance swaps, and the pool's protocol fee.
-6. Mark the position to the exchange mid-price each block and write the P&L breakdown.
+4. Accrue fees to the virtual position from the change in fee growth inside its range, times its liquidity. In practice the position takes its pro-rata share of each swap step's fee, which is the same quantity.
+5. Charge costs: gas for each action (plus the L1 data fee on L2s), swap fee and price impact for rebalance swaps, and the pool's protocol fee. Swaps are run against a copy of the pool, so fee and impact are exact. Gas is charged at the price in the `costs` block for now; historical gas prices follow once block headers are stored.
+6. Mark the position each block and write the P&L breakdown. The mark is the pool's own price after its swap fee for now; the exchange mid-price replaces it when the exchange feeds exist.
 
 **Two fill models.** *Passive* assumes your liquidity is small against active liquidity, so historical swaps are unchanged and you take a pro-rata fee share. *Impact* re-runs swaps with your liquidity added and regenerates arbitrage flow from the exchange price path. Use passive first. Switch to impact once your size exceeds a few percent of active liquidity in the range.
+
+**What the first version trades.** The zone round trip with the three fixed patience rules, on one pool per run:
+
+- *Pool.* The stored pool holding the value token that ranks highest by implied volatility over the week before the window, unless the strategy names a `pool`.
+- *Entry.* One-sided in the value token, in a range of the run's width within `entry.max_gap_ticks` of the price (one width by default). Among those ranges it takes the one crossed most on the longest lookback, provided it was also crossed on the shortest. Without a day of history it takes the nearest.
+- *Staying.* A position that is back in the value token stays for the next pass. It moves only when price has drifted further than the gap allows, or when another range is crossed `entry.move_margin` times as often (1.5 by default).
+- *Beyond the range.* Every `patience.decide_every` the rule answers: wait, flip into the range next to the price, or close. A flipped position that price leaves behind by a full width gets the same question again.
+- *Loss limit.* Checked on every block against the run's starting capital, position marked at the pool price. When hit, everything is closed and the run stops.
+
+All of these are the fixed starting point the calibrator has to beat, not tuned choices.
 
 **Outputs per run.** Per campaign and in total, counted in the value token: amount in, amount out, fees, days held, passes completed, time spent beyond the range, gas and swap cost. Each run is compared with simply holding the value token. An arbitrage-loss figure is available as an optional diagnostic.
 
@@ -620,7 +630,7 @@ risk:
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |
-| `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, and writes the result tables |
+| `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests with the fixed patience rules run today |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
 | `lpbot live` --loss-limit \<pct> --autonomy \<mode> | Runs with real funds through the Safe |
 | `lpbot status` | Positions, P&L breakdown, limits, node health |
@@ -685,7 +695,7 @@ sweep:
 | `pool_rank` | Pool and refresh | Fee, volume, in-range liquidity, implied volatility |
 | `zone_map` | Pool, zone and lookback | Passes per day, time in range, return odds |
 
-Tables are written as Parquet per run and loaded into Postgres for viewing, with the time series thinned for display. Full resolution stays in Parquet.
+Tables are written as Parquet per run, as `<results>/<table>/<run id>.parquet` with a `run_id` column in every table, and loaded into Postgres for viewing, with the time series thinned for display. Full resolution stays in Parquet.
 
 **The viewer.** It is generic because it knows only these tables, never a particular experiment. A new strategy or sweep needs no new charts. My choice is Grafana, since it is already in the stack for monitoring; a small web page served by the bot itself is the alternative if you prefer no extra tool.
 

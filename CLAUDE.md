@@ -60,7 +60,14 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 In this order. Each item lists the gate it must pass.
 
-Status: items 1 to 5 are written and unit tested, including end-to-end runs against a simulated node and a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet. On the owner's machine, `lpbot verify-pool` is the open gate of items 1 and 2, and `lpbot backfill --verify` the open gate of item 3 (its row-count check against an independent source is still to do by hand). Item 4 lives in `lpbot_core::ranking` and `lpbot rank`; items 4 and 5 print from the stored history or the node but do not yet write the `pool_rank` and `zone_map` result tables, which arrive with item 6.
+Status: all seven items are written and unit tested, and `experiments/demo-fixed-rules.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine:
+
+- Items 1 and 2: `lpbot verify-pool`.
+- Item 3: `lpbot backfill --verify`; the row-count check against an independent source is still to do by hand.
+- Item 6: reproducing the fees of real positions within 0.1%. There is no command for it yet. Build it next: take real positions from the stored Mint, Burn and Collect logs and compare what they collected with the replica's fee growth inside their range.
+- Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history. The adaptive runs of that file are skipped until phase 2.
+
+Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range choice in `lpbot_strategy::zone_round_trip`, the engine and tables in `lpbot_sim`. The run's `pool_rank` and `zone_map` tables hold what the engine looked at, not the full maps. Gas is charged at the fixed price in the `costs` block, and positions are marked at the pool price, until block headers and exchange feeds are stored.
 
 1. **Uniswap v3 math** in `crates/venues` (`uniswap_v3::math`): TickMath, FullMath, SqrtPriceMath, SwapMath, LiquidityAmounts, fee growth inside a range.
    - Gate: unit tests from the reference vectors in the Uniswap v3 test suite pass; a differential test against the deployed pool on a mainnet fork agrees exactly on randomized swaps and mints.

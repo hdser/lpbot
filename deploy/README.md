@@ -52,10 +52,10 @@ cargo run --release -p lpbot -- verify-pool <pool address from the list>
 Then store the history the backtests run on:
 
 ```sh
-cargo run --release -p lpbot -- backfill --verify
+make history
 ```
 
-`backfill` writes 90 days of every universe pool under `data/lake` (`--days`, `--from`, `--pool` and `--data-dir` change that): one Parquet file per pool and day, and a snapshot of each pool before the first day. `--verify` then replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state three months back, so this step needs the archive node; on a pruned node, start with a recent `--from`.
+That is `lpbot backfill --from 2026-02-01 --verify`: every universe pool from 1 February on, under `lake` in your `DATA_DIR`, as one Parquet file per pool and day plus a snapshot of each pool before the first day. `make history FROM=2026-06-01` starts later; `--pool` and `--data-dir` on the command itself narrow it further. The example experiment starts on 1 May and looks back 90 days, which is where 1 February comes from. `--verify` replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state months back, so this step needs the archive node; on a pruned node, start with a recent date.
 
 Rank the universe and look at the zone map of a pool from the top of the ranking:
 
@@ -65,6 +65,16 @@ cargo run --release -p lpbot -- zones <pool address>
 ```
 
 `rank` prints the stored pools ordered by implied volatility over the last 7 days (`--days` changes that), with volume and the value within 1% of the price. Pools under the floors in `universe.floors` are listed last with the reason. `zones` lists, for 7, 30 and 90 day lookbacks, the price ranges that were crossed most: full passes per day, the fee a position there earned per day, the share of time price spent inside, and how long price stayed away after leaving. `--widths` sets the range widths to try, in tick spacings. Both read the stored history; with `--node` they read the node directly instead.
+
+Then run a backtest. The window of `experiments/width-and-patience-eth.yml` must lie inside the days you stored:
+
+```sh
+cargo run --release -p lpbot -- run experiments/width-and-patience-eth.yml
+```
+
+It trades the pool that ranks highest for the value token, once per combination in the file's `sweep`, and writes six result tables per run under `runs/`. Capital and the loss limit come from the file's `run` block or from `--capital` and `--loss-limit`. The runs with `patience.mode: adaptive` are skipped for now; the three fixed rules run.
+
+`make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 
 All of these commands only read the chain. They need no keys and send no transactions.
 

@@ -1647,6 +1647,9 @@ dependencies = [
  "lpbot-chain",
  "lpbot-core",
  "lpbot-data",
+ "lpbot-risk",
+ "lpbot-sim",
+ "lpbot-strategy",
  "lpbot-venues",
  "serde_yaml",
 ]

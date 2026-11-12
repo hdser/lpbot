@@ -6,12 +6,12 @@ It automates one play: put the token you value into a price range that gets cros
 
 ## Status
 
-Read-only so far. The bot reads pools from a node; nothing here sends a transaction or holds funds yet.
+Backtests only so far. The bot reads pools from a node and replays their history; nothing here sends a transaction or holds funds yet.
 
 | Works today | Not built yet |
 | --- | --- |
-| One-command setup of the node and services (`make up`) | `pool_rank` and `zone_map` written as result tables |
-| Experiment files: base config, overrides, sweeps, config hashing | Replay engine and result tables |
+| One-command setup of the node and services (`make up`) | Loading the result tables into Postgres |
+| Experiment files: base config, overrides, sweeps, config hashing | Check of simulated fees against real positions |
 | Run-input checks (capital and loss limit are required) | Adaptive patience decision and calibrator |
 | Uniswap v3 pool math, checked against the reference test vectors | Live subscriptions, reorg handling |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Executor, Safe roles policy |
@@ -20,6 +20,8 @@ Read-only so far. The bot reads pools from a node; nothing here sends a transact
 | Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
+| Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
+| `lpbot run`: backtests of the zone round trip with the three fixed patience rules, written as the six result tables | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
 The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `lpbot verify-pool` is that check, and it is the first thing to run once the node is synced.
@@ -38,13 +40,16 @@ cargo run -p lpbot -- plan experiments/width-and-patience-eth.yml
 cargo run -p lpbot -- iv --fee-pct 0.05 --volume 100000000 --depth-1pct 5000000
 ```
 
-Without a node, on a simulated pool (the price is made up; it shows the commands, not a strategy):
+Without a node, on a simulated pool (the price is made up; it shows the commands, not a strategy). `make demo` runs the first and the last of these:
 
 ```sh
 cargo run --release -p lpbot -- demo-data
 cargo run --release -p lpbot -- rank --data-dir data/demo
 cargo run --release -p lpbot -- zones 0x5157000000000000000000000000000000000001 --data-dir data/demo --days 7,30
+cargo run --release -p lpbot -- run experiments/demo-fixed-rules.yml --data-dir data/demo
 ```
+
+The last command runs nine backtests (three range widths against always wait, always flip and always close) and writes their result tables under `runs/`.
 
 Once the node is synced:
 
@@ -55,17 +60,21 @@ cargo run --release -p lpbot -- pools
 # Replay a pool's last 2,000 blocks of events and compare the replica with the chain
 cargo run --release -p lpbot -- verify-pool <pool address from the list above>
 
-# Store 90 days of every universe pool under data/lake, then replay it against the chain
-cargo run --release -p lpbot -- backfill --verify
+# Store every universe pool's history from February on under data/lake, then replay it
+# against the chain (the example experiment starts in May and looks back 90 days)
+make history            # or: cargo run --release -p lpbot -- backfill --from 2026-02-01 --verify
 
 # The stored pools ranked by implied volatility over the last 7 days
 cargo run --release -p lpbot -- rank
 
 # A pool's zone map on 7, 30 and 90 day lookbacks
 cargo run --release -p lpbot -- zones <pool address>
+
+# Backtest an experiment on the stored history; its window must lie inside what is stored
+cargo run --release -p lpbot -- run experiments/width-and-patience-eth.yml
 ```
 
-`rank` and `zones` read the stored history. Add `--node` to read the node directly, without a backfill.
+`rank`, `zones` and `run` read the stored history. For `rank` and `zones`, add `--node` to read the node directly, without a backfill.
 
 ## Layout
 
