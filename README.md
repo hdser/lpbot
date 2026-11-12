@@ -10,15 +10,20 @@ Scaffold only. Nothing here touches a chain or holds funds yet.
 
 | Works today | Not built yet |
 | --- | --- |
-| Experiment files: base config, overrides, sweeps, config hashing | Pool math and state replica |
-| Run-input checks (capital and loss limit are required) | Backfill, pool ranking, zone map |
-| Implied-volatility metric | Replay engine and result tables |
-| Fixed patience rules (wait, flip, close) | Adaptive patience decision and calibrator |
-| Loss-limit check | Live ingestion, executor, Safe roles policy, viewer |
+| One-command setup of the node and services (`make up`) | Backfill, pool ranking, zone map |
+| Experiment files: base config, overrides, sweeps, config hashing | Replay engine and result tables |
+| Run-input checks (capital and loss limit are required) | Adaptive patience decision and calibrator |
+| Uniswap v3 pool math, checked against the reference test vectors | Live ingestion, executor, Safe roles policy |
+| Pool-state replica: mints, burns, swaps and exact replay of swap events | Viewer dashboards |
+| Implied-volatility metric, fixed patience rules, loss-limit check | |
+
+The pool math and replica are tested against Uniswap's own test vectors and against themselves. They have not yet been compared with a deployed pool; that check needs chain access and is the first thing to run once the node is up.
 
 ## Try it
 
 ```sh
+make up      # on the home machine: node, Postgres, Prometheus, Grafana (see deploy/README.md)
+
 cargo test --workspace
 
 # Expand an experiment file into its runs
@@ -43,6 +48,8 @@ crates/
   risk/       limits and exit paths
   exec/       planner, custody, signer client, submitter, journal
   cli/        the lpbot binary
+deploy/       Docker Compose stack and runbook
+scripts/      setup and status scripts
 config/       shared base configs (YAML)
 experiments/  one YAML file per experiment or sweep
 docs/         the design
