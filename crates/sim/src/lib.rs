@@ -4,7 +4,12 @@
 //! the same strategy code that run live, with the bot's position inserted as
 //! a virtual one. Every run writes the same six result tables.
 //!
-//! Not implemented yet. See `docs/DESIGN.md`, "Simulation and backtesting".
+//! See `docs/DESIGN.md`, "Simulation and backtesting".
+
+pub mod engine;
+
+#[cfg(test)]
+mod engine_tests;
 
 /// Names of the tables every run writes. The viewer knows only these.
 pub const RESULT_TABLES: [&str; 6] = [

@@ -8,3 +8,12 @@ publish.workspace = true
 
 [dependencies]
 lpbot-core.workspace = true
+lpbot-data.workspace = true
+lpbot-risk.workspace = true
+lpbot-strategy.workspace = true
+lpbot-venues.workspace = true
+alloy-primitives.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true
+thiserror.workspace = true

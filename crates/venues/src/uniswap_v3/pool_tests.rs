@@ -706,6 +706,90 @@ fn watched_ticks_split_steps_without_changing_the_price_path() {
 }
 
 #[test]
+fn a_swap_that_ends_exactly_on_a_watched_tick_leaves_the_contracts_tick() {
+    // The executed pool has no boundary at tick 130: a swap down to that
+    // exact price ends inside a range, and the tick is 130.
+    let mut executed = pool_with_background();
+    executed
+        .swap(
+            false,
+            pos(u128::MAX >> 2),
+            get_sqrt_ratio_at_tick(455).unwrap(),
+            &mut (),
+        )
+        .unwrap();
+    let mut watching = executed.clone();
+    watching.watch_tick(130).unwrap();
+
+    fn swap_to(pool: &mut Pool, tick: i32) -> SwapEvent {
+        let limit = get_sqrt_ratio_at_tick(tick).unwrap();
+        let down = limit < pool.sqrt_price_x96();
+        let amounts = pool
+            .swap(down, pos(u128::MAX >> 2), limit, &mut ())
+            .unwrap();
+        event_of(pool, amounts)
+    }
+    let mut events = vec![swap_to(&mut executed, 130)];
+    assert_eq!(executed.tick(), 130);
+    // Further down, back up onto the same price from below, away upward,
+    // and down onto it again.
+    for target in [70, 130, 300, 130] {
+        events.push(swap_to(&mut executed, target));
+    }
+
+    for (i, event) in events.iter().enumerate() {
+        watching
+            .apply_swap_event(event, Replay::Tolerant, &mut ())
+            .unwrap_or_else(|e| panic!("event {i}: {e}"));
+        assert_eq!(watching.tick(), event.tick, "event {i}");
+    }
+
+    // A position minted with its lower bound on that tick is in range in
+    // both pools, and the watched tick starts with the contract's values.
+    let minted = executed.mint(130, 200, 5_000_000).unwrap();
+    assert_eq!(watching.mint(130, 200, 5_000_000).unwrap(), minted);
+    assert_eq!(watching.liquidity(), executed.liquidity());
+    let last = swap_to(&mut executed, 40);
+    watching
+        .apply_swap_event(&last, Replay::Tolerant, &mut ())
+        .unwrap();
+    watching.unwatch_tick(130);
+    assert!(
+        watching.differences(&executed).is_empty(),
+        "{:?}",
+        watching.differences(&executed)
+    );
+}
+
+#[test]
+fn a_tick_first_watched_then_minted_starts_with_the_contracts_fee_growth() {
+    let mut executed = pool_with_background();
+    let mut watching = executed.clone();
+    watching.watch_tick(100).unwrap();
+    // Cross the watched tick both ways, so it has been flipped.
+    for target in [150, 50] {
+        let limit = get_sqrt_ratio_at_tick(target).unwrap();
+        let down = limit < executed.sqrt_price_x96();
+        let amounts = executed
+            .swap(down, pos(u128::MAX >> 2), limit, &mut ())
+            .unwrap();
+        watching
+            .apply_swap_event(&event_of(&executed, amounts), Replay::Tolerant, &mut ())
+            .unwrap();
+    }
+    // Price is below 100 now: a tick initialized above the price starts at zero.
+    executed.mint(100, 160, 7_000_000).unwrap();
+    watching.mint(100, 160, 7_000_000).unwrap();
+    watching.unwatch_tick(100);
+    // Fee growth totals differ by rounding once steps are split, so the
+    // tick itself is compared.
+    let tick_100 = |pool: &Pool| *pool.ticks().find(|(tick, _)| *tick == 100).unwrap().1;
+    assert_eq!(tick_100(&watching), tick_100(&executed));
+    assert_eq!(tick_100(&watching).fee_growth_outside0, U256::ZERO);
+    assert_eq!(tick_100(&watching).fee_growth_outside1, U256::ZERO);
+}
+
+#[test]
 fn watching_and_unwatching_leaves_no_trace() {
     let mut pool = pool_with_background();
     let before = pool.clone();

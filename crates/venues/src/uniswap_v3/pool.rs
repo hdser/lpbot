@@ -501,10 +501,13 @@ impl Pool {
         if gross_after > max {
             return Err(PoolError::TickLiquidityOverflow);
         }
-        if gross_before == 0 && tick <= current {
-            // By convention all growth before a tick was initialized happened below it.
-            info.fee_growth_outside0 = g0;
-            info.fee_growth_outside1 = g1;
+        if gross_before == 0 {
+            // By convention all growth before a tick was initialized happened
+            // below it. A tick that was only watched until now may carry
+            // values from being crossed; they are not the contract's.
+            let below = tick <= current;
+            info.fee_growth_outside0 = if below { g0 } else { U256::ZERO };
+            info.fee_growth_outside1 = if below { g1 } else { U256::ZERO };
         }
         info.liquidity_gross = gross_after;
         info.liquidity_net = if upper {
@@ -631,6 +634,8 @@ impl Pool {
                 observer,
             )?;
         }
+
+        self.settle_tick(zero_for_one)?;
 
         let specified_used = amount_specified - remaining;
         Ok(if zero_for_one == exact_input {
@@ -787,6 +792,8 @@ impl Pool {
             }
         }
 
+        self.settle_tick(zero_for_one)?;
+
         if self.tick != event.tick || self.liquidity != event.liquidity {
             return Err(PoolError::ReplayMismatch(format!(
                 "ended at tick {} with liquidity {}, event says tick {} with liquidity {}",
@@ -804,6 +811,30 @@ impl Pool {
     }
 
     // --- swap internals ---------------------------------------------------
+
+    /// Puts the tick where the contract has it after a swap down that ended
+    /// exactly on a watched tick.
+    ///
+    /// Reaching a step boundary from above leaves the tick one below it. A
+    /// tick that is only watched is a boundary here but not in the
+    /// contract, where the same swap ends inside a range and the tick is
+    /// the one of the price. Word starts are boundaries in the contract
+    /// too, so they are left alone.
+    fn settle_tick(&mut self, zero_for_one: bool) -> PoolResult<()> {
+        if !zero_for_one {
+            return Ok(());
+        }
+        let above = self.tick + 1;
+        let watched_only = self
+            .ticks
+            .get(&above)
+            .is_some_and(|info| info.liquidity_gross == 0 && info.watchers > 0);
+        let word_start = above.div_euclid(self.tick_spacing).rem_euclid(256) == 0;
+        if watched_only && !word_start && self.sqrt_price_x96 == get_sqrt_ratio_at_tick(above)? {
+            self.tick = above;
+        }
+        Ok(())
+    }
 
     /// The next step boundary in the swap direction: its tick and price.
     fn next_boundary(&self, zero_for_one: bool) -> PoolResult<(i32, U256)> {

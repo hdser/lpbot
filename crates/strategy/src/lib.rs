@@ -4,6 +4,8 @@
 //! building and safety live outside it. The adaptive patience decision is not
 //! implemented yet; the three fixed rules here are the baselines it has to beat.
 
+pub mod zone_round_trip;
+
 use lpbot_core::config::PatienceMode;
 use lpbot_core::{Campaign, EntrySide, Event, Intent, RangeTarget, Tick};
 

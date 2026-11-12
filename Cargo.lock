@@ -1710,7 +1710,16 @@ dependencies = [
 name = "lpbot-sim"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "arrow-array",
+ "arrow-schema",
  "lpbot-core",
+ "lpbot-data",
+ "lpbot-risk",
+ "lpbot-strategy",
+ "lpbot-venues",
+ "parquet",
+ "thiserror",
 ]
 
 [[package]]
