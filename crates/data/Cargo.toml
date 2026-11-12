@@ -1,0 +1,10 @@
+[package]
+name = "lpbot-data"
+description = "Parquet sinks, exchange price feeds, backfill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lpbot-core.workspace = true

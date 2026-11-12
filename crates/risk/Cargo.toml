@@ -1,0 +1,10 @@
+[package]
+name = "lpbot-risk"
+description = "Limits and exit paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lpbot-core.workspace = true

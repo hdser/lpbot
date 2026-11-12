@@ -1,0 +1,19 @@
+# Build output
+/target
+
+# Data and results never go in Git
+/data/
+/runs/
+*.parquet
+
+# Secrets never go in Git
+.env
+.env.*
+*.keystore
+keystore/
+secrets/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/

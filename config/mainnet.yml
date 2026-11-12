@@ -1,0 +1,77 @@
+# Shared base config for Ethereum mainnet.
+#
+# Experiment files in experiments/ point at this file and state only what they
+# change. Numbers marked "placeholder" show the shape and are not recommendations.
+# Nothing secret belongs here: keys live in a keystore on the machine that runs the bot.
+
+mode: paper              # backtest | paper (simulation on live data) | live
+
+run:                     # inputs to each run; an experiment file or command-line flag sets them
+  capital_usd: null      # required: what the run may deploy
+  loss_limit_pct: null   # required, no default: the run refuses to start without it
+  autonomy: approve      # auto | approve
+
+chains:
+  ethereum:
+    rpc:
+      local: /data/reth/reth.ipc
+      public: [https://ethereum-rpc.publicnode.com, https://eth.llamarpc.com]
+      max_head_lag_blocks: 2
+    submit: https://rpc.flashbots.net/fast
+    custody: { kind: safe_roles, safe: "0x...", roles: "0x..." }
+
+universe:
+  tokens: [WETH, WBTC, USDC, USDT]   # blue chips only; both tokens of a pool must be listed
+  venues: [uniswap_v3]
+  fee_tiers: all
+  floors:                            # placeholders
+    volume_usd_per_day: 5000000      # 7-day average
+    in_range_liquidity_usd: 1000000  # within 1% of the price
+  max_share_of_in_range_liquidity: 0.05
+
+ranking:
+  metric: implied_vol                # from fee, volume and in-range liquidity
+  liquidity: in_range                # at the current tick, and per candidate zone
+  volume_windows: [24h, 7d]
+  refresh: 1h
+  top_pools: 4
+
+reference_prices:
+  ETH-USD: [binance:ETHUSDC, coinbase:ETH-USD]
+  BTC-USD: [binance:BTCUSDC, coinbase:BTC-USD]
+
+strategies:
+  - id: eth-zone-roundtrip
+    kind: zone_round_trip
+    value_token: WETH                # enter and exit in this token; one of universe.tokens
+    pools: ranked                    # top pools holding the value token; fee tier follows the ranking
+    capital_share: 0.25
+    zone:
+      lookbacks: [7d, 30d, 90d]
+      rank_by: [passes_per_day, zone_implied_vol]
+    entry:
+      shapes: [one_sided, around_price]
+      width_ticks: { min: 10, max: 80 }   # search space, not a choice
+    patience:
+      mode: adaptive                 # or a fixed rule: wait | flip | close
+      decide_every: 1h
+      switch_margin: calibrated      # or a fixed percentage
+    allocator:
+      campaign_size_usd: 500         # placeholder
+      min_explore_share: 0.2         # capital kept on non-leading settings
+
+calibration:
+  method: walk_forward
+  fit_window: 90d
+  score_window: 14d
+  rerun: weekly
+  promote: beats_current_and_fixed_rules
+  pinned: {}
+
+risk:                                # placeholders
+  max_notional_usd: { per_pool: 20000, per_chain: 50000, total: 80000 }
+  max_actions_per_day: 12
+  max_swap_slippage_bps: 8
+  max_pool_vs_reference_bps: 15
+  loss_window: 30d                   # window over which run.loss_limit_pct is measured
+  heartbeat_timeout: 90s
