@@ -1,14 +1,18 @@
-//! `lpbot zones`: the zone map of one pool, read from the node.
+//! `lpbot zones`: the zone map of one pool, from the data folder or the node.
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
 use lpbot_chain::clock::BlockClock;
 use lpbot_chain::uniswap_v3::{discover_pools, fetch_snapshot, fetch_swaps};
 use lpbot_core::{Config, Tick};
+use lpbot_data::lake::{price_path, read_events};
+use lpbot_data::snapshot::SnapshotStore;
+use lpbot_data::store::EventStore;
 use lpbot_data::zone_map::{build_zone_map, PathPoint, ZoneRow, DAY};
 use lpbot_venues::uniswap_v3::pool::SwapEvent;
+use std::path::Path;
 
-use crate::chain_cmd::Chain;
+use crate::chain_cmd::{Chain, Tokens};
 use crate::rank_cmd::BLOCKS_PER_DAY;
 
 const HEAD_MARGIN: u64 = 5;
@@ -179,15 +183,40 @@ pub struct ZonesArgs<'a> {
     pub log_chunk: u64,
 }
 
-/// Reads a pool's swaps over the longest lookback and prints its zone map.
-pub fn run(chain: &Chain, config: &Config, args: &ZonesArgs) -> Result<()> {
+/// A pool's price path with what is needed to show its zone map.
+pub struct ZoneInput {
+    pub name: String,
+    pub view: PriceView,
+    /// Fee tier as a fraction.
+    pub fee: f64,
+    pub tick_spacing: Tick,
+    pub tick_now: Tick,
+    pub path: Vec<PathPoint>,
+    /// Unix time the lookbacks end at.
+    pub now: u64,
+}
+
+fn check(args: &ZonesArgs) -> Result<u32> {
     let Some(&longest) = args.lookbacks.iter().max() else {
         bail!("--days needs at least one lookback");
     };
     if longest == 0 || args.width_steps.is_empty() || args.width_steps.contains(&0) {
         bail!("--days and --widths take positive numbers");
     }
+    Ok(longest)
+}
 
+fn token_of(tokens: &Tokens, address: Address) -> Result<(String, u8)> {
+    tokens
+        .iter()
+        .find(|(_, (a, _))| *a == address)
+        .map(|(symbol, (_, decimals))| (symbol.clone(), *decimals))
+        .ok_or_else(|| anyhow!("pool token {address:#x} is not in the universe"))
+}
+
+/// Reads a pool's swaps over the longest lookback from the node.
+pub fn load_from_node(chain: &Chain, config: &Config, args: &ZonesArgs) -> Result<ZoneInput> {
+    let longest = check(args)?;
     let head = chain.client.block_number()?.saturating_sub(HEAD_MARGIN);
     let from = head.saturating_sub(u64::from(longest) * BLOCKS_PER_DAY);
 
@@ -202,24 +231,9 @@ pub fn run(chain: &Chain, config: &Config, args: &ZonesArgs) -> Result<()> {
                 args.pool
             )
         })?;
-    let token = |address| {
-        chain
-            .tokens
-            .iter()
-            .find(|(_, (a, _))| *a == address)
-            .map(|(symbol, (_, decimals))| (symbol.clone(), *decimals))
-            .ok_or_else(|| anyhow!("pool token {address:#x} is not in the universe"))
-    };
-    let (symbol0, decimals0) = token(pool.token0)?;
-    let (symbol1, decimals1) = token(pool.token1)?;
+    let (symbol0, decimals0) = token_of(&chain.tokens, pool.token0)?;
+    let (symbol1, decimals1) = token_of(&chain.tokens, pool.token1)?;
     let name = format!("{symbol0}/{symbol1} {}", pool.fee_pips as f64 / 10_000.0);
-    let view = PriceView::new(
-        &symbol0,
-        decimals0,
-        &symbol1,
-        decimals1,
-        &config.universe.usd_stables,
-    );
 
     let snapshot = fetch_snapshot(&chain.client, pool.address, head)?;
     println!(
@@ -238,32 +252,103 @@ pub fn run(chain: &Chain, config: &Config, args: &ZonesArgs) -> Result<()> {
     let now = clock
         .time_of(head)
         .ok_or_else(|| anyhow!("no block time for block {head}"))?;
-    let path = swap_path(&swaps, &clock)?;
+    Ok(ZoneInput {
+        name,
+        view: PriceView::new(
+            &symbol0,
+            decimals0,
+            &symbol1,
+            decimals1,
+            &config.universe.usd_stables,
+        ),
+        fee: f64::from(snapshot.fee_pips) / 1_000_000.0,
+        tick_spacing: snapshot.tick_spacing,
+        tick_now: snapshot.tick,
+        path: swap_path(&swaps, &clock)?,
+        now,
+    })
+}
+
+/// Reads a pool's swaps over the longest lookback from the data folder.
+pub fn load_local(
+    root: &Path,
+    chain_name: &str,
+    tokens: &Tokens,
+    config: &Config,
+    args: &ZonesArgs,
+) -> Result<ZoneInput> {
+    let longest = check(args)?;
+    let days = EventStore::new(root).days(chain_name, args.pool)?;
+    let (Some((first, _)), Some((last, _))) = (days.first(), days.last()) else {
+        bail!(
+            "no events stored for pool {:#x} under {}; run `lpbot backfill --pool {:#x}` first",
+            args.pool,
+            root.display(),
+            args.pool
+        );
+    };
+    let from = (*first).max(last.minus(longest));
+    let snapshot = SnapshotStore::new(root)
+        .latest_on_or_before(chain_name, args.pool, *last)?
+        .ok_or_else(|| anyhow!("no snapshot stored for pool {:#x}", args.pool))?;
+    let (symbol0, decimals0) = token_of(tokens, snapshot.token0)?;
+    let (symbol1, decimals1) = token_of(tokens, snapshot.token1)?;
+    let name = format!(
+        "{symbol0}/{symbol1} {}",
+        snapshot.state.fee_pips as f64 / 10_000.0
+    );
+    println!(
+        "{name}: stored events from {from} to {last}, under {}",
+        root.display()
+    );
+    let path = price_path(&read_events(root, chain_name, args.pool, from, *last)?);
+    let (tick_now, now) = path
+        .last()
+        .map_or((snapshot.state.tick, last.start()), |p| (p.tick, p.time));
+    Ok(ZoneInput {
+        name,
+        view: PriceView::new(
+            &symbol0,
+            decimals0,
+            &symbol1,
+            decimals1,
+            &config.universe.usd_stables,
+        ),
+        fee: f64::from(snapshot.state.fee_pips) / 1_000_000.0,
+        tick_spacing: snapshot.state.tick_spacing,
+        tick_now,
+        path,
+        now,
+    })
+}
+
+/// Builds the zone map of a loaded pool and prints it.
+pub fn print(input: &ZoneInput, args: &ZonesArgs) -> Result<()> {
+    let longest = check(args)?;
     println!(
         "{} swaps; price now {} {} (tick {})",
-        swaps.len(),
-        number(view.price(snapshot.tick)),
-        view.label,
-        snapshot.tick
+        input.path.len(),
+        number(input.view.price(input.tick_now)),
+        input.view.label,
+        input.tick_now
     );
     println!();
 
     let widths: Vec<Tick> = args
         .width_steps
         .iter()
-        .map(|&steps| steps as Tick * snapshot.tick_spacing)
+        .map(|&steps| steps as Tick * input.tick_spacing)
         .collect();
-    let fee = f64::from(snapshot.fee_pips) / 1_000_000.0;
     let rows = build_zone_map(
-        &name,
-        fee,
-        snapshot.tick_spacing,
-        &path,
+        &input.name,
+        input.fee,
+        input.tick_spacing,
+        &input.path,
         &widths,
         args.lookbacks,
-        now,
+        input.now,
     );
-    for line in render(&rows, args.lookbacks, args.top, &view) {
+    for line in render(&rows, args.lookbacks, args.top, &input.view) {
         println!("{line}");
     }
     println!(
@@ -273,12 +358,13 @@ pub fn run(chain: &Chain, config: &Config, args: &ZonesArgs) -> Result<()> {
          median wait between a full pass and the pass back. IV: implied volatility of the zone."
     );
 
-    if let (Some(first), true) = (path.first(), longest > 1) {
-        if first.time > now.saturating_sub(u64::from(longest) * DAY) + DAY {
+    if let (Some(first), true) = (input.path.first(), longest > 1) {
+        if first.time > input.now.saturating_sub(u64::from(longest) * DAY) + DAY {
             println!();
             println!(
-                "warning: the first swap found is more than a day into the window. A pruned \
-                 node does not keep old logs; use an archive node or shorter --days."
+                "note: the data starts more than a day into the {longest}-day window. From a \
+                 node, that means old logs are pruned; from the data folder, that the backfill \
+                 is shorter than the lookback."
             );
         }
     }

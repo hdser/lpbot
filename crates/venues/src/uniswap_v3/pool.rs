@@ -224,6 +224,36 @@ impl Pool {
         pool
     }
 
+    /// The pool's state in the form `from_snapshot` reads. Watched ticks
+    /// without liquidity are left out, as they are not pool state.
+    pub fn snapshot(&self) -> PoolSnapshot {
+        PoolSnapshot {
+            fee_pips: self.fee_pips,
+            tick_spacing: self.tick_spacing,
+            sqrt_price_x96: self.sqrt_price_x96,
+            tick: self.tick,
+            liquidity: self.liquidity,
+            fee_growth_global0: self.fee_growth_global0,
+            fee_growth_global1: self.fee_growth_global1,
+            fee_protocol0: self.fee_protocol0,
+            fee_protocol1: self.fee_protocol1,
+            ticks: self
+                .ticks
+                .iter()
+                .filter(|(_, info)| info.liquidity_gross > 0)
+                .map(|(tick, info)| {
+                    (
+                        *tick,
+                        TickInfo {
+                            watchers: 0,
+                            ..*info
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     /// Lists every way this pool differs from another, in plain words.
     /// Watched ticks without liquidity are ignored. Empty means identical.
     pub fn differences(&self, other: &Pool) -> Vec<String> {

@@ -127,6 +127,87 @@ fn uint8(value: U256) -> Result<u8, DecodeError> {
     u8::try_from(value).map_err(|_| DecodeError::ValueOutOfRange)
 }
 
+/// Encodes an event as the topics and data of a pool log, the inverse of
+/// `decode_log`. Fields the replica does not track (sender, owner,
+/// recipient and the like) are written as zero. Used to build histories
+/// for tests and for simulated pools.
+pub fn encode_log(event: &PoolEvent) -> (Vec<B256>, Vec<u8>) {
+    fn signed(value: i32) -> U256 {
+        I256::try_from(value).expect("an i32 fits").into_raw()
+    }
+    fn data(words: &[U256]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_be_bytes::<32>()).collect()
+    }
+    let topic = |value: U256| B256::from(value.to_be_bytes::<32>());
+    let zero = B256::ZERO;
+
+    match event {
+        PoolEvent::Swap(swap) => (
+            vec![topics::swap(), zero, zero],
+            data(&[
+                swap.amount0.into_raw(),
+                swap.amount1.into_raw(),
+                swap.sqrt_price_x96,
+                U256::from(swap.liquidity),
+                signed(swap.tick),
+            ]),
+        ),
+        PoolEvent::Mint {
+            tick_lower,
+            tick_upper,
+            amount,
+            amount0,
+            amount1,
+        } => (
+            vec![
+                topics::mint(),
+                zero,
+                topic(signed(*tick_lower)),
+                topic(signed(*tick_upper)),
+            ],
+            data(&[U256::ZERO, U256::from(*amount), *amount0, *amount1]),
+        ),
+        PoolEvent::Burn {
+            tick_lower,
+            tick_upper,
+            amount,
+            amount0,
+            amount1,
+        } => (
+            vec![
+                topics::burn(),
+                zero,
+                topic(signed(*tick_lower)),
+                topic(signed(*tick_upper)),
+            ],
+            data(&[U256::from(*amount), *amount0, *amount1]),
+        ),
+        PoolEvent::Initialize {
+            sqrt_price_x96,
+            tick,
+        } => (
+            vec![topics::initialize()],
+            data(&[*sqrt_price_x96, signed(*tick)]),
+        ),
+        PoolEvent::Flash { paid0, paid1 } => (
+            vec![topics::flash(), zero, zero],
+            data(&[U256::ZERO, U256::ZERO, *paid0, *paid1]),
+        ),
+        PoolEvent::SetFeeProtocol {
+            fee_protocol0,
+            fee_protocol1,
+        } => (
+            vec![topics::set_fee_protocol()],
+            data(&[
+                U256::ZERO,
+                U256::ZERO,
+                U256::from(*fee_protocol0),
+                U256::from(*fee_protocol1),
+            ]),
+        ),
+    }
+}
+
 /// Decodes a pool log. Returns `None` for events that do not change the
 /// state the replica tracks.
 pub fn decode_log(log_topics: &[B256], data: &[u8]) -> Result<Option<PoolEvent>, DecodeError> {
@@ -262,6 +343,49 @@ fn check_amounts(
 mod tests {
     use super::super::Q96;
     use super::*;
+
+    #[test]
+    fn every_event_survives_encoding_and_decoding() {
+        let events = [
+            PoolEvent::Initialize {
+                sqrt_price_x96: Q96,
+                tick: -887_272,
+            },
+            PoolEvent::Mint {
+                tick_lower: -887_220,
+                tick_upper: 887_220,
+                amount: u128::MAX,
+                amount0: U256::MAX,
+                amount1: U256::from(1u8),
+            },
+            PoolEvent::Burn {
+                tick_lower: -60,
+                tick_upper: 120,
+                amount: 0,
+                amount0: U256::ZERO,
+                amount1: U256::from(99u8),
+            },
+            PoolEvent::Swap(SwapEvent {
+                amount0: I256::try_from(-123_456_789i64).unwrap(),
+                amount1: I256::MAX,
+                sqrt_price_x96: Q96 * U256::from(3u8),
+                liquidity: 1u128 << 100,
+                tick: -1,
+            }),
+            PoolEvent::Flash {
+                paid0: U256::from(5u8),
+                paid1: U256::MAX,
+            },
+            PoolEvent::SetFeeProtocol {
+                fee_protocol0: 4,
+                fee_protocol1: 10,
+            },
+        ];
+        for event in events {
+            let (log_topics, data) = encode_log(&event);
+            assert_eq!(decode_log(&log_topics, &data), Ok(Some(event)));
+        }
+    }
 
     fn topic_from_i32(value: i32) -> B256 {
         B256::from(

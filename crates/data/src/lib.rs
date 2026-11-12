@@ -1,8 +1,12 @@
-//! Data: the zone map, and later the Parquet sinks and backfill.
+//! Data: the event store, the backfill that fills it, and the zone map.
 //!
-//! The zone map is built from a pool's price path. The event backfill and
-//! the `pool_rank` and `zone_map` tables on disk are not implemented yet.
 //! See `docs/DESIGN.md`, "Data ingestion and storage" and "Experiments and
 //! results".
 
+pub mod backfill;
+pub mod day;
+pub mod lake;
+pub mod snapshot;
+pub mod store;
+pub mod synth;
 pub mod zone_map;

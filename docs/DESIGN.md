@@ -259,6 +259,15 @@ Read the protocol-fee setting per pool. Uniswap's fee switch now applies to v2 a
 | Operational | Postgres | `positions`, `intents`, `tx_journal`, `risk_events`, `strategy_state`, `config_versions` |
 | Event bus | In-process channels first; NATS only if modules split into separate processes | Normalized `Event` stream consumed by signals, strategies, risk and monitoring |
 
+**How the raw lake is laid out.** Pool logs are stored raw, with their topics and data and the time of their block, so the replica replays exactly what the chain emitted and a new event type needs no new backfill:
+
+```text
+<data>/events/chain=<chain>/pool=<address>/day=<YYYY-MM-DD>/events.parquet
+<data>/snapshots/chain=<chain>/pool=<address>/day=<YYYY-MM-DD>.json
+```
+
+A day is a UTC day. A finished day is written once and never touched again; the day in progress is kept as `events.partial.parquet` and rewritten by the next backfill, so a re-run fetches only what is new. The snapshot for a day is the pool's full state right before that day's first block, the point every replay starts from. Reading a range of days fails on a missing day, so a gap is never mistaken for a quiet day.
+
 **The table that matters most: the zone map.** For each pool it holds a grid of candidate ranges by lookback, with full passes per day, share of time in range, and the spread of return times after price leaves. It is updated incrementally from pool prices and drives zone choice and the patience policy. Markouts and arbitrage-loss figures can be added later as diagnostics; nothing depends on them.
 
 ## Simulation and backtesting
@@ -607,7 +616,10 @@ risk:
 
 | Command | Does |
 | --- | --- |
-| `lpbot backfill --pool <id> --from <block>` | Pulls history into the Parquet lake |
+| `lpbot backfill --pool <address> --from <date>` | Pulls history into the Parquet lake: one file per pool and day, plus a snapshot of the pool before the first day. `--verify` replays what is stored and compares it with the pool on the chain |
+| `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
+| `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
+| `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |
 | `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, and writes the result tables |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
 | `lpbot live` --loss-limit \<pct> --autonomy \<mode> | Runs with real funds through the Safe |

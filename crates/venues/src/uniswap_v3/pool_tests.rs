@@ -758,6 +758,13 @@ fn a_pool_survives_a_snapshot_round_trip() {
     let restored = Pool::from_snapshot(snapshot_of(&pool));
     assert_eq!(restored, pool);
     assert!(pool.differences(&restored).is_empty());
+
+    // The pool's own snapshot is the same thing, and a watched tick
+    // without liquidity is not part of it.
+    assert_eq!(pool.snapshot(), snapshot_of(&pool));
+    let before = pool.snapshot();
+    pool.watch_tick(1_230).unwrap();
+    assert_eq!(pool.snapshot(), before);
 }
 
 #[test]

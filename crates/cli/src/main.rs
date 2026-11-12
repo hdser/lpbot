@@ -7,7 +7,9 @@
 //! volatility) and `zones` (a pool's zone map). `run` resolves and validates, then stops, because the
 //! replay engine is not built yet.
 
+mod backfill_cmd;
 mod chain_cmd;
+mod demo_cmd;
 mod rank_cmd;
 mod zones_cmd;
 
@@ -44,8 +46,55 @@ enum Command {
     VerifyPool(VerifyArgs),
     /// Rank the universe's pools by implied volatility.
     Rank(RankArgs),
+    /// Store pool history from the node in the local data folder.
+    Backfill(BackfillArgs),
+    /// Write a simulated pool history, to try the pipeline without a node.
+    DemoData(DemoArgs),
     /// Show a pool's zone map: how often price crosses each candidate range.
     Zones(ZonesArgs),
+}
+
+#[derive(Args)]
+struct DemoArgs {
+    /// Base config; the demo pool uses its USDC and WETH.
+    #[arg(long, default_value = "config/mainnet.yml")]
+    config: PathBuf,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Folder for the demo data. Keep it apart from real history.
+    #[arg(long, default_value = "data/demo")]
+    data_dir: PathBuf,
+    /// Days of history to simulate.
+    #[arg(long, default_value_t = 30)]
+    days: u32,
+    /// The same seed always gives the same history.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+}
+
+#[derive(Args)]
+struct BackfillArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// Pool to backfill. Repeat for several; none means the whole universe.
+    #[arg(long = "pool")]
+    pools: Vec<String>,
+    /// First day to store, as YYYY-MM-DD. Overrides --days.
+    #[arg(long)]
+    from: Option<String>,
+    /// Days of history to store, counted back from today.
+    #[arg(long, default_value_t = 90)]
+    days: u32,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Blocks per log request. Shrinks by itself when the node refuses.
+    #[arg(long, default_value_t = 2_000)]
+    log_chunk: u64,
+    /// After storing, replay the stored history and compare with the chain.
+    #[arg(long)]
+    verify: bool,
 }
 
 #[derive(Args)]
@@ -63,6 +112,12 @@ struct ZonesArgs {
     /// Ranges to show per lookback.
     #[arg(long, default_value_t = 15)]
     top: usize,
+    /// Read the node instead of the data folder.
+    #[arg(long)]
+    node: bool,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
     /// Blocks per log request. Shrinks by itself when the node refuses.
     #[arg(long, default_value_t = 2_000)]
     log_chunk: u64,
@@ -75,6 +130,12 @@ struct RankArgs {
     /// Length of the volume window in days.
     #[arg(long, default_value_t = 7)]
     days: u64,
+    /// Read the node instead of the data folder.
+    #[arg(long)]
+    node: bool,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
     /// Blocks per log request. Shrinks by itself when the node refuses.
     #[arg(long, default_value_t = 2_000)]
     log_chunk: u64,
@@ -201,31 +262,84 @@ fn real_main() -> Result<()> {
         }
         Command::Rank(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
+            if args.node {
+                let chain = chain_cmd::connect(
+                    &args.chain.config,
+                    &args.chain.chain,
+                    args.chain.rpc.as_deref(),
+                )?;
+                rank_cmd::run(&chain, &config, args.days, args.log_chunk)
+            } else {
+                let (_, tokens) = chain_cmd::chain_addresses(&config, &args.chain.chain)?;
+                rank_cmd::run_local(
+                    &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                    &args.chain.chain,
+                    &tokens,
+                    &config,
+                    args.days,
+                )
+            }
+        }
+        Command::DemoData(args) => {
+            let config = chain_cmd::load_base_config(&args.config)?;
+            let (_, tokens) = chain_cmd::chain_addresses(&config, &args.chain)?;
+            demo_cmd::run(&args.data_dir, &args.chain, &tokens, args.days, args.seed)
+        }
+        Command::Backfill(args) => {
             let chain = chain_cmd::connect(
                 &args.chain.config,
                 &args.chain.chain,
                 args.chain.rpc.as_deref(),
             )?;
-            rank_cmd::run(&chain, &config, args.days, args.log_chunk)
+            let pools = args
+                .pools
+                .iter()
+                .map(|p| chain_cmd::checked_address("pool", p))
+                .collect::<Result<Vec<_>>>()?;
+            let from = args
+                .from
+                .as_deref()
+                .map(|text| text.parse().map_err(anyhow::Error::msg))
+                .transpose()?;
+            backfill_cmd::run(
+                &chain,
+                &backfill_cmd::BackfillArgs {
+                    pools: &pools,
+                    from,
+                    days: args.days,
+                    root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                    log_chunk: args.log_chunk,
+                    verify: args.verify,
+                },
+            )
         }
         Command::Zones(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
-            let chain = chain_cmd::connect(
-                &args.chain.config,
-                &args.chain.chain,
-                args.chain.rpc.as_deref(),
-            )?;
-            zones_cmd::run(
-                &chain,
-                &config,
-                &zones_cmd::ZonesArgs {
-                    pool: chain_cmd::checked_address("pool", &args.pool)?,
-                    lookbacks: &args.days,
-                    width_steps: &args.widths,
-                    top: args.top,
-                    log_chunk: args.log_chunk,
-                },
-            )
+            let zone_args = zones_cmd::ZonesArgs {
+                pool: chain_cmd::checked_address("pool", &args.pool)?,
+                lookbacks: &args.days,
+                width_steps: &args.widths,
+                top: args.top,
+                log_chunk: args.log_chunk,
+            };
+            let input = if args.node {
+                let chain = chain_cmd::connect(
+                    &args.chain.config,
+                    &args.chain.chain,
+                    args.chain.rpc.as_deref(),
+                )?;
+                zones_cmd::load_from_node(&chain, &config, &zone_args)?
+            } else {
+                let (_, tokens) = chain_cmd::chain_addresses(&config, &args.chain.chain)?;
+                zones_cmd::load_local(
+                    &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                    &args.chain.chain,
+                    &tokens,
+                    &config,
+                    &zone_args,
+                )?
+            };
+            zones_cmd::print(&input, &zone_args)
         }
         Command::Iv(args) => {
             let l_sqrt_p = l_sqrt_p_from_depth_1pct(args.depth_1pct);

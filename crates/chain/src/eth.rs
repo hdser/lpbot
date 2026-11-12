@@ -113,6 +113,29 @@ impl RpcClient {
         Ok((timestamp, hash))
     }
 
+    /// Timestamps of several blocks, in the order asked, read in batches.
+    pub fn block_times(&self, numbers: &[u64]) -> RpcResult<Vec<u64>> {
+        const M: &str = "eth_getBlockByNumber";
+        const PER_REQUEST: usize = 200;
+        let mut times = Vec::with_capacity(numbers.len());
+        for group in numbers.chunks(PER_REQUEST) {
+            let calls: Vec<(&str, Value)> = group
+                .iter()
+                .map(|n| (M, json!([quantity(*n), false])))
+                .collect();
+            for (number, block) in group.iter().zip(self.batch(&calls)?) {
+                if block.is_null() {
+                    return Err(bad(M, format!("block {number} is not available")));
+                }
+                times.push(parse_quantity(
+                    M,
+                    block.get("timestamp").unwrap_or(&Value::Null),
+                )?);
+            }
+        }
+        Ok(times)
+    }
+
     /// Logs of one contract in a block range, in chain order. `topic0s`
     /// selects the event types; empty means all.
     pub fn get_logs(
@@ -246,6 +269,30 @@ mod tests {
         );
         assert_eq!(parse_bytes("m", &json!("0x")), Ok(vec![]));
         assert!(parse_bytes("m", &json!("0xzz")).is_err());
+    }
+
+    #[test]
+    fn block_times_come_back_in_the_order_asked_across_batches() {
+        let requests = Arc::new(Mutex::new(0usize));
+        let seen = Arc::clone(&requests);
+        let node = MockNode::start(move |method, params| {
+            assert_eq!(method, "eth_getBlockByNumber");
+            *seen.lock().unwrap() += 1;
+            let number = parse_quantity("test", &params[0]).unwrap();
+            if number == 999 {
+                return Ok(Value::Null);
+            }
+            Ok(json!({"timestamp": quantity(number * 12)}))
+        });
+        let client = RpcClient::new(node.url());
+        let numbers: Vec<u64> = (0..450).rev().collect();
+        let times = client.block_times(&numbers).unwrap();
+        assert_eq!(times.len(), 450);
+        assert!(numbers.iter().zip(&times).all(|(n, t)| *t == n * 12));
+        assert_eq!(*requests.lock().unwrap(), 450);
+        assert_eq!(client.block_times(&[]).unwrap(), Vec::<u64>::new());
+        let error = client.block_times(&[5, 999]).unwrap_err();
+        assert!(error.to_string().contains("999"), "{error}");
     }
 
     #[test]

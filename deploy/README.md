@@ -49,23 +49,24 @@ cargo run --release -p lpbot -- verify-pool <pool address from the list>
 
 `pools` lists every Uniswap v3 pool whose two tokens are both in the universe. `verify-pool` reads a pool's state 2,000 blocks back, replays every event since, and compares the result with the pool's current state, down to every tick. It prints PASS or the list of differences. Run it on several pools and with a larger `--blocks` before trusting anything built on top.
 
-Then rank the universe:
+Then store the history the backtests run on:
+
+```sh
+cargo run --release -p lpbot -- backfill --verify
+```
+
+`backfill` writes 90 days of every universe pool under `data/lake` (`--days`, `--from`, `--pool` and `--data-dir` change that): one Parquet file per pool and day, and a snapshot of each pool before the first day. `--verify` then replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state three months back, so this step needs the archive node; on a pruned node, start with a recent `--from`.
+
+Rank the universe and look at the zone map of a pool from the top of the ranking:
 
 ```sh
 cargo run --release -p lpbot -- rank
-```
-
-`rank` reads each pool's swaps over the last 7 days (`--days` changes that) and prints the pools ordered by implied volatility, with volume and the value within 1% of the price. Pools under the floors in `universe.floors` are listed last with the reason. It needs the logs of the whole window, so on a pruned node it warns when the early days come back empty.
-
-And look at the zone map of a pool from the top of the ranking:
-
-```sh
 cargo run --release -p lpbot -- zones <pool address>
 ```
 
-`zones` reads the pool's swaps over 90 days and, for 7, 30 and 90 day lookbacks, lists the price ranges that were crossed most: full passes per day, the fee a position there earned per day, the share of time price spent inside, and how long price stayed away after leaving. `--widths` sets the range widths to try, in tick spacings. The first run takes a while on a busy pool, because it reads every swap of the window from the node.
+`rank` prints the stored pools ordered by implied volatility over the last 7 days (`--days` changes that), with volume and the value within 1% of the price. Pools under the floors in `universe.floors` are listed last with the reason. `zones` lists, for 7, 30 and 90 day lookbacks, the price ranges that were crossed most: full passes per day, the fee a position there earned per day, the share of time price spent inside, and how long price stayed away after leaving. `--widths` sets the range widths to try, in tick spacings. Both read the stored history; with `--node` they read the node directly instead.
 
-These commands only read. They need no keys and send no transactions.
+All of these commands only read the chain. They need no keys and send no transactions.
 
 ## Upgrades
 
