@@ -1,5 +1,7 @@
 # Running the stack at home
 
+Setting up a fresh machine for it is in [REMOTE.md](REMOTE.md).
+
 One command starts everything the bot needs on the home machine:
 
 ```sh

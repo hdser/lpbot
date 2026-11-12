@@ -56,6 +56,10 @@ All four must pass before a commit. Clippy runs with warnings as errors.
 
 Write code so the data-dependent parts take their input from files or traits, and keep unit tests free of network access.
 
+## The node machine
+
+The owner will run the stack on a NUC with a 4 TB NVMe drive and 32 GB of memory, set up with `deploy/REMOTE.md`: `scripts/host-setup.sh` (Docker, Rust, firewall), `make snapshot` (Reth's published database snapshot), `make up`. None of those three has run on a real machine. On the owner's laptop, `make demo`, `make viewer` and `make load` are tested.
+
 ## Phase 1: what to build next
 
 In this order. Each item lists the gate it must pass.

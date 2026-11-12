@@ -7,11 +7,25 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up viewer down restart status logs build test check demo history rank backtest calibrate load
+.PHONY: up viewer snapshot tunnel down restart status logs build test check demo history rank backtest calibrate load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
 	./scripts/up.sh
+
+## Download Reth's published database snapshot, so the node starts near the
+## head of the chain. Once, before the first `make up`.
+snapshot:
+	./scripts/snapshot.sh
+
+## From a laptop: bring the node machine's Grafana and RPC to this machine.
+##   make tunnel HOST=hugo@nuc
+## Grafana is then on http://127.0.0.1:3000 and the RPC on http://127.0.0.1:8545
+## for as long as the command runs. Stop a local `make viewer` first: it uses
+## the same port.
+tunnel:
+	@test -n "$(HOST)" || { echo "usage: make tunnel HOST=<user>@<machine>"; exit 1; }
+	ssh -N -L 3000:127.0.0.1:3000 -L 8545:127.0.0.1:8545 -L 8546:127.0.0.1:8546 $(HOST)
 
 ## Start only Postgres and Grafana, to look at results without a node.
 ## For a laptop: `make demo`, `make viewer`, `make load`.
