@@ -1,0 +1,16 @@
+# The adaptive patience decision against the three fixed rules on the
+# simulated pool, at three range widths. Expands into 12 backtest runs. The price is made up: this shows the pipeline
+# working end to end, not which policy is better.
+#
+#   cargo run --release -p lpbot -- demo-data
+#   cargo run --release -p lpbot -- run experiments/demo-patience.yml --data-dir data/demo
+
+experiment: demo-patience
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-01-08, to: 2026-01-30 }   # the demo data starts on 2026-01-01
+run: { capital_usd: 10000, loss_limit_pct: 10, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  entry.width_ticks: [20, 40, 80]
+  patience.mode: [adaptive, wait, flip, close]

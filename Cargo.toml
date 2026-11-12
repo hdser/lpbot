@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/chain",
+    "crates/venues",
+    "crates/data",
+    "crates/sim",
+    "crates/strategy",
+    "crates/risk",
+    "crates/exec",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+lpbot-core = { path = "crates/core" }
+lpbot-chain = { path = "crates/chain" }
+lpbot-venues = { path = "crates/venues" }
+lpbot-data = { path = "crates/data" }
+lpbot-sim = { path = "crates/sim" }
+lpbot-strategy = { path = "crates/strategy" }
+lpbot-risk = { path = "crates/risk" }
+lpbot-exec = { path = "crates/exec" }
+alloy-primitives = { version = "1", default-features = false, features = ["std"] }
+postgres = "0.19"
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }

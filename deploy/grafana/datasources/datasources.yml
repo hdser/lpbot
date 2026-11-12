@@ -1,0 +1,24 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  # The result tables every run writes: runs, campaigns, decisions, series,
+  # pool_rank and zone_map.
+  - name: Results
+    uid: results
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    user: lpbot
+    jsonData:
+      database: lpbot
+      sslmode: disable
+      postgresVersion: 1700
+    secureJsonData:
+      password: $POSTGRES_PASSWORD

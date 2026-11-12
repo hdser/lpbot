@@ -1,0 +1,14 @@
+# Example experiment: four range widths against the adaptive patience decision
+# and the three fixed rules it has to beat. Expands into 16 backtest runs.
+#
+#   cargo run -p lpbot -- plan experiments/width-and-patience-eth.yml
+
+experiment: width-and-patience-eth
+base: config/mainnet.yml            # chains, universe, ranking, risk
+mode: backtest                      # backtest | paper | live
+window: { from: 2026-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 5, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  entry.width_ticks: [10, 20, 40, 80]
+  patience.mode: [adaptive, wait, flip, close]

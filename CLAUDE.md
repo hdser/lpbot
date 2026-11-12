@@ -1,0 +1,107 @@
+# lpbot: working notes for Claude sessions
+
+Read `docs/DESIGN.md` before changing anything. It is the source of truth for what this bot does and why. This file covers how to work in the repo and what to build next.
+
+## What this is
+
+An autonomous Uniswap v3 liquidity-provision bot, Ethereum mainnet first. The play: enter a high-crossing price zone one-sided in the value token, earn the fee on each pass, exit back in the value token. When price runs beyond the range, an adaptive patience decision chooses between waiting, flipping and closing.
+
+## Decisions that are settled
+
+Do not reopen these without the owner asking.
+
+- **Language:** all Rust. No Python, no notebooks. The only non-Rust piece will be a small TypeScript script that applies the Safe roles policy.
+- **Experiments:** every run (backtest, paper, live) is one YAML file in `experiments/` over a base config in `config/`. No experiment-specific code.
+- **Results:** every run writes the same six tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map`. The viewer (Grafana) knows only these tables.
+- **Universe:** WETH, WBTC, USDC, USDT. A pool qualifies only if both tokens are listed.
+- **Ranking:** implied volatility from fee, volume and in-range liquidity (not total liquidity), at the price and per zone.
+- **Run inputs:** capital, loss limit (percent, in the value token) and autonomy (`auto` or `approve`). Capital and loss limit have no default; a run refuses to start without them. Backtests always run as `auto`.
+- **Adaptive settings:** zone choice, width, fee tier and the patience decision are calibrated walk-forward and must beat the fixed rules (always wait, always flip, always close) out of sample, or the fixed rule ships.
+- **Custody:** a Safe with the Zodiac Roles module. No custom contract.
+- **Chain access:** a local Reth node feeds every decision. Public RPC endpoints are for cross-checks, exit-only fallback and one-time backfill. No paid RPC.
+- **No arbitrage-loss theory in the decision logic.** It may appear only as an optional diagnostic in results.
+
+## Commands
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p lpbot -- plan experiments/width-and-patience-eth.yml
+```
+
+All four must pass before a commit. Clippy runs with warnings as errors.
+
+## Conventions
+
+- **Exact math is integer math.** Pool math (ticks, sqrt prices, liquidity, fee growth) is ported bit-for-bit from the Uniswap v3 contracts using 256-bit integers. Floating point is allowed only for signals, metrics and reporting, never for anything that decides token amounts.
+- **Mind token order.** Uniswap orders a pool's tokens by address, and ticks are in token1-per-token0. On mainnet USDC/WETH has USDC as token0, so "ETH priced higher in dollars" is a lower tick. Code works in tick terms (`EntrySide::Above` or `Below`); convert at the edges and test both orders.
+- **Strategies declare, they do not act.** A strategy returns `Intent`s. Sizing limits, transaction building and safety live outside it.
+- **Same code in every mode.** Anything that would behave differently in backtest and live is a bug unless it is the clock, the data source or the executor.
+- **Tests come with the code.** Every public function gets unit tests. Pool math additionally gets differential tests against the deployed contracts on a fork.
+- **Typed config, tolerant parsing.** Type the settings the code uses; carry the rest through `extra` maps so the YAML can grow ahead of the code.
+- **Errors say what to do.** A refusal to start names the missing input.
+- **Never commit** data, results, keystores, `.env` files or real addresses of the owner's Safe. Config uses `"0x..."` placeholders.
+
+## Workflow
+
+- Work on a branch and open a pull request against `main`. Do not push to `main` directly.
+- Keep `docs/DESIGN.md` in step: a change of behaviour updates the design in the same pull request.
+- Update the status table in `README.md` when something moves from "not built" to "works".
+
+## What can run where
+
+- **Cloud sessions** can build, lint and run unit tests. They cannot reach RPC endpoints or exchange APIs, so they cannot backfill data or run real backtests.
+- **The owner's machine** runs everything that needs chain data, the local node, or funds.
+
+Write code so the data-dependent parts take their input from files or traits, and keep unit tests free of network access.
+
+## The node machine
+
+The owner will run the stack on a NUC with a 4 TB NVMe drive and 32 GB of memory, set up with `deploy/REMOTE.md`: `scripts/host-setup.sh` (Docker, Rust, firewall), `make snapshot` (Reth's published database snapshot), `make up`. None of those three has run on a real machine. On the owner's laptop, `make demo`, `make viewer` and `make load` are tested.
+
+## Phase 1: what to build next
+
+In this order. Each item lists the gate it must pass.
+
+Status: all seven items are written and unit tested, and `experiments/demo-patience.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine:
+
+- Items 1 and 2: `lpbot verify-pool`.
+- Item 3: `lpbot backfill --verify`; the row-count check against an independent source is still to do by hand.
+- Item 6: `lpbot verify-fees <pool>` on a busy pool with a few months stored. It follows every position that starts inside the stored history and compares what it collected with the replica's fee growth inside its range (`lpbot_data::fee_check`). This checks the replica's fee accounting, which the engine's fee share is built on.
+- Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history.
+
+The viewer exists too: `lpbot load-results` (`lpbot_sim::loader`) creates the Postgres tables from the Parquet files and replaces a run's rows on reload; the dashboards are in `deploy/grafana/dashboards/`. All three were opened in Grafana 13.3 on the owner's laptop with the demo runs loaded (`make viewer`, `make load`), and every panel renders. Open a run from its id on the runs dashboard: the link sets the time range to the run's window.
+
+Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range choice in `lpbot_strategy::zone_round_trip`, the engine and tables in `lpbot_sim`. The run's `pool_rank` and `zone_map` tables hold what the engine looked at, not the full maps. Gas is charged at the fixed price in the `costs` block, and positions are marked at the pool price, until block headers and exchange feeds are stored.
+
+1. **Uniswap v3 math** in `crates/venues` (`uniswap_v3::math`): TickMath, FullMath, SqrtPriceMath, SwapMath, LiquidityAmounts, fee growth inside a range.
+   - Gate: unit tests from the reference vectors in the Uniswap v3 test suite pass; a differential test against the deployed pool on a mainnet fork agrees exactly on randomized swaps and mints.
+2. **Pool-state replica** in `crates/venues`: rebuild `slot0`, active liquidity, the tick map and fee growth from Initialize, Mint, Burn, Swap and Collect events, with snapshots and an undo log for reorgs.
+   - Gate: after replaying a block range, state equals on-chain `slot0`, `liquidity` and `ticks()` at the end block.
+3. **Backfill** in `crates/data`: pool discovery from the factory, events and block headers for qualifying pools into Parquet, partitioned by pool and day. Chunked `eth_getLogs` first; node-local extraction later.
+   - Gate: a re-run is idempotent, and row counts match an independent source for a sample day.
+4. **Pool ranking** in `crates/data`: the `pool_rank` table from fee, volume (24 h and 7 d) and in-range liquidity, with the floors from `universe.floors`.
+   - Gate: `lpbot status` (or a `rank` subcommand) prints the ranked universe from local data.
+5. **Zone map** in `crates/data`: passes per day, time in range and return-time distribution per candidate range on 7, 30 and 90 day lookbacks, plus per-zone implied volatility.
+   - Gate: unit tests on synthetic price paths with known pass counts.
+6. **Replay engine and result tables** in `crates/sim`: virtual positions with exact fee accrual, gas and swap costs, one-block-or-more action latency, and the six result tables written as Parquet.
+   - Gate: fees collected by real on-chain positions in the pool are reproduced within 0.1%.
+7. **`lpbot run`** wired to the replay engine for `mode: backtest`, with the three fixed patience rules.
+   - Gate: `experiments/width-and-patience-eth.yml` runs end to end for the fixed rules and writes all six tables.
+
+## Phase 2: where it stands
+
+A first adaptive patience decision and a walk-forward calibrator exist and run on simulated history.
+
+- The comparison is in `lpbot_strategy::adaptive`; the figures it compares are worked out in `lpbot_sim::engine` (`adaptive_decision`); the odds come from `lpbot_data::odds` (how often price made a move of that size within the horizon, counted over the lookback).
+- `lpbot calibrate` fits horizon, margin and reinvest credit on one window and scores on the next against the three fixed rules. The adaptive decision ships only if it wins out of sample, summed over the folds; a tie ships the fixed rule.
+
+Known gaps, in the order they matter:
+
+1. The odds are unconditional. They do not depend on how far price already is from the range, how long it has been away, or the long-horizon state. Condition them before trusting the decision on real data.
+2. Decisions are not scored afterwards against the two options not taken (the `decisions` table has the expectations, not the outcomes).
+3. The calibrator fits the patience settings only. Width and fee tier are compared by sweeping them; zone-ranking weights and entry shape are not searched.
+4. A run trades one pool with one campaign at a time; `allocator` settings in the config are not used yet.
+
+Nothing in phase 2 has seen real data. Expect the defaults to be wrong.
