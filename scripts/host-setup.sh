@@ -97,15 +97,16 @@ The machine is ready.
 EOF
 if [[ "${relogin:-0}" == 1 ]]; then
   cat <<EOF
-Log out and back in once, so your shell picks up Docker and Rust.
+Log out and back in once, before anything else, so your shell picks up
+Docker and Rust. Start tmux only after that login.
 EOF
 fi
 cat <<EOF
 
 Next, from the repository folder:
 
-  LPBOT_DRY_RUN=1 ./scripts/up.sh   # creates deploy/.env
-  nano deploy/.env                  # point DATA_DIR at the NVMe drive
+  make env DATA_DIR=/data/lpbot     # creates deploy/.env; use your data folder
+  tmux new -s node                  # so a dropped SSH session stops nothing
   make snapshot                     # download the node's database (hours)
   make up                           # start everything
   make status                       # watch it catch up

@@ -58,7 +58,14 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 ## The node machine
 
-The owner will run the stack on a NUC with a 4 TB NVMe drive and 32 GB of memory, set up with `deploy/REMOTE.md`: `scripts/host-setup.sh` (Docker, Rust, firewall), `make snapshot` (Reth's published database snapshot), `make up`. None of those three has run on a real machine. On the owner's laptop, `make demo`, `make viewer` and `make load` are tested.
+The owner runs the stack on a NUC (Ubuntu Server 26.04, 4 TB NVMe, 32 GB of memory), set up with `deploy/REMOTE.md`. Cloud sessions cannot reach it: the owner runs the commands and pastes the output.
+
+- Done there, November 2026: `scripts/host-setup.sh`, a 3.4 TB data volume at `/data`, `make env`, `make snapshot` (archive, 1.72 TB to download, 2.88 TB unpacked).
+- Not yet run there: `make up` with the node, and every check against real chain data.
+- The owner chose to keep the full archive for now and prune later. Do not reopen that; do keep an eye on disk space, which is tighter than first estimated.
+- Known hardware limits: the drive is a Kingston NV2 (no memory cache; it measured 45k read and 15k write IOPS, falling to about half within ten minutes), and the box runs hot (NVMe near its critical temperature when idle). If the node falls behind, suspect these before the software.
+
+On the owner's laptop, `make demo`, `make viewer` and `make load` are tested, and the dashboards were opened in Grafana.
 
 ## Phase 1: what to build next
 

@@ -2,11 +2,22 @@
 
 How to take a fresh machine to a running stack. `deploy/README.md` covers day-to-day use once it runs.
 
-Nothing here has been run on a real machine yet. The scripts were checked in dry-run mode and against a stand-in for Docker. Read their output the first time, and tell the next Claude session what did not work.
+`host-setup.sh` and `make snapshot` have run on a real machine once (Ubuntu Server 26.04, November 2026). `make up` with the node has not. Tell the next Claude session what did not work.
 
 ## The machine
 
-- **Disk:** 4 TB NVMe is enough for an archive node. Reth's archive database is about 2.3 TB on its current storage layout; the consensus client, pool history and Postgres add a few hundred GB; the node grows by one to two GB a day. Use a TLC drive: a QLC drive falls behind during sync.
+- **Disk:** 4 TB NVMe holds an archive node, without much to spare. The archive snapshot of mid-November 2026 was 1.72 TB to download and 2.88 TB unpacked; the consensus client, pool history and Postgres add a few hundred GB; the node grows by a few GB a day. On a 4 TB drive that leaves some months before old history has to be pruned or the drive replaced. `make status` shows the free space.
+- **Which drive:** a mainstream TLC drive with its own memory cache. Budget drives without one (the Kingston NV2 is a common example) are on node operators' lists of drives that may not keep up. Measure before the big download:
+
+  ```sh
+  sudo apt-get install -y fio
+  cd /data && fio --randrepeat=1 --ioengine=libaio --direct=1 --gtod_reduce=1 \
+    --name=test --filename=test --bs=4k --iodepth=64 --size=150G \
+    --readwrite=randrw --rwmixread=75; rm -f /data/test
+  ```
+
+  About 15,000 read and 5,000 write IOPS is comfortable; 10,000 and 2,500 is the floor.
+- **Heat:** look at `sensors` (package `lm-sensors`) on the idle machine. A small box with a quiet fan profile can idle above 60 °C and push the NVMe past its warning temperature under load; the drive then slows itself down. Set the BIOS fan profile to its coolest setting and check that the drive's thermal pad makes contact.
 - **Memory:** 32 GB is comfortable. 16 GB is the floor.
 - **Network:** a wired connection. The first download is about 2 TB.
 - **Power:** set the BIOS to power on after a power loss, so the machine comes back by itself.
@@ -19,7 +30,15 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
 
 ## Steps
 
-1. **Install Ubuntu Server LTS.** Put the data on the NVMe drive with ext4. If the system and the data share the drive, nothing more is needed. If the NVMe is a separate data drive, mount it (for example at `/data`) with the `noatime` option. During install, enable the OpenSSH server and add your public key.
+1. **Install Ubuntu Server LTS.** During install, enable the OpenSSH server and add your public key. With the installer's default layout the system gets a 100 GB volume and the rest of the drive stays unallocated (`sudo vgs` shows it as free). Give that space to a data volume at `/data`, leaving some for the system to grow:
+
+   ```sh
+   sudo lvcreate -n data -L 3.4T ubuntu-vg      # for a 4 TB drive
+   sudo mkfs.ext4 -m 0 -L lpbot-data /dev/ubuntu-vg/data
+   sudo mkdir -p /data
+   echo '/dev/ubuntu-vg/data /data ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
+   sudo systemctl daemon-reload && sudo mount /data && sudo chown "$USER": /data
+   ```
 
 2. **Get the repository onto it.** The repository is private, so the machine needs its own read access. A deploy key is the narrowest way:
 
@@ -36,13 +55,12 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    ./scripts/host-setup.sh
    ```
 
-   `LPBOT_DRY_RUN=1 ./scripts/host-setup.sh` shows what it would do first. Log out and back in afterwards.
+   `LPBOT_DRY_RUN=1 ./scripts/host-setup.sh` shows what it would do first. Log out and back in afterwards, before starting `tmux`: a shell or a tmux session from before that login cannot use Docker yet.
 
 4. **Say where the data lives.**
 
    ```sh
-   LPBOT_DRY_RUN=1 ./scripts/up.sh    # creates deploy/.env with generated passwords
-   nano deploy/.env                   # set DATA_DIR, for example /data/lpbot
+   make env DATA_DIR=/data/lpbot      # creates deploy/.env with generated passwords
    ```
 
 5. **Download the node's database.** This replaces days of syncing with a download of a few hours:
@@ -51,7 +69,9 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    make snapshot
    ```
 
-   If it is interrupted, `LPBOT_SNAPSHOT_RESUME=1 make snapshot` carries on. Run it inside `tmux` or `screen`, so a dropped SSH session does not stop it.
+   If it is interrupted, `LPBOT_SNAPSHOT_RESUME=1 make snapshot` carries on. Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
+
+   Postgres and Grafana do not have to wait for it: `make viewer` in a second session starts those two now.
 
 6. **Start everything.**
 
@@ -89,7 +109,15 @@ The node finds peers without any router setup. Forwarding 30303 and 9000 (both T
 
 Docker starts on boot and brings every container back. Check with `make status`. Reth shuts down cleanly given up to five minutes; a power cut can cost it a short re-sync, not the database.
 
+## Watching the node
+
+`make status` shows the containers, how far both clients have synced, and the free space on the data drive. In Grafana, the `Reth node` dashboard in the `lpbot` folder is Reth's own overview dashboard, fed by Prometheus.
+
+## Later: pruning
+
+The archive keeps the state at every past block, which the bot uses only to read a pool's state at the start of a backfill. Once it is clear how much history the backtests need, Reth can be told to keep only that window. Check the Reth documentation of the version running for the prune settings and for how much space pruning an existing archive gives back; that has not been looked into yet.
+
 ## Not set up yet
 
-- An alert when the node falls behind or the disk fills. Prometheus already collects the numbers.
+- An alert when the node falls behind or the disk fills. Prometheus already collects the numbers, and `make status` warns below 150 GB free.
 - Backups. Everything except `deploy/.env`, the `runs/` folder and, later, the bot's key can be rebuilt from the chain. Keep a copy of `deploy/.env` somewhere safe.

@@ -7,11 +7,16 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up viewer snapshot tunnel down restart status logs build test check demo history rank backtest calibrate load
+.PHONY: up env viewer snapshot tunnel down restart status logs build test check demo history rank backtest calibrate load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
 	./scripts/up.sh
+
+## Create deploy/.env and say where the data lives, without starting anything.
+##   make env DATA_DIR=/data/lpbot
+env:
+	LPBOT_DRY_RUN=1 LPBOT_SET_DATA_DIR="$(DATA_DIR)" ./scripts/up.sh
 
 ## Download Reth's published database snapshot, so the node starts near the
 ## head of the chain. Once, before the first `make up`.

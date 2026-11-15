@@ -25,7 +25,7 @@ Only the peer-to-peer ports (30303 and 9000, TCP and UDP) are open to the networ
 1. Install Docker Engine with the Compose plugin.
 2. Run `make up` once, then edit `DATA_DIR` in `deploy/.env` to point at the NVMe drive and run `make up` again. Or create `deploy/.env` from `deploy/.env.example` yourself first.
 
-An archive node needs about 3 TB free and is what the replay checks assume. For a pruned full node (about 1.5 TB), set `RETH_EXTRA_ARGS=--full` in `deploy/.env`.
+An archive node needs about 3.2 TB free and is what the replay checks assume. For a pruned full node (about 1.5 TB), set `RETH_EXTRA_ARGS=--full` in `deploy/.env`.
 
 ## Day to day
 

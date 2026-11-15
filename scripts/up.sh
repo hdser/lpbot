@@ -49,6 +49,12 @@ fill() {
   fi
 }
 
+# `make env DATA_DIR=/data/lpbot` sets where the data lives without an editor.
+if [[ -n "${LPBOT_SET_DATA_DIR:-}" ]]; then
+  sed -i.bak "s|^DATA_DIR=.*|DATA_DIR=${LPBOT_SET_DATA_DIR}|" "$ENV_FILE"
+  rm -f "$ENV_FILE.bak"
+fi
+
 fill POSTGRES_PASSWORD "$(openssl rand -hex 16)"
 fill GRAFANA_PASSWORD "$(openssl rand -hex 12)"
 fill HOST_UID "$(id -u)"
@@ -68,8 +74,6 @@ case "$DATA_DIR" in
 esac
 export DATA_DIR
 
-mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
-
 SERVICES="${LPBOT_SERVICES:-}"
 # The node runs unless a list of services leaves it out.
 with_node=1
@@ -81,13 +85,21 @@ if [[ "${RETH_EXTRA_ARGS:-}" == *--full* ]]; then
   need_gb=1500
   kind="a full"
 else
-  need_gb=3000
+  # The archive snapshot of November 2026 unpacks to about 2,900 GB, and
+  # the consensus client and the pool history come on top.
+  need_gb=3200
   kind="an archive"
 fi
-avail_gb="$(df -Pk "$DATA_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
+
+# Free space where DATA_DIR is, or will be: the nearest folder that exists.
+probe="$DATA_DIR"
+while [[ ! -d "$probe" ]]; do
+  probe="$(dirname "$probe")"
+done
+avail_gb="$(df -Pk "$probe" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
 if [[ "$with_node" == 1 && -z "$(ls -A "$DATA_DIR/reth" 2>/dev/null)" && "$avail_gb" -lt "$need_gb" ]]; then
   warn "$DATA_DIR has ${avail_gb} GB free; ${kind} node needs about ${need_gb} GB."
-  warn "Point DATA_DIR in deploy/.env at a larger drive, or set RETH_EXTRA_ARGS=--full."
+  warn "Point DATA_DIR in deploy/.env at a larger drive (make env DATA_DIR=<folder>), or set RETH_EXTRA_ARGS=--full."
 fi
 
 # --- engine secret shared by Reth and Lighthouse -----------------------------
@@ -108,8 +120,15 @@ compose() {
 if [[ "${LPBOT_DRY_RUN:-0}" == "1" ]]; then
   compose config --quiet
   say "Dry run: configuration is valid. Nothing was started."
+  echo "Data will live in $DATA_DIR (${avail_gb} GB free there)."
   exit 0
 fi
+
+# Docker is installed, but can this shell use it?
+docker info >/dev/null 2>&1 \
+  || die "this shell cannot talk to Docker. If you just ran scripts/host-setup.sh, log out and back in (or run 'newgrp docker') and try again. A tmux session started before that login keeps the old permissions."
+
+mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
 
 if [[ -n "$SERVICES" ]]; then
   say "Starting only: $SERVICES"
