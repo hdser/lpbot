@@ -10,7 +10,7 @@ Two machines, each with its own clone of this repository and its own `deploy/.en
 | --- | --- | --- |
 | Runs | Reth, Lighthouse, Postgres, Prometheus, Grafana, and later the bot | Nothing permanent. Optionally its own Postgres and Grafana for demo runs (`make viewer`) |
 | Holds | The chain database, the stored pool history, the results | A clone to read, and to run `make tunnel` and `make demo` from |
-| Started with | `make up` (or `make viewer` for Postgres and Grafana alone) | `make tunnel HOST=<user>@<node machine>` |
+| Started with | `make up` (or `make viewer` for everything but the node) | `make tunnel HOST=<user>@<node machine>` |
 | Grafana | Listens on the machine only, port 3000 | The node machine's Grafana appears on http://127.0.0.1:3001 while the tunnel runs |
 | Passwords | Its own, in its `deploy/.env` (`make grafana-password`) | Its own, different ones |
 
@@ -85,7 +85,7 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
 
    If it is interrupted, `LPBOT_SNAPSHOT_RESUME=1 make snapshot` carries on. Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
 
-   Postgres and Grafana do not have to wait for it: `make viewer` in a second session starts those two now.
+   Postgres, Prometheus and Grafana do not have to wait for it: `make viewer` in a second session starts them now.
 
 6. **Start everything.**
 
@@ -127,7 +127,9 @@ The same works from outside the house over whatever already gets you an SSH sess
 | Grafana refuses the password | The laptop's password was used, the browser filled in a saved one, or several wrong tries locked the login for five minutes | On the node machine: `make grafana-reset-password`, then `make grafana-password`, and type it by hand |
 | `permission denied ... docker.sock` | The shell is from before `host-setup.sh` added you to the Docker group. A tmux window from before keeps the old permissions too | `newgrp docker` in that shell, or log in again |
 | Dashboards say a table does not exist | The database was started by a version without the schema step | `git pull`, then `make viewer` (or `make up`) again; it creates the empty tables |
-| Dashboards are empty | No runs have been loaded | `make demo` then `make load` for demo runs; real runs come from `make backtest` |
+| The `Reth node` dashboard says `lookup prometheus ... server misbehaving` | Prometheus is not running: the viewer was started by a version that left it out | `git pull`, then `make viewer` again |
+| The `Reth node` dashboard is empty | The node is not running yet | Nothing until the snapshot is in place; then `make up` |
+| The lpbot dashboards are empty | No runs have been loaded | `make demo` then `make load` for demo runs; real runs come from `make backtest` |
 | The address on port 3001 does not load | Grafana is not running on the node machine, or the tunnel was closed | On the node machine: `make viewer` (or `make up`); on the laptop: start the tunnel again |
 
 ## Ports

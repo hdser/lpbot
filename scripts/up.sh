@@ -8,9 +8,11 @@
 # without starting any container.
 #
 # Set LPBOT_SERVICES to start only some services, without what they depend
-# on. `make viewer` uses it to start Postgres and Grafana on a laptop:
+# on. `make viewer` uses it to start the viewer without the node. Prometheus
+# is part of it so the node dashboard has a source to ask; until the node
+# runs it has nothing to collect and the dashboard is empty:
 #
-#   LPBOT_SERVICES="postgres grafana" ./scripts/up.sh
+#   LPBOT_SERVICES="postgres prometheus grafana" ./scripts/up.sh
 
 set -euo pipefail
 

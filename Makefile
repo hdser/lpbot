@@ -47,7 +47,7 @@ grafana-reset-password:
 ## Start only Postgres and Grafana, to look at results without a node.
 ## For a laptop: `make demo`, `make viewer`, `make load`.
 viewer:
-	LPBOT_SERVICES="postgres grafana" ./scripts/up.sh
+	LPBOT_SERVICES="postgres prometheus grafana" ./scripts/up.sh
 
 ## Stop everything. Data is kept.
 down:
