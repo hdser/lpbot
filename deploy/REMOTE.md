@@ -1,6 +1,20 @@
 # Setting up the node machine
 
-How to take a fresh machine to a running stack. `deploy/README.md` covers day-to-day use once it runs.
+How to take a fresh machine to a running stack, and how to reach it from a laptop. `deploy/README.md` covers day-to-day use once it runs.
+
+## At a glance
+
+Two machines, each with its own clone of this repository and its own `deploy/.env`:
+
+| | Node machine | Laptop |
+| --- | --- | --- |
+| Runs | Reth, Lighthouse, Postgres, Prometheus, Grafana, and later the bot | Nothing permanent. Optionally its own Postgres and Grafana for demo runs (`make viewer`) |
+| Holds | The chain database, the stored pool history, the results | A clone to read, and to run `make tunnel` and `make demo` from |
+| Started with | `make up` (or `make viewer` for Postgres and Grafana alone) | `make tunnel HOST=<user>@<node machine>` |
+| Grafana | Listens on the machine only, port 3000 | The node machine's Grafana appears on http://127.0.0.1:3001 while the tunnel runs |
+| Passwords | Its own, in its `deploy/.env` (`make grafana-password`) | Its own, different ones |
+
+Everything is done over SSH. No service on the node machine is open to the network except the node's peer-to-peer ports.
 
 `host-setup.sh` and `make snapshot` have run on a real machine once (Ubuntu Server 26.04, November 2026). `make up` with the node has not. Tell the next Claude session what did not work.
 
@@ -84,13 +98,37 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
 
 ## Reaching it from your laptop
 
-RPC, Postgres and Grafana listen on the machine itself and are not reachable from the network. That is deliberate: the RPC has no authentication. From the laptop, in a clone of this repository:
+RPC, Postgres and Grafana listen on the node machine itself and are not reachable from the network. That is deliberate: the RPC has no authentication. From the laptop, in a clone of this repository:
 
 ```sh
-make tunnel HOST=<user>@<machine>
+make tunnel HOST=<user>@<node machine>
 ```
 
-While that runs, Grafana is on http://127.0.0.1:3000 and the RPC on http://127.0.0.1:8545 on the laptop. The same works from outside the house over whatever already gets you an SSH session to the machine (a VPN such as WireGuard or Tailscale, or a jump host). Do not forward the SSH port on the router to this machine without key-only logins.
+Leave it running. While it runs:
+
+- The node machine's Grafana is on http://127.0.0.1:3001 on the laptop. Port 3001, not 3000, so it cannot be confused with a Grafana running on the laptop itself.
+- The node machine's RPC is on http://127.0.0.1:8545.
+
+Log in to Grafana as `admin` with the node machine's password. Print it there, not on the laptop:
+
+```sh
+make grafana-password
+```
+
+Without the repository on the laptop, the tunnel is one command: `ssh -N -L 3001:127.0.0.1:3000 <user>@<node machine>`.
+
+The same works from outside the house over whatever already gets you an SSH session to the machine (a VPN such as WireGuard or Tailscale, or a jump host). Do not forward the SSH port on the router to this machine without key-only logins.
+
+### When it does not work
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| `ssh: ... No route to host` on a Mac, while SSH works from another terminal app | macOS lets each app onto the local network separately. That app is not allowed; it can still reach the router, which makes it confusing | Run the tunnel from the app where SSH works, or allow the other one under System Settings, Privacy & Security, Local Network, and restart it |
+| Grafana refuses the password | The laptop's password was used, the browser filled in a saved one, or several wrong tries locked the login for five minutes | On the node machine: `make grafana-reset-password`, then `make grafana-password`, and type it by hand |
+| `permission denied ... docker.sock` | The shell is from before `host-setup.sh` added you to the Docker group. A tmux window from before keeps the old permissions too | `newgrp docker` in that shell, or log in again |
+| Dashboards say a table does not exist | The database was started by a version without the schema step | `git pull`, then `make viewer` (or `make up`) again; it creates the empty tables |
+| Dashboards are empty | No runs have been loaded | `make demo` then `make load` for demo runs; real runs come from `make backtest` |
+| The address on port 3001 does not load | Grafana is not running on the node machine, or the tunnel was closed | On the node machine: `make viewer` (or `make up`); on the laptop: start the tunnel again |
 
 ## Ports
 

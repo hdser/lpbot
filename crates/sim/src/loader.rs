@@ -10,7 +10,8 @@ use std::path::Path;
 
 use postgres::Client;
 
-use crate::tables::{read_table, Column, Table, TableError};
+use crate::engine::Output;
+use crate::tables::{read_table, result_tables, Column, RunInfo, Table, TableError};
 use crate::RESULT_TABLES;
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +74,29 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
         "CREATE INDEX IF NOT EXISTS {name}_run_id ON {name} (run_id)"
     ));
     Ok(statements)
+}
+
+/// The six result tables as SQL, for a database that has no runs yet.
+///
+/// The viewer's dashboards query these tables. Creating them empty lets a
+/// fresh database show "no data" instead of an error. The same text is
+/// checked in as `deploy/postgres/schema.sql`, which the start-up script
+/// applies; a test keeps the two in step.
+pub fn full_schema_sql() -> String {
+    let tables = result_tables(&RunInfo::default(), &Output::default(), &[]);
+    let mut sql = String::from(
+        "-- The six result tables, empty. Generated from the table definitions in\n\
+         -- crates/sim/src/tables.rs; do not edit by hand. To regenerate:\n\
+         --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file\n",
+    );
+    for table in &tables {
+        sql.push('\n');
+        for statement in schema_sql(table).expect("result tables have plain names") {
+            sql.push_str(&statement);
+            sql.push_str(";\n");
+        }
+    }
+    sql
 }
 
 fn escape(text: &str, out: &mut String) {
@@ -251,6 +275,32 @@ mod tests {
             )],
         };
         assert_eq!(copy_text(&odd), "NaN\nInfinity\n0.0000001\n");
+    }
+
+    #[test]
+    fn the_schema_file_matches_the_table_definitions() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/postgres/schema.sql"
+        );
+        let current = full_schema_sql();
+        if std::env::var_os("LPBOT_WRITE_SCHEMA").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
+            std::fs::write(path, &current).unwrap();
+        }
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            on_disk == current,
+            "deploy/postgres/schema.sql is out of date. Regenerate it with:\n  \
+             LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file"
+        );
+        // All six tables, each with its run_id column and index.
+        for table in crate::RESULT_TABLES {
+            assert!(current.contains(&format!("CREATE TABLE IF NOT EXISTS {table} ")));
+            assert!(current.contains(&format!("CREATE INDEX IF NOT EXISTS {table}_run_id")));
+        }
+        assert!(current
+            .contains("ALTER TABLE series ADD COLUMN IF NOT EXISTS price_lower double precision;"));
     }
 
     #[test]

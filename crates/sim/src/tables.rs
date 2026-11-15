@@ -127,7 +127,7 @@ fn table(name: &str, run_id: &str, rows: usize, columns: Vec<(&str, Column)>) ->
 }
 
 /// What identifies a run and where it ran.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct RunInfo {
     pub run_id: String,
     pub experiment: String,

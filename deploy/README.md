@@ -1,6 +1,6 @@
 # Running the stack at home
 
-Setting up a fresh machine for it is in [REMOTE.md](REMOTE.md).
+Setting up a fresh machine for it, reaching it from a laptop, and what to do when that does not work are in [REMOTE.md](REMOTE.md).
 
 One command starts everything the bot needs on the home machine:
 

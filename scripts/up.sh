@@ -130,51 +130,69 @@ docker info >/dev/null 2>&1 \
 
 mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
 
+# Waits until Postgres accepts connections, then makes sure the result
+# tables exist, so the dashboards of a database without runs show "no data"
+# rather than an error. Safe to repeat: it only adds what is missing.
+prepare_database() {
+  local ready=0
+  printf 'Waiting for Postgres'
+  for _ in $(seq 1 60); do
+    if compose exec -T postgres pg_isready -U lpbot -d lpbot >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    printf '.'
+    sleep 1
+  done
+  printf '\n'
+  [[ "$ready" == 1 ]] \
+    || die "Postgres did not come up within a minute. See: docker compose -f deploy/docker-compose.yml logs postgres"
+  compose exec -T -e PGOPTIONS=--client-min-messages=warning postgres \
+    psql -q -v ON_ERROR_STOP=1 -U lpbot -d lpbot \
+    < "$DEPLOY/postgres/schema.sql" >/dev/null \
+    || die "could not create the result tables. See: docker compose -f deploy/docker-compose.yml logs postgres"
+}
+
 if [[ -n "$SERVICES" ]]; then
   say "Starting only: $SERVICES"
   # shellcheck disable=SC2086
   compose up -d --no-deps $SERVICES
 
   if [[ " $SERVICES " == *" postgres "* ]]; then
-    printf 'Waiting for Postgres'
-    for _ in $(seq 1 60); do
-      if compose exec -T postgres pg_isready -U lpbot -d lpbot >/dev/null 2>&1; then
-        ready=1
-        break
-      fi
-      printf '.'
-      sleep 1
-    done
-    printf '\n'
-    [[ "${ready:-0}" == 1 ]] \
-      || die "Postgres did not come up within a minute. See: docker compose -f deploy/docker-compose.yml logs postgres"
+    prepare_database
   fi
 
   cat <<EOF
 
 Started: $SERVICES. Data lives in $DATA_DIR.
 
-  make load       load the result tables under runs/ into Postgres
-  make down       stop everything (data is kept)
+  make load              load the result tables under runs/ into Postgres
+  make grafana-password  print the password for the admin user
+  make down              stop everything (data is kept)
 
-Grafana:  http://127.0.0.1:3000   user admin, password GRAFANA_PASSWORD in deploy/.env
+Grafana:  http://127.0.0.1:3000   user admin
+From another machine: make tunnel HOST=<user>@<this machine>, then http://127.0.0.1:3001
 EOF
   exit 0
 fi
 
 say "Starting ${kind} node, Postgres, Prometheus and Grafana."
 compose up -d
+prepare_database
 
 cat <<EOF
 
 The stack is starting. Data lives in $DATA_DIR.
 
-  make status     sync progress of the node
-  make logs       follow the node logs
-  make down       stop everything (data is kept)
+  make status            sync progress of the node, and free disk space
+  make logs              follow the node logs
+  make grafana-password  print the password for the admin user
+  make down              stop everything (data is kept)
 
-Grafana:  http://127.0.0.1:3000   user admin, password GRAFANA_PASSWORD in deploy/.env
+Grafana:  http://127.0.0.1:3000   user admin
 RPC:      http://127.0.0.1:8545 and ws://127.0.0.1:8546 (this machine only)
+From another machine: make tunnel HOST=<user>@<this machine>, then http://127.0.0.1:3001
 
-The first sync takes many hours to a few days. The bot's data commands wait for it.
+After a snapshot the node catches up in hours. Without one, the first sync
+takes days. The bot's data commands wait for it.
 EOF
