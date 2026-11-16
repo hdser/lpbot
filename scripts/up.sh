@@ -8,9 +8,11 @@
 # without starting any container.
 #
 # Set LPBOT_SERVICES to start only some services, without what they depend
-# on. `make viewer` uses it to start Postgres and Grafana on a laptop:
+# on. `make viewer` uses it to start the viewer without the node. Prometheus
+# is part of it so the node dashboard has a source to ask; until the node
+# runs it has nothing to collect and the dashboard is empty:
 #
-#   LPBOT_SERVICES="postgres grafana" ./scripts/up.sh
+#   LPBOT_SERVICES="postgres prometheus grafana" ./scripts/up.sh
 
 set -euo pipefail
 
@@ -49,6 +51,12 @@ fill() {
   fi
 }
 
+# `make env DATA_DIR=/data/lpbot` sets where the data lives without an editor.
+if [[ -n "${LPBOT_SET_DATA_DIR:-}" ]]; then
+  sed -i.bak "s|^DATA_DIR=.*|DATA_DIR=${LPBOT_SET_DATA_DIR}|" "$ENV_FILE"
+  rm -f "$ENV_FILE.bak"
+fi
+
 fill POSTGRES_PASSWORD "$(openssl rand -hex 16)"
 fill GRAFANA_PASSWORD "$(openssl rand -hex 12)"
 fill HOST_UID "$(id -u)"
@@ -68,8 +76,6 @@ case "$DATA_DIR" in
 esac
 export DATA_DIR
 
-mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
-
 SERVICES="${LPBOT_SERVICES:-}"
 # The node runs unless a list of services leaves it out.
 with_node=1
@@ -81,13 +87,21 @@ if [[ "${RETH_EXTRA_ARGS:-}" == *--full* ]]; then
   need_gb=1500
   kind="a full"
 else
-  need_gb=3000
+  # The archive snapshot of November 2026 unpacks to about 2,900 GB, and
+  # the consensus client and the pool history come on top.
+  need_gb=3200
   kind="an archive"
 fi
-avail_gb="$(df -Pk "$DATA_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
+
+# Free space where DATA_DIR is, or will be: the nearest folder that exists.
+probe="$DATA_DIR"
+while [[ ! -d "$probe" ]]; do
+  probe="$(dirname "$probe")"
+done
+avail_gb="$(df -Pk "$probe" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
 if [[ "$with_node" == 1 && -z "$(ls -A "$DATA_DIR/reth" 2>/dev/null)" && "$avail_gb" -lt "$need_gb" ]]; then
   warn "$DATA_DIR has ${avail_gb} GB free; ${kind} node needs about ${need_gb} GB."
-  warn "Point DATA_DIR in deploy/.env at a larger drive, or set RETH_EXTRA_ARGS=--full."
+  warn "Point DATA_DIR in deploy/.env at a larger drive (make env DATA_DIR=<folder>), or set RETH_EXTRA_ARGS=--full."
 fi
 
 # --- engine secret shared by Reth and Lighthouse -----------------------------
@@ -108,8 +122,38 @@ compose() {
 if [[ "${LPBOT_DRY_RUN:-0}" == "1" ]]; then
   compose config --quiet
   say "Dry run: configuration is valid. Nothing was started."
+  echo "Data will live in $DATA_DIR (${avail_gb} GB free there)."
   exit 0
 fi
+
+# Docker is installed, but can this shell use it?
+docker info >/dev/null 2>&1 \
+  || die "this shell cannot talk to Docker. If you just ran scripts/host-setup.sh, log out and back in (or run 'newgrp docker') and try again. A tmux session started before that login keeps the old permissions."
+
+mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
+
+# Waits until Postgres accepts connections, then makes sure the result
+# tables exist, so the dashboards of a database without runs show "no data"
+# rather than an error. Safe to repeat: it only adds what is missing.
+prepare_database() {
+  local ready=0
+  printf 'Waiting for Postgres'
+  for _ in $(seq 1 60); do
+    if compose exec -T postgres pg_isready -U lpbot -d lpbot >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    printf '.'
+    sleep 1
+  done
+  printf '\n'
+  [[ "$ready" == 1 ]] \
+    || die "Postgres did not come up within a minute. See: docker compose -f deploy/docker-compose.yml logs postgres"
+  compose exec -T -e PGOPTIONS=--client-min-messages=warning postgres \
+    psql -q -v ON_ERROR_STOP=1 -U lpbot -d lpbot \
+    < "$DEPLOY/postgres/schema.sql" >/dev/null \
+    || die "could not create the result tables. See: docker compose -f deploy/docker-compose.yml logs postgres"
+}
 
 if [[ -n "$SERVICES" ]]; then
   say "Starting only: $SERVICES"
@@ -117,45 +161,40 @@ if [[ -n "$SERVICES" ]]; then
   compose up -d --no-deps $SERVICES
 
   if [[ " $SERVICES " == *" postgres "* ]]; then
-    printf 'Waiting for Postgres'
-    for _ in $(seq 1 60); do
-      if compose exec -T postgres pg_isready -U lpbot -d lpbot >/dev/null 2>&1; then
-        ready=1
-        break
-      fi
-      printf '.'
-      sleep 1
-    done
-    printf '\n'
-    [[ "${ready:-0}" == 1 ]] \
-      || die "Postgres did not come up within a minute. See: docker compose -f deploy/docker-compose.yml logs postgres"
+    prepare_database
   fi
 
   cat <<EOF
 
 Started: $SERVICES. Data lives in $DATA_DIR.
 
-  make load       load the result tables under runs/ into Postgres
-  make down       stop everything (data is kept)
+  make load              load the result tables under runs/ into Postgres
+  make grafana-password  print the password for the admin user
+  make down              stop everything (data is kept)
 
-Grafana:  http://127.0.0.1:3000   user admin, password GRAFANA_PASSWORD in deploy/.env
+Grafana:  http://127.0.0.1:3000   user admin
+From another machine: make tunnel HOST=<user>@<this machine>, then http://127.0.0.1:3001
 EOF
   exit 0
 fi
 
 say "Starting ${kind} node, Postgres, Prometheus and Grafana."
 compose up -d
+prepare_database
 
 cat <<EOF
 
 The stack is starting. Data lives in $DATA_DIR.
 
-  make status     sync progress of the node
-  make logs       follow the node logs
-  make down       stop everything (data is kept)
+  make status            sync progress of the node, and free disk space
+  make logs              follow the node logs
+  make grafana-password  print the password for the admin user
+  make down              stop everything (data is kept)
 
-Grafana:  http://127.0.0.1:3000   user admin, password GRAFANA_PASSWORD in deploy/.env
+Grafana:  http://127.0.0.1:3000   user admin
 RPC:      http://127.0.0.1:8545 and ws://127.0.0.1:8546 (this machine only)
+From another machine: make tunnel HOST=<user>@<this machine>, then http://127.0.0.1:3001
 
-The first sync takes many hours to a few days. The bot's data commands wait for it.
+After a snapshot the node catches up in hours. Without one, the first sync
+takes days. The bot's data commands wait for it.
 EOF

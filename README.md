@@ -61,16 +61,16 @@ cargo run --release -p lpbot -- calibrate experiments/demo-patience.yml --data-d
 
 On this made-up price waiting wins, because the price always comes back; the calibrator says so and ships the fixed rule.
 
-To look at the results, Postgres and Grafana have to be up. `make viewer` starts just those two, which is what you want on a laptop; `make up` starts them along with the node.
+To look at the results, Postgres and Grafana have to be up. `make viewer` starts just those two (and Prometheus, which stays empty without a node), which is what you want on a laptop; `make up` starts them along with the node.
 
 ```sh
-make viewer             # Postgres and Grafana only
+make viewer             # Postgres, Prometheus and Grafana, no node
 make load               # result tables into Postgres
 ```
 
 Then open Grafana on http://127.0.0.1:3000, folder `lpbot`, dashboard `lpbot: runs`. Click a run id to open that run in detail with the time range set to its window.
 
-The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it.
+The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it. From a laptop, `make tunnel HOST=<user>@<machine>` brings its Grafana to http://127.0.0.1:3001; the same file has a table of what goes wrong and why.
 
 Once the node is synced:
 

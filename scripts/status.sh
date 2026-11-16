@@ -60,3 +60,24 @@ else
     echo "  syncing: head slot $slot, $distance slots behind"
   fi
 fi
+
+echo
+echo "Disk"
+if [[ -f "$DEPLOY/.env" ]]; then
+  data_dir="$(sed -n 's/^DATA_DIR=//p' "$DEPLOY/.env" | head -n 1)"
+  case "$data_dir" in
+    /*) ;;
+    *) data_dir="$ROOT/${data_dir#./}" ;;
+  esac
+  if [[ -d "$data_dir" ]]; then
+    df -Pk "$data_dir" | awk -v dir="$data_dir" 'NR==2 {
+      free = $4 / 1024 / 1024; total = $2 / 1024 / 1024
+      printf "  %s: %.0f GB free of %.0f GB (%s used)\n", dir, free, total, $5
+      if (free < 150) print "  warning: less than 150 GB free. The node stops when the disk is full."
+    }'
+  else
+    echo "  $data_dir does not exist yet"
+  fi
+else
+  echo "  not set up yet"
+fi

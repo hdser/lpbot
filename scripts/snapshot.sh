@@ -20,6 +20,8 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ -f "$ENV_FILE" ]] \
   || die "deploy/.env does not exist yet. Run 'LPBOT_DRY_RUN=1 ./scripts/up.sh' to create it, set DATA_DIR, then run this again."
 command -v docker >/dev/null 2>&1 || die "Docker is not installed. Run ./scripts/host-setup.sh first."
+docker info >/dev/null 2>&1 \
+  || die "this shell cannot talk to Docker. If you just ran scripts/host-setup.sh, log out and back in (or run 'newgrp docker') and try again. A tmux session started before that login keeps the old permissions."
 
 set -a
 # shellcheck disable=SC1090
@@ -55,7 +57,9 @@ If it holds a synced node, there is nothing to download. To start over, empty th
 fi
 
 avail_gb="$(df -Pk "$RETH_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
-say "Downloading the ${profile#--} snapshot into $RETH_DIR (${avail_gb} GB free). This takes hours."
+say "Downloading the ${profile#--} snapshot into $RETH_DIR (${avail_gb} GB free)."
+echo "Reth prints the size and an estimate of the time. The estimate settles after a few minutes."
+echo "Leave it running in tmux: Ctrl-b then d detaches, 'tmux attach' comes back."
 
 # A terminal lets Reth draw its progress display; without one it logs lines.
 tty_flags=()

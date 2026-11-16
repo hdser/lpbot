@@ -1,6 +1,6 @@
 # Running the stack at home
 
-Setting up a fresh machine for it is in [REMOTE.md](REMOTE.md).
+Setting up a fresh machine for it, reaching it from a laptop, and what to do when that does not work are in [REMOTE.md](REMOTE.md).
 
 One command starts everything the bot needs on the home machine:
 
@@ -25,7 +25,7 @@ Only the peer-to-peer ports (30303 and 9000, TCP and UDP) are open to the networ
 1. Install Docker Engine with the Compose plugin.
 2. Run `make up` once, then edit `DATA_DIR` in `deploy/.env` to point at the NVMe drive and run `make up` again. Or create `deploy/.env` from `deploy/.env.example` yourself first.
 
-An archive node needs about 3 TB free and is what the replay checks assume. For a pruned full node (about 1.5 TB), set `RETH_EXTRA_ARGS=--full` in `deploy/.env`.
+An archive node needs about 3.2 TB free and is what the replay checks assume. For a pruned full node (about 1.5 TB), set `RETH_EXTRA_ARGS=--full` in `deploy/.env`.
 
 ## Day to day
 
@@ -90,7 +90,7 @@ To see the results, load them into Postgres and open Grafana:
 make load
 ```
 
-On a machine without the node, `make viewer` starts only Postgres and Grafana, which is enough to load and look at results. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has three dashboards: every run of an experiment side by side, one run in detail, and what a run saw of pools and zones. Start from the runs dashboard and click a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. Loading is safe to repeat; a run loaded twice replaces itself.
+On a machine without the node, `make viewer` starts Postgres, Prometheus and Grafana, which is enough to load and look at results. The `Reth node` dashboard stays empty until a node runs. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has three dashboards: every run of an experiment side by side, one run in detail, and what a run saw of pools and zones. Start from the runs dashboard and click a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. Loading is safe to repeat; a run loaded twice replaces itself.
 
 `make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 
