@@ -15,8 +15,8 @@ pub mod eth;
 pub mod rpc;
 pub mod uniswap_v3;
 
-#[cfg(test)]
-pub(crate) mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use rpc::{RpcClient, RpcError};
 
