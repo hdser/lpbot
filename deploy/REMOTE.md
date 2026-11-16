@@ -94,7 +94,13 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    make status      # repeat until both clients say they are synced
    ```
 
-7. **Build the bot and run the checks** in `deploy/README.md`, "First check after the sync": `lpbot pools`, `lpbot verify-pool`, `make history`, `lpbot verify-fees`, `make backtest`, `make calibrate`, `make load`.
+7. **Run the checks.** Once both clients are synced, inside `tmux`:
+
+   ```sh
+   make gates
+   ```
+
+   It builds the bot, checks it against real chain data step by step, runs the example backtest, loads the results into Grafana's database and calibrates the adaptive decision. It stops at the first step that fails and ends with a summary; the whole output is kept under `logs/`. `deploy/README.md`, "First check after the sync", describes each step and how to carry on from one.
 
 ## Reaching it from your laptop
 

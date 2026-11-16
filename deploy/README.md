@@ -42,7 +42,38 @@ Lighthouse starts from a recent checkpoint and is ready within minutes. Reth the
 
 ## First check after the sync
 
-When `make status` shows both clients synced, check that the bot's pool replica agrees with the chain:
+When `make status` shows both clients synced, one command runs every check against real chain data, then the backtest, the load into Grafana's database and the calibration:
+
+```sh
+make gates
+```
+
+Run it inside `tmux`: the first run stores months of history for every pool of the universe, and the calibration replays it many times. Everything it stores is kept, so a second run only fetches what is new.
+
+| Step | What it does | Passes when |
+| --- | --- | --- |
+| `node` | Asks the node whether it is synced, and the results database whether it is there | The node says it is synced, its newest block is less than ten minutes old, and the experiment's window lies in the past |
+| `pools` | Lists the universe's pools from the Uniswap v3 factory | There is at least one |
+| `replica` | For every pool: reads its state 2,000 blocks back, replays every event since and compares with its state now | Every pool matches, down to every tick |
+| `history` | Stores every pool's events from the longest zone lookback before the experiment's window, and replays them from the first day's state | Every pool replays to its state on the chain |
+| `row-count` | Compares the newest complete day of the traded pool, log for log, with a public endpoint from the config | An endpoint returns exactly the stored logs |
+| `fees` | Follows every position opened inside the stored history of the traded pool and compares what it collected with what the replica says it was owed | At least 20 emptied positions agree within 0.1% and none contradicts the replica |
+| `backtest` | Runs the experiment file | Every run writes its six tables |
+| `load` | Loads the tables into Postgres | The runs are in the database; open the `lpbot: runs` dashboard |
+| `calibrate` | Fits the adaptive patience decision walk-forward and scores it against the fixed rules | It finishes; the output says which one ships |
+
+It stops at the first step that fails, so nothing is built on a check that did not hold, and ends with a summary: one line per step with `pass`, `open`, `FAIL`, `left out` or `not run`. `open` means nothing wrong was found but the check could not be decided, for example when no public endpoint answered or too few positions were emptied; the steps after it still run. The whole output is kept under `logs/`.
+
+```sh
+make gates STEP=fees                    # carry on from a step
+make gates SKIP=row-count,calibrate     # leave steps out
+make gates EXPERIMENT=<file>            # another experiment file
+make gates ARGS="--blocks 7200"         # other options; `lpbot gates --help` lists them
+```
+
+The `row-count` step is the only one that talks to anything but your own node: it asks a public endpoint listed under `rpc.public` in the config for one day of one pool's logs. Leave it out with `SKIP=row-count` if you prefer.
+
+The rest of this section is the same steps by hand. Check that the bot's pool replica agrees with the chain:
 
 ```sh
 cargo run --release -p lpbot -- pools
@@ -57,7 +88,7 @@ Then store the history the backtests run on:
 make history
 ```
 
-That is `lpbot backfill --from 2026-02-01 --verify`: every universe pool from 1 February on, under `lake` in your `DATA_DIR`, as one Parquet file per pool and day plus a snapshot of each pool before the first day. `make history FROM=2026-06-01` starts later; `--pool` and `--data-dir` on the command itself narrow it further. The example experiment starts on 1 May and looks back 90 days, which is where 1 February comes from. `--verify` replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state months back, so this step needs the archive node; on a pruned node, start with a recent date.
+That is `lpbot backfill --from 2026-01-31 --verify`: every universe pool from 31 January on, under `lake` in your `DATA_DIR`, as one Parquet file per pool and day plus a snapshot of each pool before the first day. `make history FROM=2026-06-01` starts later; `--pool` and `--data-dir` on the command itself narrow it further. The example experiment starts on 1 May and looks back 90 days, which is where 31 January comes from. `--verify` replays the stored events from the snapshot and compares the result with the pool on the chain. A second run only fetches the days that are new. The snapshot is the pool's state months back, so this step needs the archive node; on a pruned node, start with a recent date.
 
 Check the fee accounting on the busiest pool you stored:
 

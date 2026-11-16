@@ -20,6 +20,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
 | Fee check: the replica's fees against what real positions collected (`lpbot verify-fees`) | |
+| One command for every check against real chain data, then the backtest, the load and the calibration (`make gates`) | |
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
 | Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
 | `lpbot run`: backtests of the zone round trip, written as the six result tables | |
@@ -28,7 +29,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Viewer: `lpbot load-results` puts the tables in Postgres; three Grafana dashboards read them (runs, run detail, pools and zones) | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
-The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `lpbot verify-pool` is that check, and it is the first thing to run once the node is synced.
+The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `make gates` is that check and every other one that needs real chain data, and it is the first thing to run once the node is synced.
 
 ## Try it
 
@@ -72,7 +73,13 @@ Then open Grafana on http://127.0.0.1:3000, folder `lpbot`, dashboard `lpbot: ru
 
 The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it. From a laptop, `make tunnel HOST=<user>@<machine>` brings its Grafana to http://127.0.0.1:3001; the same file has a table of what goes wrong and why.
 
-Once the node is synced:
+Once the node is synced, one command runs every check against real chain data in order, then the backtest, the load into Grafana's database and the calibration:
+
+```sh
+make gates
+```
+
+It stops at the first step that fails and ends with a summary of what passed; `make gates STEP=<step>` carries on from a step. `deploy/README.md` describes the steps. They are these commands, which also work one by one:
 
 ```sh
 # The universe's pools, read from the Uniswap v3 factory
@@ -81,9 +88,9 @@ cargo run --release -p lpbot -- pools
 # Replay a pool's last 2,000 blocks of events and compare the replica with the chain
 cargo run --release -p lpbot -- verify-pool <pool address from the list above>
 
-# Store every universe pool's history from February on under data/lake, then replay it
-# against the chain (the example experiment starts in May and looks back 90 days)
-make history            # or: cargo run --release -p lpbot -- backfill --from 2026-02-01 --verify
+# Store every universe pool's history from the end of January on under data/lake, then replay
+# it against the chain (the example experiment starts on 1 May and looks back 90 days)
+make history            # or: cargo run --release -p lpbot -- backfill --from 2026-01-31 --verify
 
 # Compare the replica's fees with what real positions in a pool collected
 cargo run --release -p lpbot -- verify-fees <pool address>
