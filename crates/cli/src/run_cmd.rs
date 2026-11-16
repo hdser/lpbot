@@ -164,7 +164,7 @@ struct History {
 /// A `pool` address on the strategy decides it. Otherwise it is the stored
 /// pool holding the value token that ranks highest by implied volatility
 /// over the week before the window.
-fn choose_pool(
+pub(crate) fn choose_pool(
     root: &Path,
     chain: &str,
     tokens: &Tokens,
@@ -404,7 +404,7 @@ fn settings(
     Ok((settings, pool_name))
 }
 
-fn window(config: &Config) -> Result<(Day, Day)> {
+pub(crate) fn window(config: &Config) -> Result<(Day, Day)> {
     let window = config
         .window
         .as_ref()
@@ -628,6 +628,7 @@ pub fn verdict(folds: &[Fold]) -> Verdict {
 /// Walk-forward calibration of the adaptive decision for every adaptive
 /// run of an experiment: fit its settings on one window, score them on
 /// the next against the three fixed rules, and say which one ships.
+/// Returns what ships for each calibrated run: `adaptive` or a fixed rule.
 pub fn calibrate(
     runs: &[ResolvedRun],
     root: &Path,
@@ -635,8 +636,8 @@ pub fn calibrate(
     chain: &str,
     fit_days: Option<u32>,
     score_days: Option<u32>,
-) -> Result<()> {
-    let mut calibrated = 0;
+) -> Result<Vec<(String, &'static str)>> {
+    let mut calibrated = Vec::new();
     for run in runs {
         let config = &run.config;
         let strategy = config
@@ -805,12 +806,12 @@ pub fn calibrate(
             .with_context(|| format!("cannot write {}", path.display()))?;
         println!("  written to {}", path.display());
         println!();
-        calibrated += 1;
+        calibrated.push((run.run_id.clone(), verdict.ships));
     }
-    if calibrated == 0 {
+    if calibrated.is_empty() {
         bail!("the experiment has no run with `patience.mode: adaptive` to calibrate");
     }
-    Ok(())
+    Ok(calibrated)
 }
 
 #[cfg(test)]

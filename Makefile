@@ -7,7 +7,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 -include deploy/.env
 export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo history rank backtest calibrate load
+.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history rank backtest calibrate load
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -75,9 +75,27 @@ demo:
 	cargo run --release -p lpbot -- run experiments/demo-patience.yml --data-dir data/demo
 	cargo run --release -p lpbot -- calibrate experiments/demo-patience.yml --data-dir data/demo --fit 8 --score 5
 
-## Once the node is synced: store pool history from FROM on, and check it
-## against the chain. Safe to run again; it only fetches what is new.
-FROM ?= 2026-02-01
+## Once the node is synced: every check against real chain data in one go,
+## then the backtest, the load into Grafana's database and the calibration,
+## for EXPERIMENT. It stops at the first step that fails and ends with a
+## summary; the whole output is kept under logs/. Safe to run again: it
+## only fetches what is new. The targets below are its steps one by one.
+##   make gates                            everything
+##   make gates STEP=fees                  carry on from a step
+##   make gates SKIP=row-count,calibrate   leave steps out
+##   make gates ARGS="--blocks 7200"       other options of `lpbot gates`
+## Steps: node, pools, replica, history, row-count, fees, backtest, load,
+## calibrate.
+STEP ?=
+SKIP ?=
+ARGS ?=
+gates:
+	./scripts/gates.sh $(EXPERIMENT) --results-dir $(RESULTS) $(if $(STEP),--start-at $(STEP)) $(if $(SKIP),--skip $(SKIP)) $(ARGS)
+
+## Store pool history from FROM on, and check it against the chain. Safe to
+## run again; it only fetches what is new. The default is what the example
+## experiment needs: its window starts on 1 May and it looks back 90 days.
+FROM ?= 2026-01-31
 history:
 	cargo run --release -p lpbot -- backfill --from $(FROM) --verify
 

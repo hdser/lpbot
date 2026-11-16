@@ -5,7 +5,7 @@ use std::path::Path;
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
-use lpbot_data::fee_check::{check_fees, summarize, PositionCheck, Verdict};
+use lpbot_data::fee_check::{check_fees, summarize, FeeCheckSummary, PositionCheck, Verdict};
 use lpbot_data::snapshot::SnapshotStore;
 use lpbot_data::store::EventStore;
 
@@ -26,8 +26,9 @@ fn describe(check: &PositionCheck) -> String {
     )
 }
 
-/// Returns whether the check passed.
-pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<bool> {
+/// Prints the check and returns its counts; `passed(needed)` on them says
+/// whether it passed.
+pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<FeeCheckSummary> {
     let days = EventStore::new(root).days(chain, pool)?;
     let Some((last, _)) = days.last() else {
         bail!(
@@ -76,8 +77,7 @@ pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<boo
         println!("    {}", describe(check));
     }
 
-    let passed = summary.passed(needed);
-    if passed {
+    if summary.passed(needed) {
         println!("PASS");
     } else if summary.mismatched > 0 {
         println!("FAIL: the replica's fees differ from what was collected");
@@ -88,7 +88,7 @@ pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<boo
             summary.exact + summary.close
         );
     }
-    Ok(passed)
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -114,8 +114,10 @@ mod tests {
 
         // Every position is followed and none contradicts the replica,
         // but without Collect events none can confirm it either.
-        assert!(!run(&root, "ethereum", crate::demo_cmd::DEMO_POOL, 20).unwrap());
-        assert!(run(&root, "ethereum", crate::demo_cmd::DEMO_POOL, 0).unwrap());
+        let summary = run(&root, "ethereum", crate::demo_cmd::DEMO_POOL, 20).unwrap();
+        assert!(!summary.passed(20));
+        assert_eq!(summary.mismatched, 0);
+        assert!(summary.passed(0));
         assert!(run(&root, "ethereum", Address::repeat_byte(7), 0).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -23,3 +23,7 @@ anyhow.workspace = true
 clap.workspace = true
 serde_yaml.workspace = true
 postgres.workspace = true
+
+[dev-dependencies]
+lpbot-chain = { workspace = true, features = ["testing"] }
+serde_json.workspace = true

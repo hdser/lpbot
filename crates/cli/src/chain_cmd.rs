@@ -5,13 +5,13 @@ use std::path::Path;
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Context, Result};
-use lpbot_chain::uniswap_v3::{discover_pools, fetch_snapshot, verify_pool};
+use lpbot_chain::uniswap_v3::{discover_pools, fetch_snapshot, verify_pool, DiscoveredPool};
 use lpbot_chain::RpcClient;
 use lpbot_core::{ChainConfig, Config};
 use lpbot_venues::uniswap_v3::pool::Pool;
 
 /// Blocks to stay behind the head, so a reorg cannot change what was read.
-const HEAD_MARGIN: u64 = 5;
+pub(crate) const HEAD_MARGIN: u64 = 5;
 
 /// Universe tokens of a chain: symbol to address and decimals.
 pub type Tokens = BTreeMap<String, (Address, u8)>;
@@ -75,9 +75,13 @@ fn chain_config<'a>(config: &'a Config, chain_name: &str) -> Result<&'a ChainCon
 
 /// Connects to a chain's node and checks it is the chain the config expects.
 pub fn connect(config_path: &Path, chain_name: &str, rpc_override: Option<&str>) -> Result<Chain> {
-    let config = load_base_config(config_path)?;
-    let chain = chain_config(&config, chain_name)?;
-    let (factory, tokens) = chain_addresses(&config, chain_name)?;
+    connect_to(&load_base_config(config_path)?, chain_name, rpc_override)
+}
+
+/// Like `connect`, for a config that is already loaded.
+pub fn connect_to(config: &Config, chain_name: &str, rpc_override: Option<&str>) -> Result<Chain> {
+    let chain = chain_config(config, chain_name)?;
+    let (factory, tokens) = chain_addresses(config, chain_name)?;
 
     let url = rpc_override
         .map(str::to_string)
@@ -101,7 +105,12 @@ pub fn connect(config_path: &Path, chain_name: &str, rpc_override: Option<&str>)
     })
 }
 
-fn symbol_of(chain: &Chain, address: Address) -> String {
+/// The public endpoints the config lists for a chain, for cross-checks.
+pub fn public_endpoints(config: &Config, chain_name: &str) -> Result<Vec<String>> {
+    Ok(chain_config(config, chain_name)?.rpc.public.clone())
+}
+
+pub(crate) fn symbol_of(chain: &Chain, address: Address) -> String {
     chain
         .tokens
         .iter()
@@ -110,8 +119,19 @@ fn symbol_of(chain: &Chain, address: Address) -> String {
         .unwrap_or_else(|| format!("{address:#x}"))
 }
 
-/// Lists every Uniswap v3 pool whose two tokens are both in the universe.
-pub fn pools(chain: &Chain) -> Result<()> {
+/// A pool as the listings name it, such as `USDC/WETH 0.05%`.
+pub(crate) fn pair_label(chain: &Chain, pool: &DiscoveredPool) -> String {
+    format!(
+        "{}/{} {}%",
+        symbol_of(chain, pool.token0),
+        symbol_of(chain, pool.token1),
+        pool.fee_pips as f64 / 10_000.0
+    )
+}
+
+/// The universe's pools just behind the head, ordered by pair and fee,
+/// with the block they were read at.
+pub(crate) fn discover(chain: &Chain) -> Result<(u64, Vec<DiscoveredPool>)> {
     let block = chain.client.block_number()?.saturating_sub(HEAD_MARGIN);
     let addresses: Vec<Address> = chain.tokens.values().map(|(a, _)| *a).collect();
     let mut found = discover_pools(&chain.client, chain.factory, &addresses, block)?;
@@ -122,6 +142,12 @@ pub fn pools(chain: &Chain) -> Result<()> {
             p.fee_pips,
         )
     });
+    Ok((block, found))
+}
+
+/// Lists every Uniswap v3 pool whose two tokens are both in the universe.
+pub fn pools(chain: &Chain) -> Result<()> {
+    let (block, found) = discover(chain)?;
 
     println!("{} pools on {} at block {block}", found.len(), chain.name);
     println!();

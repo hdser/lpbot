@@ -5,12 +5,16 @@
 //! (list the universe's pools from the node), `verify-pool` (check the
 //! replica against a deployed pool), `rank` (rank the pools by implied
 //! volatility), `zones` (a pool's zone map), `backfill` and `demo-data` (fill
-//! the data folder) and `run` (backtest an experiment on the stored history).
+//! the data folder), `run` (backtest an experiment on the stored history)
+//! and `gates` (every check against real chain data, in order, then the
+//! backtest, the load and the calibration).
 
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
 mod fees_cmd;
+mod gates_cmd;
+mod load_cmd;
 mod rank_cmd;
 mod run_cmd;
 mod zones_cmd;
@@ -57,10 +61,62 @@ enum Command {
     VerifyFees(VerifyFeesArgs),
     /// Load the result tables into Postgres, where the viewer reads them.
     LoadResults(LoadArgs),
+    /// Once the node is synced: every check against real chain data, then
+    /// the backtest, the load and the calibration. Stops at the first
+    /// step that fails.
+    Gates(GatesArgs),
     /// Write a simulated pool history, to try the pipeline without a node.
     DemoData(DemoArgs),
     /// Show a pool's zone map: how often price crosses each candidate range.
     Zones(ZonesArgs),
+}
+
+#[derive(Args)]
+struct GatesArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Node endpoint. Defaults to LPBOT_RPC, then the config's local endpoint.
+    #[arg(long)]
+    rpc: Option<String>,
+    /// Data folder for the pool history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Folder the result tables are written to.
+    #[arg(long, default_value = "runs")]
+    results_dir: PathBuf,
+    /// Database to load the results into, as postgres://user:password@host:port/name.
+    /// Defaults to LPBOT_DB_URL; without one the load is left out.
+    #[arg(long)]
+    db: Option<String>,
+    /// Step to start at: node, pools, replica, history, row-count, fees,
+    /// backtest, load or calibrate. The steps before it are left out.
+    #[arg(long)]
+    start_at: Option<String>,
+    /// Steps to leave out, separated by commas.
+    #[arg(long, value_delimiter = ',')]
+    skip: Vec<String>,
+    /// First day of history to store, as YYYY-MM-DD. Defaults to the longest
+    /// zone lookback before the experiment's window.
+    #[arg(long)]
+    history_from: Option<String>,
+    /// Blocks the replica check replays for every pool.
+    #[arg(long, default_value_t = 2_000)]
+    blocks: u64,
+    /// Blocks per log request. Shrinks by itself when the node refuses.
+    #[arg(long, default_value_t = 2_000)]
+    log_chunk: u64,
+    /// Emptied and fully collected positions the fee check needs to pass.
+    #[arg(long, default_value_t = 20)]
+    positions: usize,
+    /// Days to fit on. Defaults to calibration.fit_window in the config.
+    #[arg(long)]
+    fit: Option<u32>,
+    /// Days to score on. Defaults to calibration.score_window in the config.
+    #[arg(long)]
+    score: Option<u32>,
 }
 
 #[derive(Args)]
@@ -311,6 +367,38 @@ fn real_main() -> Result<()> {
                 args.fit,
                 args.score,
             )
+            .map(|_| ())
+        }
+        Command::Gates(args) => {
+            let runs = resolve(&args.experiment)?;
+            print_runs(&runs, args.experiment.show_config);
+            println!();
+            let history_from = args
+                .history_from
+                .as_deref()
+                .map(|text| text.parse().map_err(anyhow::Error::msg))
+                .transpose()?;
+            let gates = gates_cmd::Gates::new(
+                runs,
+                gates_cmd::Options {
+                    chain_name: args.chain,
+                    rpc: args.rpc,
+                    root: backfill_cmd::data_dir(args.data_dir.as_deref()),
+                    results: args.results_dir,
+                    db: load_cmd::database(args.db),
+                    history_from,
+                    blocks: args.blocks,
+                    log_chunk: args.log_chunk,
+                    positions: args.positions,
+                    fit_days: args.fit,
+                    score_days: args.score,
+                },
+            )?;
+            let plan = gates_cmd::Plan {
+                start_at: args.start_at,
+                skip: args.skip,
+            };
+            gates_cmd::run(gates, &plan)
         }
         Command::Pools(args) => {
             let chain = chain_cmd::connect(&args.config, &args.chain, args.rpc.as_deref())?;
@@ -357,26 +445,13 @@ fn real_main() -> Result<()> {
             }
         }
         Command::LoadResults(args) => {
-            let url = args
-                .db
-                .or_else(|| std::env::var("LPBOT_DB_URL").ok())
-                .filter(|url| !url.is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no database given: pass --db or set LPBOT_DB_URL \
-                         (`make load` takes it from deploy/.env)"
-                    )
-                })?;
-            // The URL holds the password, so it is never printed.
-            let mut client = postgres::Client::connect(&url, postgres::NoTls)
-                .map_err(|e| anyhow::anyhow!("cannot connect to the database: {e}"))?;
-            let report = lpbot_sim::loader::load_results(&mut client, &args.results_dir)?;
-            if report.runs == 0 {
-                bail!(
-                    "no runs found under {}; run `lpbot run <experiment.yml>` first",
-                    args.results_dir.display()
-                );
-            }
+            let url = load_cmd::database(args.db).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no database given: pass --db or set LPBOT_DB_URL \
+                     (`make load` takes it from deploy/.env)"
+                )
+            })?;
+            let report = load_cmd::run(&url, &args.results_dir)?;
             println!(
                 "loaded {} run(s), {} rows, from {}",
                 report.runs,
@@ -386,13 +461,13 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::VerifyFees(args) => {
-            let passed = fees_cmd::run(
+            let summary = fees_cmd::run(
                 &backfill_cmd::data_dir(args.data_dir.as_deref()),
                 &args.chain,
                 chain_cmd::checked_address("pool", &args.pool)?,
                 args.positions,
             )?;
-            if passed {
+            if summary.passed(args.positions) {
                 Ok(())
             } else {
                 bail!("the fee check did not pass")
@@ -430,6 +505,7 @@ fn real_main() -> Result<()> {
                     verify: args.verify,
                 },
             )
+            .map(|_| ())
         }
         Command::Zones(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;

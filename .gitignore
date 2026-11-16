@@ -4,6 +4,7 @@
 # Data and results never go in Git
 /data/
 /runs/
+/logs/
 *.parquet
 
 # Secrets never go in Git

@@ -1736,6 +1736,7 @@ dependencies = [
  "lpbot-strategy",
  "lpbot-venues",
  "postgres",
+ "serde_json",
  "serde_yaml",
 ]
 

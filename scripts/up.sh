@@ -196,5 +196,9 @@ RPC:      http://127.0.0.1:8545 and ws://127.0.0.1:8546 (this machine only)
 From another machine: make tunnel HOST=<user>@<this machine>, then http://127.0.0.1:3001
 
 After a snapshot the node catches up in hours. Without one, the first sync
-takes days. The bot's data commands wait for it.
+takes days. The bot's data commands wait for it. Once \`make status\` says
+both clients are synced:
+
+  make gates             every check against real chain data, then the
+                         backtest, the load into Grafana and the calibration
 EOF
