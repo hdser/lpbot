@@ -448,6 +448,10 @@ fn settings(
         max_gap: number(&strategy.extra, &["entry", "max_gap_ticks"]).map_or(width, |v| v as Tick),
         capital,
         capital_share: number(&strategy.extra, &["capital_share"]).unwrap_or(1.0),
+        max_share_of_in_range_liquidity: number(
+            &config.universe.extra,
+            &["max_share_of_in_range_liquidity"],
+        ),
         loss_limit,
         policy,
         decide_every: duration(&strategy.patience.extra, &["decide_every"], 3_600)?,
