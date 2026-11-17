@@ -41,9 +41,25 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 
 | Job | When | To carry on after an interruption |
 | --- | --- | --- |
-| `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. It carries on with the snapshot it began with, written down in `DATA_DIR/reth-snapshot-manifest`, and Reth keeps the files it has already verified. Before downloading, Reth checks what is on disk and prints nothing until `Startup integrity summary`: tens of minutes after an interruption |
+| `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. It carries on with the snapshot it began with, written down in `DATA_DIR/reth-snapshot-manifest`, and Reth keeps the files it has already verified. Before downloading, Reth checks what is on disk and prints nothing until `Startup integrity summary`: tens of minutes after an interruption, about 90 for 2 TB on disk. It is not stuck; see "Is the snapshot download working?" below before pressing Ctrl-C. If it is stopped before it finishes, the script says so and gives the resume command |
 | `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again |
 | `make history`, `make backtest`, `make calibrate`, `make load` | The steps of `make gates`, one by one | The same command again |
+
+### Is the snapshot download working?
+
+Its output stays still for long stretches: through the check of what is on disk, and between progress lines. Look at the disk instead, from a second SSH window, not the `node` session:
+
+```sh
+vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
+```
+
+| `vmstat` shows | It is |
+| --- | --- |
+| `bi` in the hundreds of thousands (KB read per second), `bo` near 0, `wa` high | Checking what is on disk. 400,000 is about 400 MB/s, so 2 TB takes about 90 minutes |
+| `bo` large | Downloading and unpacking |
+| `bi` and `bo` both near 0 for several minutes | Waiting, or stopped. Look at the `node` session; if it shows a prompt, the download is not running |
+
+`vmstat` only watches. It can run, or not, without changing the download.
 
 ## After the machine was off
 
@@ -99,6 +115,7 @@ sudo poweroff
 | What | How |
 | --- | --- |
 | Sync progress and free disk space | `make status` |
+| Whether the snapshot download is reading or writing | `vmstat 5`, see "Is the snapshot download working?" above |
 | The node's own log | `make logs`; Ctrl-c leaves it and the node keeps running |
 | Temperatures | `sensors` (package `lm-sensors`); `sudo nvme smart-log /dev/nvme0` (package `nvme-cli`) |
 | Dashboards | From the laptop: `make tunnel HOST=<user>@<node machine>`, then http://127.0.0.1:3001 |
