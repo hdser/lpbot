@@ -4,43 +4,95 @@ use lpbot_data::synth::{generate, SynthConfig};
 use lpbot_risk::LossLimit;
 use lpbot_strategy::FixedRule;
 use lpbot_venues::uniswap_v3::events::PoolEvent;
-use lpbot_venues::uniswap_v3::pool::{Pool, PoolSnapshot, SwapEvent};
+use lpbot_venues::uniswap_v3::liquidity_amounts::get_liquidity_for_amount1;
+use lpbot_venues::uniswap_v3::pool::{fees_earned, Pool, PoolSnapshot, Replay, SwapEvent};
 use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
-use crate::engine::{run, GasModel, Output, Policy, Settings, Token};
+use crate::engine::{
+    after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, GasModel,
+    Output, Policy, Settings, Token,
+};
 
 const T0: u64 = 1_800_000_000;
 const HOUR: u64 = 3_600;
+/// Liquidity of the test pool between ticks -10,000 and 10,000.
+const DEEP: u128 = 1_000_000_000_000_000_000_000_000;
 
-/// A pool with deep, even liquidity at tick 0, and the events of moving
-/// its price to each target tick in turn, one hour and 300 blocks apart.
-fn history(targets: &[i32]) -> (PoolSnapshot, Vec<TimedEvent>) {
+/// One thing that happens to the test pool.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// A swap that leaves the price exactly on this tick's price.
+    To(i32),
+    /// A flash loan that pays these fees in token0 and token1.
+    Flash(u128, u128),
+    /// The protocol's fee share is switched on, as denominators.
+    FeeProtocol(u8, u8),
+}
+
+/// A pool at tick 0 with `base` liquidity spread evenly between ticks
+/// -10,000 and 10,000 plus the `extra` positions, and the events of each
+/// block's steps, blocks one hour and 300 block numbers apart.
+fn history_of(
+    base: u128,
+    extra: &[(i32, i32, u128)],
+    blocks: &[&[Step]],
+) -> (PoolSnapshot, Vec<TimedEvent>) {
     let mut pool = Pool::new(500, 10);
     pool.initialize(get_sqrt_ratio_at_tick(0).unwrap()).unwrap();
-    pool.mint(-10_000, 10_000, 10u128.pow(24)).unwrap();
+    pool.mint(-10_000, 10_000, base).unwrap();
+    for (lower, upper, liquidity) in extra {
+        pool.mint(*lower, *upper, *liquidity).unwrap();
+    }
     let snapshot = pool.snapshot();
 
     let huge = I256::try_from(10u128.pow(32)).unwrap();
     let mut events = Vec::new();
-    for (i, target) in targets.iter().enumerate() {
-        let limit = get_sqrt_ratio_at_tick(*target).unwrap();
-        let zero_for_one = limit < pool.sqrt_price_x96();
-        let amounts = pool.swap(zero_for_one, huge, limit, &mut ()).unwrap();
+    for (i, steps) in blocks.iter().enumerate() {
         let hours = i as u64 + 1;
-        events.push(TimedEvent {
-            block: 1_000 + 300 * hours,
-            time: T0 + HOUR * hours,
-            log_index: 0,
-            event: PoolEvent::Swap(SwapEvent {
-                amount0: amounts.amount0,
-                amount1: amounts.amount1,
-                sqrt_price_x96: pool.sqrt_price_x96(),
-                liquidity: pool.liquidity(),
-                tick: pool.tick(),
-            }),
-        });
+        for (log_index, step) in steps.iter().enumerate() {
+            let event = match *step {
+                Step::To(target) => {
+                    let limit = get_sqrt_ratio_at_tick(target).unwrap();
+                    let zero_for_one = limit < pool.sqrt_price_x96();
+                    let amounts = pool.swap(zero_for_one, huge, limit, &mut ()).unwrap();
+                    PoolEvent::Swap(SwapEvent {
+                        amount0: amounts.amount0,
+                        amount1: amounts.amount1,
+                        sqrt_price_x96: pool.sqrt_price_x96(),
+                        liquidity: pool.liquidity(),
+                        tick: pool.tick(),
+                    })
+                }
+                Step::Flash(paid0, paid1) => {
+                    let (paid0, paid1) = (U256::from(paid0), U256::from(paid1));
+                    pool.flash(paid0, paid1).unwrap();
+                    PoolEvent::Flash { paid0, paid1 }
+                }
+                Step::FeeProtocol(fee_protocol0, fee_protocol1) => {
+                    pool.set_fee_protocol(fee_protocol0, fee_protocol1);
+                    PoolEvent::SetFeeProtocol {
+                        fee_protocol0,
+                        fee_protocol1,
+                    }
+                }
+            };
+            events.push(TimedEvent {
+                block: 1_000 + 300 * hours,
+                time: T0 + HOUR * hours,
+                log_index: log_index as u32,
+                event,
+            });
+        }
     }
     (snapshot, events)
+}
+
+/// The deep pool, and the events of moving its price to each target tick
+/// in turn, one swap per block.
+fn history(targets: &[i32]) -> (PoolSnapshot, Vec<TimedEvent>) {
+    let steps: Vec<[Step; 1]> = targets.iter().map(|t| [Step::To(*t)]).collect();
+    let blocks: Vec<&[Step]> = steps.iter().map(|s| s.as_slice()).collect();
+    history_of(DEEP, &[], &blocks)
 }
 
 fn settings(rule: FixedRule) -> Settings {
@@ -52,6 +104,7 @@ fn settings(rule: FixedRule) -> Settings {
         max_gap: 20,
         capital: U256::from(10u128.pow(18)),
         capital_share: 1.0,
+        max_share_of_in_range_liquidity: None,
         loss_limit: LossLimit::new(50.0).unwrap(),
         policy: Policy::Fixed(rule),
         decide_every: HOUR,
@@ -527,4 +580,450 @@ fn without_enough_history_the_adaptive_decision_waits_and_expects_nothing() {
     assert_eq!(out.decisions[0].action, "wait");
     assert_eq!(out.decisions[0].expected_wait, None);
     assert_eq!(out.decisions[0].expected_close, None);
+}
+
+// --- fees, the share cap and gas ------------------------------------------
+
+/// Gas at 10 gwei with the value token worth one ETH: 0.005 to open,
+/// 0.003 to close and 0.002 to swap.
+fn priced() -> GasModel {
+    GasModel {
+        open_units: 500_000,
+        close_units: 300_000,
+        swap_units: 200_000,
+        gas_price_gwei: 10.0,
+        value_raw_per_eth: 1e18,
+    }
+}
+
+/// Everything the pool's LPs earned over `events`, in each token, with
+/// `liquidity` active throughout.
+fn lp_fees_paid(snapshot: &PoolSnapshot, events: &[TimedEvent], liquidity: u128) -> (U256, U256) {
+    let mut pool = Pool::from_snapshot(snapshot.clone());
+    for event in events {
+        pool.apply_event(&event.event, Replay::Strict, &mut ())
+            .unwrap();
+    }
+    let (growth0, growth1) = pool.fee_growth_global();
+    (
+        fees_earned(growth0, U256::ZERO, liquidity),
+        fees_earned(growth1, U256::ZERO, liquidity),
+    )
+}
+
+#[test]
+fn a_position_larger_than_the_pool_never_earns_more_than_the_pool_paid() {
+    // The pool holds a thousandth of the liquidity the capital buys in the
+    // range: the passive model's assumption is badly broken, and the fee
+    // share must still stay below the whole fee.
+    let thin = 10u128.pow(18);
+    let blocks: Vec<[Step; 1]> = THERE_AND_BACK.iter().map(|t| [Step::To(*t)]).collect();
+    let blocks: Vec<&[Step]> = blocks.iter().map(|b| b.as_slice()).collect();
+    let (snapshot, events) = history_of(thin, &[], &blocks);
+    let out = run(snapshot.clone(), &events, &settings(FixedRule::Wait)).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!(first.passes, 2);
+    assert!(first.amount_in > 0.999_999, "{first:?}");
+
+    let (fees0, fees1) = lp_fees_paid(&snapshot, &events, thin);
+    // Both tokens are worth about the same here: the price stays within
+    // 60 ticks of 1.
+    let paid = (to_f64(fees0) + to_f64(fees1)) / 1e18;
+    assert!(first.fees > 0.0);
+    assert!(first.fees < paid * 1.01, "earned {} of {paid}", first.fees);
+    // Taking each step's fee times the position's liquidity over the
+    // pool's would have paid it about 0.1%, two passes at 0.05%: hundreds
+    // of times what the pool's LPs were paid.
+    assert!(first.fees < 0.000_01, "{}", first.fees);
+    assert_conserved(&out);
+}
+
+#[test]
+fn the_fee_share_counts_the_position_in() {
+    let fee = U256::from(1_000_000u64);
+    let share = |pool: u128, position: u128| {
+        fees_earned(
+            diluted_fee_growth(fee, pool, position),
+            U256::ZERO,
+            position,
+        )
+    };
+    // Equal liquidity: half the fee. A third, rounded down.
+    assert_eq!(share(1_000, 1_000), U256::from(500_000u64));
+    assert_eq!(share(2, 1), U256::from(333_333u64));
+    // A small position: its pro-rata share.
+    assert_eq!(share(999_000, 1_000), U256::from(1_000u64));
+    // A huge one: nearly all of it, never more.
+    assert!(share(1, 10u128.pow(30)) < fee);
+    // Where the pool had nothing, nothing was earned.
+    assert_eq!(share(0, 1_000), U256::ZERO);
+    assert_eq!(diluted_fee_growth(U256::ZERO, 5, 5), U256::ZERO);
+}
+
+#[test]
+fn the_thinnest_liquidity_of_a_range_is_read_from_the_tick_map() {
+    let mut pool = Pool::new(500, 10);
+    pool.initialize(get_sqrt_ratio_at_tick(0).unwrap()).unwrap();
+    pool.mint(-100, 100, 1_000).unwrap();
+    pool.mint(20, 40, 500).unwrap();
+    pool.mint(-60, -40, 300).unwrap();
+    pool.mint(-5_000, 5_000, 1).unwrap();
+    assert_eq!(pool.liquidity(), 1_001);
+
+    // Above the price.
+    assert_eq!(thinnest_liquidity(&pool, 20, 40), 1_501);
+    assert_eq!(thinnest_liquidity(&pool, 20, 60), 1_001);
+    assert_eq!(thinnest_liquidity(&pool, 40, 60), 1_001);
+    assert_eq!(thinnest_liquidity(&pool, 90, 120), 1);
+    // Below it.
+    assert_eq!(thinnest_liquidity(&pool, -60, -40), 1_301);
+    assert_eq!(thinnest_liquidity(&pool, -60, -20), 1_001);
+    assert_eq!(thinnest_liquidity(&pool, -120, -60), 1);
+    // A gap in the pool's liquidity reads zero.
+    assert_eq!(thinnest_liquidity(&pool, 4_990, 5_010), 0);
+    // Around the price.
+    assert_eq!(thinnest_liquidity(&pool, -10, 30), 1_001);
+
+    // With the price on an initialized tick, reached from above: the
+    // pool reports the tick below it and the liquidity below it.
+    let limit = get_sqrt_ratio_at_tick(-40).unwrap();
+    pool.swap(true, I256::try_from(10u64.pow(9)).unwrap(), limit, &mut ())
+        .unwrap();
+    assert_eq!(pool.tick(), -41);
+    assert_eq!(pool.liquidity(), 1_301);
+    assert_eq!(thinnest_liquidity(&pool, 20, 40), 1_501);
+    assert_eq!(thinnest_liquidity(&pool, -40, -20), 1_001);
+    assert_eq!(thinnest_liquidity(&pool, -60, -40), 1_301);
+}
+
+#[test]
+fn an_entry_is_capped_at_its_share_of_the_liquidity_in_its_range() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let uncapped = run(snapshot.clone(), &events, &settings(FixedRule::Wait)).unwrap();
+    assert_eq!(uncapped.summary.capped_entries, 0);
+
+    // The capital buys about a tenth of a percent of the range's
+    // liquidity. At a cap of a hundredth of a percent a tenth of it goes
+    // in, and the rest stays as cash.
+    let capped = Settings {
+        max_share_of_in_range_liquidity: Some(0.000_1),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &capped).unwrap();
+    assert!(out.summary.capped_entries >= 1);
+    let first = &out.campaigns[0];
+    assert!((0.099_9..0.100_1).contains(&first.amount_in), "{first:?}");
+    // The smaller position earns the same on what went in.
+    let gain = first.result / first.amount_in;
+    assert!((0.000_95..0.001_05).contains(&gain), "{gain}");
+    let full = &uncapped.campaigns[0];
+    assert!((first.result / full.result - first.amount_in / full.amount_in).abs() < 1e-4);
+    assert_conserved(&out);
+
+    // A cap the capital stays under changes nothing.
+    let loose = Settings {
+        max_share_of_in_range_liquidity: Some(0.05),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &loose).unwrap();
+    assert_eq!(out.summary.capped_entries, 0);
+    assert_eq!(out.campaigns, uncapped.campaigns);
+}
+
+#[test]
+fn a_share_cap_that_is_not_a_share_is_refused() {
+    let (snapshot, events) = history(&[5]);
+    for share in [0.0, -0.1, 1.5, f64::NAN] {
+        let odd = Settings {
+            max_share_of_in_range_liquidity: Some(share),
+            ..settings(FixedRule::Wait)
+        };
+        let error = run(snapshot.clone(), &events, &odd)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("universe.max_share_of_in_range_liquidity"),
+            "{error}"
+        );
+    }
+}
+
+/// The usual entry at [-20, 0), price inside it at -10 when the `during`
+/// block happens, then down through it and back up above it.
+fn with_a_flash(during: &[Step]) -> Output {
+    let blocks: [&[Step]; 8] = [
+        &[Step::To(5)],
+        &[Step::To(6)],
+        &[Step::To(-10)],
+        during,
+        &[Step::To(-50)],
+        &[Step::To(-52)],
+        &[Step::To(30)],
+        &[Step::To(31)],
+    ];
+    let (snapshot, events) = history_of(DEEP, &[], &blocks);
+    run(snapshot, &events, &settings(FixedRule::Wait)).unwrap()
+}
+
+#[test]
+fn a_flash_loan_pays_the_position_its_share_while_price_is_in_its_range() {
+    // The position: the whole capital in token1 over [-20, 0).
+    let liquidity = get_liquidity_for_amount1(
+        get_sqrt_ratio_at_tick(-20).unwrap(),
+        get_sqrt_ratio_at_tick(0).unwrap(),
+        U256::from(10u128.pow(18)),
+    )
+    .unwrap();
+    let share = |lp_fee: u128| {
+        let growth = diluted_fee_growth(U256::from(lp_fee), DEEP, liquidity);
+        to_f64(fees_earned(growth, U256::ZERO, liquidity)) / 1e18
+    };
+    let paid = 10u128.pow(15);
+
+    // Without a protocol fee the LPs get all of it.
+    let none = with_a_flash(&[Step::Flash(0, 0)]);
+    let flash = with_a_flash(&[Step::Flash(0, paid)]);
+    assert_eq!(none.campaigns[0].exit_reason, "round_trip_complete");
+    let earned = flash.campaigns[0].fees - none.campaigns[0].fees;
+    assert!(earned > 0.0);
+    assert!(
+        (earned - share(paid)).abs() < 1e-15,
+        "{earned} {}",
+        share(paid)
+    );
+    let gained = flash.campaigns[0].result - none.campaigns[0].result;
+    assert!((gained - earned).abs() < 1e-15);
+    assert_conserved(&flash);
+
+    // With one: the protocol takes a quarter first, as the pool does.
+    let none = with_a_flash(&[Step::FeeProtocol(4, 4), Step::Flash(0, 0)]);
+    let flash = with_a_flash(&[Step::FeeProtocol(4, 4), Step::Flash(0, paid)]);
+    let earned = flash.campaigns[0].fees - none.campaigns[0].fees;
+    assert_eq!(
+        after_protocol(U256::from(paid), 4),
+        U256::from(paid - paid / 4)
+    );
+    assert!((earned - share(paid - paid / 4)).abs() < 1e-15, "{earned}");
+
+    // A flash while price is outside the range pays the position nothing.
+    let outside = |during: &[Step]| {
+        let blocks: [&[Step]; 7] = [
+            &[Step::To(5)],
+            &[Step::To(6)],
+            during,
+            &[Step::To(-50)],
+            &[Step::To(-52)],
+            &[Step::To(30)],
+            &[Step::To(31)],
+        ];
+        let (snapshot, events) = history_of(DEEP, &[], &blocks);
+        run(snapshot, &events, &settings(FixedRule::Wait)).unwrap()
+    };
+    let a = outside(&[Step::Flash(0, 0)]);
+    let b = outside(&[Step::Flash(paid, paid)]);
+    assert_eq!(a.campaigns[0].fees, b.campaigns[0].fees);
+}
+
+#[test]
+fn gas_owed_after_a_flip_counts_against_the_equity() {
+    // The flip at -50 puts everything back into the pool, so the free
+    // capital cannot pay its gas and it is owed until the round trip ends.
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let free = run(snapshot.clone(), &events, &settings(FixedRule::Flip)).unwrap();
+    let gas = Settings {
+        gas: priced(),
+        ..settings(FixedRule::Flip)
+    };
+    let out = run(snapshot, &events, &gas).unwrap();
+    let (a, b) = (&free.series[3], &out.series[3]);
+    assert_eq!((a.state.as_str(), b.state.as_str()), ("flipped", "flipped"));
+    // Open 0.005, paid; close and open again 0.008, owed. The gas set
+    // aside at entry also left a slightly smaller position, marked a
+    // little differently.
+    let spent = a.equity - b.equity;
+    assert!((spent - 0.013).abs() < 1e-4, "{spent}");
+    // Settled at the end of the round trip, with the last close: the
+    // campaign paid all of it.
+    let paid = out.campaigns[0].gas;
+    assert!((paid - 0.016).abs() < 1e-12, "{paid}");
+    assert_conserved(&out);
+}
+
+#[test]
+fn gas_is_charged_in_exact_integers() {
+    // 100,000 gas at 2.3 gwei is 230,000 gwei. Multiplied out in floating
+    // point it comes to just under, which was cut down to the unit below.
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let gas = Settings {
+        gas: GasModel {
+            open_units: 100_000,
+            close_units: 0,
+            swap_units: 0,
+            gas_price_gwei: 2.3,
+            value_raw_per_eth: 1e18,
+        },
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &gas).unwrap();
+    assert_eq!(out.campaigns[0].gas, 230_000_000_000_000.0 / 1e18);
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_gas_price_that_is_not_a_price_is_refused() {
+    let (snapshot, events) = history(&[5]);
+    let odd = Settings {
+        gas: GasModel {
+            gas_price_gwei: -1.0,
+            ..priced()
+        },
+        ..settings(FixedRule::Wait)
+    };
+    let error = run(snapshot, &events, &odd).unwrap_err().to_string();
+    assert!(error.contains("costs.gas_price_gwei"), "{error}");
+}
+
+#[test]
+fn a_share_of_an_amount_is_exact() {
+    // Beyond what a 64-bit float holds to the unit.
+    let raw = 2u128.pow(100) + 12_345;
+    let amount = U256::from(raw);
+    assert_eq!(share_of(amount, 1_000_000), amount);
+    assert_eq!(share_of(amount, 500_000), U256::from(raw / 2));
+    assert_eq!(share_of(amount, 250_000), U256::from(raw / 4));
+    assert_eq!(share_of(amount, 0), U256::ZERO);
+}
+
+// --- a price exactly on a range's edge --------------------------------------
+
+#[test]
+fn a_price_exactly_on_the_far_bound_is_decided_like_any_beyond_it() {
+    // Value in token1: the range [-20, 0) sits below the price. Price drops
+    // through it to -50 and comes back up to exactly the price of -20 in
+    // the same block. The position is wholly token0 there, while the
+    // pool's tick reads -20, inside the range.
+    let blocks: [&[Step]; 4] = [
+        &[Step::To(5)],
+        &[Step::To(6)],
+        &[Step::To(-50), Step::To(-20)],
+        &[Step::To(-25)],
+    ];
+    let (snapshot, events) = history_of(DEEP, &[], &blocks);
+    let out = run(snapshot, &events, &settings(FixedRule::Close)).unwrap();
+    assert_eq!(out.series[2].tick, -20);
+    assert_eq!(out.series[2].state, "beyond");
+    assert_eq!(out.decisions[0].action, "close", "{:?}", out.decisions);
+    assert_eq!(out.campaigns[0].exit_reason, "patience_close");
+    assert_eq!(out.campaigns[0].closed_block, events[4].block);
+
+    // The mirror image, with value in token0 and the range [0, 20) above
+    // the price, which runs up through it and comes back down to exactly
+    // the price of 20. Liquidity starting at 20 makes that an initialized
+    // tick, so the pool reports 19 there.
+    let blocks: [&[Step]; 4] = [
+        &[Step::To(-5)],
+        &[Step::To(-6)],
+        &[Step::To(50), Step::To(20)],
+        &[Step::To(25)],
+    ];
+    let (snapshot, events) = history_of(DEEP, &[(20, 1_000, DEEP)], &blocks);
+    let mirrored = Settings {
+        value: Token::Zero,
+        ..settings(FixedRule::Close)
+    };
+    let out = run(snapshot, &events, &mirrored).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!((first.tick_lower, first.tick_upper), (0, 20));
+    assert_eq!(out.series[2].tick, 19);
+    assert_eq!(out.series[2].state, "beyond");
+    assert_eq!(out.decisions[0].action, "close", "{:?}", out.decisions);
+    assert_eq!(first.exit_reason, "patience_close");
+}
+
+// --- what a flip records ----------------------------------------------------
+
+#[test]
+fn a_flip_records_the_range_it_went_to() {
+    // Two hours of latency: decided at -50, carried out once price is at
+    // -52, where the range next to the price starts one step lower.
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let slow = Settings {
+        latency_blocks: 600,
+        ..settings(FixedRule::Flip)
+    };
+    let out = run(snapshot, &events, &slow).unwrap();
+    let flip = &out.decisions[0];
+    assert_eq!((flip.action.as_str(), flip.tick), ("flip", -50));
+    assert_eq!(
+        (flip.target_lower, flip.target_upper),
+        (Some(-50), Some(-30))
+    );
+    assert_eq!(out.campaigns[0].flips, 1);
+    assert_eq!(out.campaigns[0].exit_reason, "round_trip_complete");
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_flip_that_cannot_open_ends_the_campaign_as_flip_failed() {
+    // One unit of the capital in a range 20,000 ticks wide: the unit of
+    // token0 it turns into far below buys no liquidity in the flip's
+    // range, so the flip cannot open and everything goes back to the
+    // value token.
+    let (snapshot, events) = history(&[5, 6, -20_050, -20_060]);
+    let tiny = Settings {
+        width: 20_000,
+        max_gap: 20_000,
+        capital: U256::from(1_000u16),
+        capital_share: 0.001,
+        ..settings(FixedRule::Flip)
+    };
+    let out = run(snapshot, &events, &tiny).unwrap();
+    let flip = &out.decisions[0];
+    assert_eq!(flip.action, "flip");
+    assert_eq!(
+        (flip.target_lower, flip.target_upper),
+        (Some(-20_040), Some(-40))
+    );
+    let first = &out.campaigns[0];
+    assert_eq!(first.exit_reason, "flip_failed");
+    assert_eq!(first.flips, 0);
+    assert_eq!(first.closed_block, events[3].block);
+    assert_conserved(&out);
+}
+
+#[test]
+fn what_a_flips_range_cannot_take_goes_back_with_a_charged_swap() {
+    // A few units in a range 20,000 ticks wide, so that the flip's range
+    // cannot take all of the token0 it gets: a unit is left over. It stays
+    // in token0 through the flip and goes back with a swap when the round
+    // trip is done, and that swap is charged like any other.
+    let (snapshot, events) = history(&[5, 6, -20_050, -20_060, 10, 11]);
+    let few = Settings {
+        width: 20_000,
+        max_gap: 20_000,
+        capital: U256::from(10_000u16),
+        capital_share: 0.000_5,
+        // One unit of gas costs one unit of the value token.
+        gas: GasModel {
+            open_units: 100,
+            close_units: 100,
+            swap_units: 7,
+            gas_price_gwei: 1.0,
+            value_raw_per_eth: 1e9,
+        },
+        ..settings(FixedRule::Flip)
+    };
+    let out = run(snapshot, &events, &few).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!(
+        (first.flips, first.exit_reason.as_str()),
+        (1, "round_trip_complete")
+    );
+    // Open; close and open for the flip; close and swap at the end.
+    assert_eq!(
+        (first.gas * 1e18).round(),
+        100.0 + 200.0 + 107.0,
+        "{first:?}"
+    );
+    assert_conserved(&out);
 }
