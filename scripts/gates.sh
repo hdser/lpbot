@@ -15,10 +15,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT/deploy/.env"
 cd "$ROOT"
 
+# shellcheck source=scripts/env.sh
+. "$ROOT/scripts/env.sh"
+
 # A setting from deploy/.env, empty when the file or the setting is missing.
 setting() {
-  [[ -f "$ENV_FILE" ]] || return 0
-  sed -n "s/^$1=//p" "$ENV_FILE" | head -n 1
+  env_setting "$ENV_FILE" "$1"
 }
 
 # The pool history lives beside the node's data, as for the other targets.

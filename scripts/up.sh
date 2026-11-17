@@ -62,10 +62,9 @@ fill GRAFANA_PASSWORD "$(openssl rand -hex 12)"
 fill HOST_UID "$(id -u)"
 fill HOST_GID "$(id -g)"
 
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
+# shellcheck source=scripts/env.sh
+. "$ROOT/scripts/env.sh"
+env_load "$ENV_FILE"
 
 # --- data directories --------------------------------------------------------
 
@@ -132,6 +131,34 @@ docker info >/dev/null 2>&1 \
 
 mkdir -p "$DATA_DIR"/{reth,lighthouse,postgres,prometheus,grafana}
 
+# Written when the node is first started. `make snapshot` refuses to run
+# once it exists: from then on the database is the node's own, synced past
+# any snapshot, and a download into it would overwrite it.
+NODE_MARKER="$DATA_DIR/reth-node-started"
+
+# Reth must not open a database that a snapshot download is still filling.
+if [[ "$with_node" == 1 ]]; then
+  reth_image="ghcr.io/paradigmxyz/reth:${RETH_VERSION}"
+  if docker ps --filter "ancestor=$reth_image" --format '{{.Command}}' | grep -q download; then
+    die "a snapshot download (make snapshot) is still running. Wait for it to finish, then run this again."
+  fi
+  partial=0
+  if [[ -d "$DATA_DIR/reth/.download-cache" ]]; then
+    partial="$(find "$DATA_DIR/reth/.download-cache" -maxdepth 1 -name '*.part' | wc -l | tr -d ' ')"
+  fi
+  if [[ "$partial" != 0 ]]; then
+    die "the snapshot download in $DATA_DIR/reth did not finish ($partial archives are partly downloaded). Finish it first:
+    LPBOT_SNAPSHOT_RESUME=1 make snapshot
+Starting the node now would open a half-unpacked database."
+  fi
+fi
+
+mark_node_started() {
+  if [[ "$with_node" == 1 && ! -f "$NODE_MARKER" ]]; then
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$NODE_MARKER"
+  fi
+}
+
 # Waits until Postgres accepts connections, then makes sure the result
 # tables exist, so the dashboards of a database without runs show "no data"
 # rather than an error. Safe to repeat: it only adds what is missing.
@@ -159,6 +186,7 @@ if [[ -n "$SERVICES" ]]; then
   say "Starting only: $SERVICES"
   # shellcheck disable=SC2086
   compose up -d --no-deps $SERVICES
+  mark_node_started
 
   if [[ " $SERVICES " == *" postgres "* ]]; then
     prepare_database
@@ -180,6 +208,7 @@ fi
 
 say "Starting ${kind} node, Postgres, Prometheus and Grafana."
 compose up -d
+mark_node_started
 prepare_database
 
 cat <<EOF

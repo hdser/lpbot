@@ -5,7 +5,10 @@ use std::path::Path;
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
-use lpbot_data::fee_check::{check_fees, summarize, FeeCheckSummary, PositionCheck, Verdict};
+use lpbot_data::fee_check::{
+    check_fees, check_fees_on_chain, summarize, FeeCheckError, FeeCheckSummary, PositionCheck,
+    PositionReader, Verdict,
+};
 use lpbot_data::snapshot::SnapshotStore;
 use lpbot_data::store::EventStore;
 
@@ -14,8 +17,12 @@ pub const TOLERANCE: f64 = 0.001;
 
 fn describe(check: &PositionCheck) -> String {
     let owed = check.owed();
+    let still = match check.owed_on_chain {
+        Some((owed0, owed1)) => format!(", the pool still owes {owed0} / {owed1}"),
+        None => String::new(),
+    };
     format!(
-        "owner {:#x} ticks {}..{}: collected {} / {}, replica says {} / {}",
+        "owner {:#x} ticks {}..{}: collected {} / {}{still}, replica says {} / {}",
         check.key.owner,
         check.key.tick_lower,
         check.key.tick_upper,
@@ -26,9 +33,28 @@ fn describe(check: &PositionCheck) -> String {
     )
 }
 
-/// Prints the check and returns its counts; `passed(needed)` on them says
-/// whether it passed.
+/// Prints the check without the pool's own records of its positions and
+/// returns its counts. Every agreement it finds is unverified, so it
+/// passes only when nothing is asked for; `run_with` with a node is the
+/// check that can pass. The commands always pass a reader when they have a
+/// node; only the tests check without one.
+#[cfg(test)]
 pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<FeeCheckSummary> {
+    run_with(root, chain, pool, needed, None)
+}
+
+/// Prints the check and returns its counts; `passed(needed)` on them says
+/// whether it passed. `reader` (the node, an archive node for an old
+/// history) tells which positions started empty and what the pool still
+/// owes each at the end. When it cannot answer, the check runs without
+/// it and says so.
+pub fn run_with(
+    root: &Path,
+    chain: &str,
+    pool: Address,
+    needed: usize,
+    reader: Option<&dyn PositionReader>,
+) -> Result<FeeCheckSummary> {
     let days = EventStore::new(root).days(chain, pool)?;
     let Some((last, _)) = days.last() else {
         bail!(
@@ -36,27 +62,52 @@ pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<Fee
             root.display()
         );
     };
-    let snapshots = SnapshotStore::new(root);
-    let first = snapshots
-        .days(chain, pool)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no snapshot stored for pool {pool:#x}"))?;
-    let snapshot = snapshots.read(chain, pool, first)?;
+    let snapshot = SnapshotStore::new(root)
+        .earliest(chain, pool)?
+        .ok_or_else(|| {
+            anyhow!(
+                "no snapshot stored for pool {pool:#x}; run `lpbot backfill --pool {pool:#x}` first"
+            )
+        })?;
+    let first = snapshot.day;
     let logs = EventStore::new(root).read_days(chain, pool, first, *last)?;
     println!(
         "pool {pool:#x}: {} stored logs from {first} to {last}",
         logs.len()
     );
 
-    let checks = check_fees(snapshot, &logs)?;
+    let checks = match reader {
+        Some(reader) => match check_fees_on_chain(snapshot.clone(), &logs, reader) {
+            Ok(checks) => {
+                println!(
+                    "the pool's own records say which positions started empty and what it \
+                     still owes each"
+                );
+                checks
+            }
+            Err(FeeCheckError::Store(error)) => return Err(error.into()),
+            Err(error) => {
+                println!(
+                    "{error}. The check runs without them, and its agreements stay unverified"
+                );
+                check_fees(snapshot, &logs)?
+            }
+        },
+        None => {
+            println!(
+                "no node to read the pool's records from: agreements stay unverified, as \
+                 fees left in the pool from before the history cannot be ruled out"
+            );
+            check_fees(snapshot, &logs)?
+        }
+    };
     let summary = summarize(&checks, TOLERANCE);
     println!(
         "{} positions started inside the history and could be followed",
         checks.len()
     );
     println!(
-        "  {} emptied and collected exactly what the replica computed",
+        "  {} emptied, and collected plus still owed exactly what the replica computed",
         summary.exact
     );
     println!(
@@ -65,8 +116,12 @@ pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<Fee
         TOLERANCE * 100.0
     );
     println!(
-        "  {} still hold liquidity or have not collected everything",
+        "  {} still hold liquidity or cannot be judged from their collections",
         summary.open
+    );
+    println!(
+        "  {} agree but are unverified without the pool's records",
+        summary.unverified
     );
     println!("  {} do not fit the replica", summary.mismatched);
     for check in checks
@@ -81,6 +136,14 @@ pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<Fee
         println!("PASS");
     } else if summary.mismatched > 0 {
         println!("FAIL: the replica's fees differ from what was collected");
+    } else if summary.unverified > 0 {
+        println!(
+            "NOT ENOUGH: {} positions confirm the replica and {} more agree unverified; the \
+             check asks for {needed}. Run it against an archive node, which has the pool's \
+             records for the whole history",
+            summary.exact + summary.close,
+            summary.unverified
+        );
     } else {
         println!(
             "NOT ENOUGH: {} positions confirm the replica, the check asks for {needed}. \
@@ -119,6 +182,54 @@ mod tests {
         assert_eq!(summary.mismatched, 0);
         assert!(summary.passed(0));
         assert!(run(&root, "ethereum", Address::repeat_byte(7), 0).is_err());
+
+        // With the pool's records: a pool that owes nothing to positions
+        // that burned and never collected contradicts the replica.
+        use lpbot_chain::uniswap_v3::ChainError;
+        use lpbot_data::fee_check::{PositionKey, PositionState};
+        struct OwesNothing;
+        impl PositionReader for OwesNothing {
+            fn positions(
+                &self,
+                _: Address,
+                keys: &[PositionKey],
+                _: u64,
+            ) -> Result<Vec<PositionState>, ChainError> {
+                Ok(vec![PositionState::default(); keys.len()])
+            }
+        }
+        let checked = run_with(
+            &root,
+            "ethereum",
+            crate::demo_cmd::DEMO_POOL,
+            20,
+            Some(&OwesNothing),
+        )
+        .unwrap();
+        assert!(checked.mismatched > 0, "{checked:?}");
+        assert!(!checked.passed(0));
+
+        // A node that cannot answer leaves the check as it is without one.
+        struct Down;
+        impl PositionReader for Down {
+            fn positions(
+                &self,
+                _: Address,
+                _: &[PositionKey],
+                _: u64,
+            ) -> Result<Vec<PositionState>, ChainError> {
+                Err(ChainError::Other("missing trie node".into()))
+            }
+        }
+        let fallback = run_with(
+            &root,
+            "ethereum",
+            crate::demo_cmd::DEMO_POOL,
+            20,
+            Some(&Down),
+        )
+        .unwrap();
+        assert_eq!(fallback, summary);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

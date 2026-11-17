@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Autonomy, Config, Mode};
+use crate::config::{Autonomy, Config, Mode, RunInputs};
 
 /// The experiment file as written by the user.
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +90,9 @@ pub fn resolve(
         bail!("base config must be a YAML mapping");
     }
 
+    if let Some(run) = base.get("run").and_then(Value::as_mapping) {
+        check_run_keys(run, "the base config")?;
+    }
     if let Some(mode) = exp.mode {
         set_path(&mut base, "mode", serde_yaml::to_value(mode)?)?;
     }
@@ -97,6 +100,7 @@ pub fn resolve(
         set_path(&mut base, "window", window.clone())?;
     }
     if let Some(run) = &exp.run {
+        check_run_keys(run, "the experiment file")?;
         for (k, v) in run {
             let key = k
                 .as_str()
@@ -120,6 +124,15 @@ pub fn resolve(
     }
 
     select_strategy(&mut base, &exp.strategy)?;
+    if let Some(strategy) = base
+        .get("strategies")
+        .and_then(Value::as_sequence)
+        .and_then(|s| s.first())
+    {
+        for path in exp.sweep.keys() {
+            check_sweep_path(strategy, &exp.strategy, path)?;
+        }
+    }
 
     let points = sweep_points(&exp.sweep)?;
     let mut runs = Vec::with_capacity(points.len());
@@ -209,6 +222,93 @@ fn select_strategy(base: &mut Value, id: &str) -> Result<()> {
         ),
         _ => bail!("strategy id `{id}` appears more than once in the base config"),
     }
+}
+
+/// Refuses a `run` key that is not a run input. The rest of the config is
+/// parsed tolerantly; a misspelt run input would silently fall back to its
+/// default.
+fn check_run_keys(run: &Mapping, source: &str) -> Result<()> {
+    for key in run.keys() {
+        let name = key
+            .as_str()
+            .ok_or_else(|| anyhow!("run keys must be strings"))?;
+        if !RunInputs::KEYS.contains(&name) {
+            bail!(
+                "`run.{name}` in {source} is not a run input; the run inputs are {}. \
+                 Check its spelling",
+                RunInputs::KEYS.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a sweep path the strategy does not have. Setting it would add a
+/// new key that nothing reads, and every run of the sweep would run the
+/// same settings under different labels.
+fn check_sweep_path(strategy: &Value, id: &str, dotted: &str) -> Result<()> {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        bail!("sweep setting `{dotted}` is not a valid setting path");
+    }
+    let mut current = strategy;
+    for (depth, part) in parts.iter().enumerate() {
+        let level = if depth == 0 {
+            format!("strategy `{id}`")
+        } else {
+            format!("`{}` in strategy `{id}`", parts[..depth].join("."))
+        };
+        let Some(settings) = current.as_mapping() else {
+            bail!(
+                "sweep setting `{dotted}` is not in the base config: {level} is a single value, \
+                 not a group of settings, so it has no `{part}`"
+            );
+        };
+        match settings.get(*part) {
+            Some(next) => current = next,
+            None => {
+                let keys: Vec<&str> = settings.keys().filter_map(Value::as_str).collect();
+                let nearest = nearest(part, &keys);
+                let has = if nearest.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (nearest: {})", nearest.join(", "))
+                };
+                bail!(
+                    "sweep setting `{dotted}` is not in the base config: {level} has no \
+                     `{part}`{has}. Check its spelling; if the setting is new, add it to the \
+                     strategy in the base config first"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Up to three of `keys`, the closest to `word` first.
+fn nearest<'a>(word: &str, keys: &[&'a str]) -> Vec<&'a str> {
+    let mut scored: Vec<(usize, &str)> =
+        keys.iter().map(|k| (edit_distance(word, k), *k)).collect();
+    scored.sort();
+    scored.into_iter().take(3).map(|(_, key)| key).collect()
+}
+
+/// Levenshtein distance: the fewest single-letter edits from `a` to `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != *cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Cartesian product of the sweep, in key order.
@@ -371,6 +471,80 @@ sweep:
             msg.contains("nope") && msg.contains("eth-zone-roundtrip"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn a_sweep_over_a_setting_the_strategy_does_not_have_is_refused() {
+        let typo = EXPERIMENT.replace("entry.width_ticks:", "entry.width_tick:");
+        let msg = format!("{:#}", runs(&typo, &RunOverrides::default()).unwrap_err());
+        for wanted in [
+            "entry.width_tick",
+            "width_ticks",
+            "eth-zone-roundtrip",
+            "base config",
+        ] {
+            assert!(msg.contains(wanted), "{wanted}: {msg}");
+        }
+
+        // A misspelt first level names what the strategy has.
+        let top = EXPERIMENT.replace("patience.mode:", "patiense.mode:");
+        let msg = format!("{:#}", runs(&top, &RunOverrides::default()).unwrap_err());
+        assert!(
+            msg.contains("patiense.mode") && msg.contains("patience"),
+            "{msg}"
+        );
+
+        // A path through a setting that holds a value, not settings.
+        let through = EXPERIMENT.replace("patience.mode:", "patience.mode.fast:");
+        let msg = format!(
+            "{:#}",
+            runs(&through, &RunOverrides::default()).unwrap_err()
+        );
+        assert!(msg.contains("patience.mode.fast"), "{msg}");
+
+        // A setting that is there may change its shape: a search space
+        // swept as single numbers.
+        assert_eq!(
+            runs(EXPERIMENT, &RunOverrides::default()).unwrap().len(),
+            16
+        );
+    }
+
+    #[test]
+    fn a_misspelt_run_input_is_refused() {
+        let typo = EXPERIMENT.replace("loss_limit_pct: 5 }", "loss_limit_pct: 5, autonmy: auto }");
+        let msg = format!("{:#}", runs(&typo, &RunOverrides::default()).unwrap_err());
+        for wanted in ["autonmy", "capital_usd", "loss_limit_pct", "autonomy"] {
+            assert!(msg.contains(wanted), "{wanted}: {msg}");
+        }
+        // In the base config too.
+        let exp: ExperimentFile = serde_yaml::from_str(EXPERIMENT).unwrap();
+        let base = BASE.replace("run: { autonomy: approve }", "run: { autonomi: approve }");
+        let msg = format!(
+            "{:#}",
+            resolve(
+                &exp,
+                serde_yaml::from_str(&base).unwrap(),
+                &RunOverrides::default()
+            )
+            .unwrap_err()
+        );
+        assert!(
+            msg.contains("autonomi") && msg.contains("autonomy"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_experiments_resolve() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (file, count) in [
+            ("experiments/width-and-patience-eth.yml", 16),
+            ("experiments/demo-patience.yml", 12),
+        ] {
+            let runs = resolve_experiment(&repo.join(file), &RunOverrides::default()).unwrap();
+            assert_eq!(runs.len(), count, "{file}");
+        }
     }
 
     #[test]

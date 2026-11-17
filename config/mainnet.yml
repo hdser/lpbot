@@ -53,6 +53,7 @@ strategies:
     kind: zone_round_trip
     value_token: WETH                # enter and exit in this token; one of universe.tokens
     pools: ranked                    # top pools holding the value token; fee tier follows the ranking
+    pool: null                       # or a pool address to trade instead of the ranked one; sweep it to compare fee tiers
     capital_share: 0.25
     zone:
       lookbacks: [7d, 30d, 90d]
@@ -90,5 +91,5 @@ risk:                                # placeholders
   max_actions_per_day: 12
   max_swap_slippage_bps: 8
   max_pool_vs_reference_bps: 15
-  loss_window: 30d                   # window over which run.loss_limit_pct is measured
+  loss_window: 30d                   # not read yet: run.loss_limit_pct is measured from starting capital over the whole run
   heartbeat_timeout: 90s

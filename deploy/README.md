@@ -23,7 +23,8 @@ Only the peer-to-peer ports (30303 and 9000, TCP and UDP) are open to the networ
 ## Before the first run
 
 1. Install Docker Engine with the Compose plugin.
-2. Run `make up` once, then edit `DATA_DIR` in `deploy/.env` to point at the NVMe drive and run `make up` again. Or create `deploy/.env` from `deploy/.env.example` yourself first.
+2. Create `deploy/.env` and point it at the NVMe drive without starting anything: `make env DATA_DIR=/data/lpbot`. Values are read literally, as Compose reads them: quotes around a value are dropped, and spaces stay part of it.
+3. Download the database snapshot with `make snapshot` (in `tmux`, see [RUNBOOK.md](RUNBOOK.md)), and only then run `make up`. A `make up` before the snapshot starts an archive sync from the first block; a `make up` during it refuses to start the node.
 
 An archive node needs about 3.2 TB free and is what the replay checks assume. For a pruned full node (about 1.5 TB), set `RETH_EXTRA_ARGS=--full` in `deploy/.env`.
 
@@ -38,7 +39,7 @@ An archive node needs about 3.2 TB free and is what the replay checks assume. Fo
 
 ## Sync time
 
-Lighthouse starts from a recent checkpoint and is ready within minutes. Reth then syncs the execution chain, which takes many hours to a few days depending on disk and connection. Reth also offers snapshot downloads that shorten this; see the Reth documentation for the current procedure before using one.
+Lighthouse starts from a recent checkpoint and is ready within minutes. Reth then syncs the blocks since the snapshot that `make snapshot` downloaded, which takes hours rather than the days of a sync from the first block. Once the node has been started, `make snapshot` refuses to run: the database is the node's own from then on.
 
 ## First check after the sync
 

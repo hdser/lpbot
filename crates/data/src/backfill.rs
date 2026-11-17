@@ -4,8 +4,14 @@
 //! range, reads every log the pool emitted in it and writes one file. A day
 //! that is already stored complete is skipped, so a re-run only fetches what
 //! is new. The day in progress is stored as partial and replaced by the
-//! next run. Before the first day it stores a snapshot of the pool, the
-//! state every replay starts from.
+//! next run.
+//!
+//! A replay needs the pool's state before its first stored day: a
+//! snapshot. The backfill reuses the newest stored snapshot on or before
+//! the start day when every day from it to the start is stored, and takes
+//! a new one only when none is usable. A pool created after the start day
+//! has no state there; its history starts on the first whole day after
+//! its creation.
 
 use std::collections::BTreeMap;
 
@@ -13,9 +19,10 @@ use alloy_primitives::Address;
 use lpbot_chain::eth::Log;
 use lpbot_chain::uniswap_v3::{fetch_snapshot, ChainError};
 use lpbot_chain::RpcClient;
-use lpbot_venues::uniswap_v3::pool::PoolSnapshot;
+use lpbot_venues::uniswap_v3::pool::{Pool, PoolSnapshot, Replay};
 
 use crate::day::Day;
+use crate::lake::read_events;
 use crate::snapshot::{SnapshotStore, StoredSnapshot};
 use crate::store::{DayState, EventStore, StoreError, StoredLog};
 
@@ -31,6 +38,13 @@ pub trait ChainSource {
     fn logs(&self, pool: Address, from_block: u64, to_block: u64) -> Result<Vec<Log>, ChainError>;
     /// The pool's full state after a block.
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError>;
+    /// Whether a contract is deployed at `address` after `block`. A pool
+    /// that the factory created later has no code there yet. A source
+    /// that cannot tell says yes, and a missing pool then shows up as a
+    /// snapshot that cannot be read.
+    fn has_code(&self, _address: Address, _block: u64) -> Result<bool, ChainError> {
+        Ok(true)
+    }
 }
 
 /// A node as the source, a few blocks behind its head so a reorg cannot
@@ -70,6 +84,46 @@ impl ChainSource for NodeSource<'_> {
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
         fetch_snapshot(self.client, pool, block)
     }
+
+    fn has_code(&self, address: Address, block: u64) -> Result<bool, ChainError> {
+        Ok(!self.client.code_at(address, block)?.is_empty())
+    }
+}
+
+/// A source seen at a head fixed for a whole run. Every pool of the run is
+/// stored up to the same block, and a check made afterwards compares at
+/// that block, however far the chain has moved meanwhile.
+pub struct AtHead<'a, S> {
+    pub source: &'a S,
+    pub block: u64,
+    /// Unix time of `block`.
+    pub time: u64,
+}
+
+impl<S: ChainSource> ChainSource for AtHead<'_, S> {
+    fn head(&self) -> Result<(u64, u64), ChainError> {
+        Ok((self.block, self.time))
+    }
+
+    fn block_time(&self, block: u64) -> Result<u64, ChainError> {
+        self.source.block_time(block)
+    }
+
+    fn block_times(&self, blocks: &[u64]) -> Result<Vec<u64>, ChainError> {
+        self.source.block_times(blocks)
+    }
+
+    fn logs(&self, pool: Address, from_block: u64, to_block: u64) -> Result<Vec<Log>, ChainError> {
+        self.source.logs(pool, from_block, to_block)
+    }
+
+    fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
+        self.source.snapshot(pool, block)
+    }
+
+    fn has_code(&self, address: Address, block: u64) -> Result<bool, ChainError> {
+        self.source.has_code(address, block)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,12 +161,56 @@ pub struct BackfillReport {
     pub skipped: usize,
     /// Block of the snapshot written by this run, if one was needed.
     pub snapshot_block: Option<u64>,
+    /// Day and block of the snapshot the stored history replays from:
+    /// the one written by this run, or one stored before. `None` when
+    /// nothing was stored.
+    pub snapshot: Option<(Day, u64)>,
+    /// The first day this run brought up to date, which is the start
+    /// asked for unless the pool did not exist then.
+    pub from: Option<Day>,
+    /// The day the pool was created on, when that is after the start
+    /// asked for.
+    pub created: Option<Day>,
     pub head_block: u64,
+    /// Unix time of `head_block`.
+    pub head_time: u64,
 }
 
 impl BackfillReport {
     pub fn rows_written(&self) -> usize {
         self.written.iter().map(|(_, rows, _)| rows).sum()
+    }
+
+    /// What the backfill found about the pool's start and which snapshot
+    /// its history replays from, one line each.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(created) = self.created {
+            notes.push(match self.from {
+                Some(from) => format!(
+                    "created on {created}, after the start asked for: its history starts \
+                     on {from}, its first whole day"
+                ),
+                None => format!(
+                    "created on {created}, after the start asked for: its history will start \
+                     on {}, its first whole day, once that day has begun",
+                    created.next()
+                ),
+            });
+        }
+        if let (Some((day, block)), Some(from)) = (self.snapshot, self.from) {
+            notes.push(if self.snapshot_block.is_some() {
+                format!("snapshot of the pool before {day} taken at block {block}")
+            } else if day == from {
+                format!("using the snapshot stored for {day} (block {block})")
+            } else {
+                format!(
+                    "using the snapshot stored for {day} (block {block}): every day from it \
+                     to {from} is stored, so no new snapshot is needed"
+                )
+            });
+        }
+        notes
     }
 }
 
@@ -158,6 +256,34 @@ pub fn first_block_at_or_after(
     Ok(above)
 }
 
+/// The first block in `[lo, hi]` after which `address` has code: the
+/// block a pool was created in. `None` when it has none even at `hi`.
+/// Code, once there, stays: a pool cannot destroy itself.
+pub fn first_block_with_code(
+    source: &impl ChainSource,
+    address: Address,
+    lo: u64,
+    hi: u64,
+) -> Result<Option<u64>, ChainError> {
+    if lo > hi || !source.has_code(address, hi)? {
+        return Ok(None);
+    }
+    if source.has_code(address, lo)? {
+        return Ok(Some(lo));
+    }
+    // No code after `without`, code after `with`.
+    let (mut without, mut with) = (lo, hi);
+    while with - without > 1 {
+        let middle = without + (with - without) / 2;
+        if source.has_code(address, middle)? {
+            with = middle;
+        } else {
+            without = middle;
+        }
+    }
+    Ok(Some(with))
+}
+
 fn stored_logs(
     source: &impl ChainSource,
     logs: Vec<Log>,
@@ -201,6 +327,29 @@ fn stored_logs(
         .collect()
 }
 
+/// The newest stored snapshot on or before `from` that a replay can roll
+/// forward to `from`: every day from its own day to the day before `from`
+/// is stored complete.
+pub fn usable_snapshot(
+    root: &std::path::Path,
+    chain: &str,
+    pool: Address,
+    from: Day,
+) -> Result<Option<StoredSnapshot>, StoreError> {
+    let Some(snapshot) = SnapshotStore::new(root).latest_on_or_before(chain, pool, from)? else {
+        return Ok(None);
+    };
+    let events = EventStore::new(root);
+    let mut day = snapshot.day;
+    while day < from {
+        if events.day_state(chain, pool, day) != DayState::Complete {
+            return Ok(None);
+        }
+        day = day.next();
+    }
+    Ok(Some(snapshot))
+}
+
 /// Brings one pool's stored history up to the head, starting at `from`.
 /// `on_day` is told about every day as it is written or skipped.
 pub fn backfill_pool(
@@ -216,6 +365,7 @@ pub fn backfill_pool(
     let (head, head_time) = source.head()?;
     let mut report = BackfillReport {
         head_block: head,
+        head_time,
         ..Default::default()
     };
     let last_day = Day::of_time(head_time);
@@ -223,27 +373,57 @@ pub fn backfill_pool(
         return Ok(report);
     }
 
+    let mut from = from;
     let mut start = first_block_at_or_after(source, from.start(), 0, head)?;
-    if !snapshots.has(chain, pool.address, from) {
-        let Some(block) = start.checked_sub(1) else {
+    let mut base = usable_snapshot(root, chain, pool.address, from)?;
+    if base.is_none() {
+        let Some(before) = start.checked_sub(1) else {
             return Err(BackfillError::BeforeChain { day: from });
         };
-        let state = source
-            .snapshot(pool.address, block)
-            .map_err(|source| BackfillError::Snapshot { block, source })?;
-        snapshots.write(
-            chain,
-            &StoredSnapshot {
-                pool: pool.address,
-                token0: pool.token0,
-                token1: pool.token1,
-                block,
-                day: from,
-                state,
-            },
-        )?;
-        report.snapshot_block = Some(block);
+        if !source.has_code(pool.address, before)? {
+            // The pool did not exist before `from`. A replay cannot start
+            // before its Initialize, so its history starts on the first
+            // whole day after the block that created it.
+            let created =
+                first_block_with_code(source, pool.address, start, head)?.ok_or_else(|| {
+                    BackfillError::Inconsistent(format!(
+                        "{:#x} has no code even at block {head}; is it a pool?",
+                        pool.address
+                    ))
+                })?;
+            let created_day = Day::of_time(source.block_time(created)?);
+            report.created = Some(created_day);
+            from = created_day.next();
+            if from > last_day {
+                return Ok(report);
+            }
+            start = first_block_at_or_after(source, from.start(), created, head)?;
+            base = usable_snapshot(root, chain, pool.address, from)?;
+        }
     }
+    report.from = Some(from);
+    report.snapshot = Some(match base {
+        Some(snapshot) => (snapshot.day, snapshot.block),
+        None => {
+            let block = start - 1;
+            let state = source
+                .snapshot(pool.address, block)
+                .map_err(|source| BackfillError::Snapshot { block, source })?;
+            snapshots.write(
+                chain,
+                &StoredSnapshot {
+                    pool: pool.address,
+                    token0: pool.token0,
+                    token1: pool.token1,
+                    block,
+                    day: from,
+                    state,
+                },
+            )?;
+            report.snapshot_block = Some(block);
+            (from, block)
+        }
+    });
 
     let mut day = from;
     while day <= last_day {
@@ -280,10 +460,70 @@ pub fn backfill_pool(
     Ok(report)
 }
 
+/// What replaying a stored history showed against the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    /// The day of the snapshot the replay started from.
+    pub since: Day,
+    /// State-changing events replayed.
+    pub events: usize,
+    /// The block the replica was compared with the chain at.
+    pub block: u64,
+    /// Empty when the replica equals the pool on the chain.
+    pub differences: Vec<String>,
+}
+
+/// Replays what a backfill stored, from the snapshot it used through the
+/// day of its own head, and compares the replica with the pool on the
+/// chain at the block that replay reached: the backfill's head, or the
+/// last stored event when an earlier run stored past that head. The replay
+/// and the comparison thus cover the same blocks. `None` when the backfill
+/// stored nothing to replay.
+pub fn verify_backfill(
+    source: &impl ChainSource,
+    root: &std::path::Path,
+    chain: &str,
+    pool: Address,
+    report: &BackfillReport,
+) -> Result<Option<Verified>, BackfillError> {
+    let Some((since, _)) = report.snapshot else {
+        return Ok(None);
+    };
+    let snapshot = SnapshotStore::new(root).read(chain, pool, since)?;
+    let through = Day::of_time(report.head_time);
+    let events = read_events(root, chain, pool, since, through)?;
+    let mut replica = Pool::from_snapshot(snapshot.state);
+    for event in &events {
+        replica
+            .apply_event(&event.event, Replay::Strict, &mut ())
+            .map_err(|error| StoreError::Replay {
+                pool,
+                block: event.block,
+                log_index: event.log_index,
+                reason: error.to_string(),
+            })?;
+    }
+    let block = events
+        .last()
+        .map_or(report.head_block, |last| last.block.max(report.head_block));
+    let on_chain = Pool::from_snapshot(
+        source
+            .snapshot(pool, block)
+            .map_err(|source| BackfillError::Snapshot { block, source })?,
+    );
+    Ok(Some(Verified {
+        since,
+        events: events.len(),
+        block,
+        differences: replica.differences(&on_chain),
+    }))
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
     use alloy_primitives::B256;
+    use lpbot_venues::uniswap_v3::events::decode_log;
     use std::cell::{Cell, RefCell};
 
     /// A scripted chain: block times, logs and a head that can move.
@@ -292,7 +532,14 @@ pub(crate) mod testing {
         pub times: Vec<u64>,
         pub logs: Vec<Log>,
         pub head: Cell<u64>,
+        /// The pool's state; before every log when `evolving`.
         pub snapshot: PoolSnapshot,
+        /// When set, the state after a block is `snapshot` with every log
+        /// up to that block applied, as on a real chain.
+        pub evolving: bool,
+        /// The block the pool was created in; before it there is no code
+        /// and no state to read.
+        pub created: Option<u64>,
         pub time_reads: Cell<usize>,
         pub log_reads: RefCell<Vec<(u64, u64)>>,
         pub snapshot_reads: RefCell<Vec<u64>>,
@@ -312,6 +559,8 @@ pub(crate) mod testing {
                 logs: Vec::new(),
                 head: Cell::new(blocks - 1),
                 snapshot,
+                evolving: false,
+                created: None,
                 time_reads: Cell::new(0),
                 log_reads: RefCell::new(Vec::new()),
                 snapshot_reads: RefCell::new(Vec::new()),
@@ -356,9 +605,32 @@ pub(crate) mod testing {
                 .collect())
         }
 
-        fn snapshot(&self, _pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
+        fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
             self.snapshot_reads.borrow_mut().push(block);
-            Ok(self.snapshot.clone())
+            if !self.has_code(pool, block)? {
+                // What `eth_call` to an address without code comes to.
+                return Err(ChainError::ShortReturn {
+                    what: "fee",
+                    expected: 32,
+                    got: 0,
+                });
+            }
+            if !self.evolving {
+                return Ok(self.snapshot.clone());
+            }
+            let mut replica = Pool::from_snapshot(self.snapshot.clone());
+            for log in self.logs.iter().filter(|l| l.block_number <= block) {
+                if let Some(event) = decode_log(&log.topics, &log.data).expect("a pool log") {
+                    replica
+                        .apply_event(&event, Replay::Strict, &mut ())
+                        .expect("the scripted chain replays");
+                }
+            }
+            Ok(replica.snapshot())
+        }
+
+        fn has_code(&self, _address: Address, block: u64) -> Result<bool, ChainError> {
+            Ok(!matches!(self.created, Some(created) if block < created))
         }
     }
 }
@@ -575,20 +847,18 @@ mod tests {
         assert_eq!(logs.len(), report.rows_written());
     }
 
-    #[test]
-    fn a_backfilled_history_replays_to_the_pool_on_the_chain() {
-        use crate::lake::replay_from_snapshot;
+    /// A pool that really ran for three days, with swaps, mints and burns,
+    /// served as a chain whose head is an hour into the fourth day. Its
+    /// blocks are twelve seconds apart, block 100 starting the first day.
+    fn ran() -> (FakeChain, PoolRef, crate::synth::SynthHistory) {
         use crate::synth::{generate, stored_log, tests as synth, SynthConfig};
 
-        // A pool that really ran: three days of swaps, mints and burns.
         let config = SynthConfig {
             first_block: 100,
             ..synth::small()
         };
         let pool = synth::pool();
         let history = generate(&config, pool).unwrap();
-
-        // Serve it as a chain whose head is an hour into the fourth day.
         let genesis = config.start.start() - 100 * 12;
         let mut chain = FakeChain::new(
             genesis,
@@ -613,7 +883,18 @@ mod tests {
                 }
             })
             .collect();
+        (chain, pool, history)
+    }
 
+    #[test]
+    fn a_backfilled_history_replays_to_the_pool_on_the_chain() {
+        use crate::lake::replay_from_snapshot;
+
+        let (chain, pool, history) = ran();
+        let config = crate::synth::SynthConfig {
+            first_block: 100,
+            ..crate::synth::tests::small()
+        };
         let dir = TempDir::new("backfill");
         let report = backfill_pool(
             &chain,
@@ -644,6 +925,284 @@ mod tests {
         .unwrap();
         assert_eq!(applied, history.events.len());
         assert!(replica.differences(&history.end).is_empty());
+    }
+
+    #[test]
+    fn the_check_after_a_backfill_replays_and_compares_up_to_the_same_block_across_midnight() {
+        use crate::lake::replay_from_snapshot;
+
+        let (mut chain, pool, history) = ran();
+        chain.evolving = true;
+        let start = history.snapshot.day;
+        // The run reads the head a minute before the second day ends...
+        chain.head.set(100 + 2 * 7_200 - 5);
+        let (first_head, first_time) = chain.head().unwrap();
+        assert_eq!(Day::of_time(first_time), start.next());
+        // ...and the chain is two hours into the third day, which has
+        // swaps, when the pool's turn comes.
+        chain.head.set(100 + 2 * 7_200 + 600);
+
+        let dir = TempDir::new("backfill");
+        let report =
+            backfill_pool(&chain, dir.path(), "ethereum", pool, start, |_, _, _| {}).unwrap();
+        assert_eq!(report.head_block, 100 + 2 * 7_200 + 600);
+        // The old check replayed up to the day of the head read first and
+        // compared at the pool's own head: it fails on a sound history.
+        let snapshot = SnapshotStore::new(dir.path())
+            .read("ethereum", pool.address, start)
+            .unwrap();
+        let (stale, _) =
+            replay_from_snapshot(dir.path(), "ethereum", snapshot, Day::of_time(first_time))
+                .unwrap();
+        let on_chain =
+            Pool::from_snapshot(chain.snapshot(pool.address, report.head_block).unwrap());
+        assert!(!stale.differences(&on_chain).is_empty());
+        // The check replays through the day of the pool's own head and
+        // compares there.
+        let verified = verify_backfill(&chain, dir.path(), "ethereum", pool.address, &report)
+            .unwrap()
+            .unwrap();
+        assert_eq!((verified.since, verified.block), (start, report.head_block));
+        assert!(verified.events > 0);
+        assert!(
+            verified.differences.is_empty(),
+            "{:?}",
+            verified.differences
+        );
+
+        // A run pinned to the head it read first stores every pool up to
+        // that head and checks there, however far the chain has moved.
+        let dir = TempDir::new("backfill");
+        let pinned = AtHead {
+            source: &chain,
+            block: first_head,
+            time: first_time,
+        };
+        let report =
+            backfill_pool(&pinned, dir.path(), "ethereum", pool, start, |_, _, _| {}).unwrap();
+        assert_eq!(
+            (report.head_block, report.head_time),
+            (first_head, first_time)
+        );
+        assert_eq!(
+            report.written.iter().map(|w| w.2).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        let verified = verify_backfill(&pinned, dir.path(), "ethereum", pool.address, &report)
+            .unwrap()
+            .unwrap();
+        assert_eq!(verified.block, first_head);
+        assert!(
+            verified.differences.is_empty(),
+            "{:?}",
+            verified.differences
+        );
+
+        // A history that lacks an event fails the check.
+        let day_file = dir.path().join(format!(
+            "events/chain=ethereum/pool={:#x}/day={start}/events.parquet",
+            pool.address
+        ));
+        let mut logs = crate::store::read_logs(&day_file).unwrap();
+        logs.remove(logs.len() / 2);
+        crate::store::write_logs(&day_file, &logs).unwrap();
+        let outcome = verify_backfill(&pinned, dir.path(), "ethereum", pool.address, &report);
+        assert!(
+            outcome.is_err() || !outcome.unwrap().unwrap().differences.is_empty(),
+            "a gap must not pass"
+        );
+    }
+
+    #[test]
+    fn nothing_stored_means_nothing_to_check() {
+        let chain = chain();
+        let dir = TempDir::new("backfill");
+        let report = BackfillReport::default();
+        assert_eq!(
+            verify_backfill(&chain, dir.path(), "ethereum", pool().address, &report).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_daily_rerun_reuses_the_snapshot_it_already_has() {
+        let dir = TempDir::new("backfill");
+        let chain = chain();
+        let first = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-10-31"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        let block = first.snapshot_block.unwrap();
+        assert_eq!(first.snapshot, Some((day("2026-10-31"), block)));
+        assert!(
+            first.notes()[0].contains("taken at block"),
+            "{:?}",
+            first.notes()
+        );
+
+        // The next day the start moves on a day, as `--days 90` does.
+        chain.snapshot_reads.borrow_mut().clear();
+        let next = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-11-01"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert!(chain.snapshot_reads.borrow().is_empty());
+        assert_eq!(next.snapshot_block, None);
+        assert_eq!(next.snapshot, Some((day("2026-10-31"), block)));
+        assert_eq!(next.from, Some(day("2026-11-01")));
+        let note = &next.notes()[0];
+        assert!(
+            note.contains("2026-10-31") && note.contains("no new snapshot"),
+            "{note}"
+        );
+        assert_eq!(
+            SnapshotStore::new(dir.path())
+                .days("ethereum", pool().address)
+                .unwrap(),
+            vec![day("2026-10-31")]
+        );
+
+        // With a day missing between the snapshot and the start, the old
+        // snapshot cannot reach the start: a new one is taken.
+        fs::remove_dir_all(dir.path().join(format!(
+            "events/chain=ethereum/pool={:#x}/day=2026-11-01",
+            pool().address
+        )))
+        .unwrap();
+        let after_gap = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-11-02"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(chain.snapshot_reads.borrow().len(), 1);
+        assert_eq!(
+            after_gap.snapshot.map(|(day, _)| day),
+            Some(day("2026-11-02"))
+        );
+    }
+
+    #[test]
+    fn a_pool_created_after_the_start_is_stored_from_its_first_whole_day() {
+        let dir = TempDir::new("backfill");
+        let mut chain = chain();
+        let head = chain.head.get();
+        let created =
+            first_block_at_or_after(&chain, day("2026-11-01").start() + 36_000, 0, head).unwrap();
+        chain.created = Some(created);
+
+        let report = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-10-31"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(report.created, Some(day("2026-11-01")));
+        assert_eq!(report.from, Some(day("2026-11-02")));
+        let second = first_block_at_or_after(&chain, day("2026-11-02").start(), 0, head).unwrap();
+        assert_eq!(report.snapshot_block, Some(second - 1));
+        assert_eq!(*chain.snapshot_reads.borrow(), vec![second - 1]);
+        assert_eq!(
+            report
+                .written
+                .iter()
+                .map(|(d, _, complete)| (*d, *complete))
+                .collect::<Vec<_>>(),
+            vec![(day("2026-11-02"), true), (day("2026-11-03"), false)]
+        );
+        let notes = report.notes();
+        assert!(
+            notes[0].contains("created on 2026-11-01") && notes[0].contains("2026-11-02"),
+            "{notes:?}"
+        );
+
+        // A second run with the same start finds the creation again and
+        // reuses the snapshot.
+        chain.snapshot_reads.borrow_mut().clear();
+        let again = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-10-31"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(again.created, Some(day("2026-11-01")));
+        assert!(chain.snapshot_reads.borrow().is_empty());
+        assert_eq!(again.skipped, 1);
+
+        // A pool created on the day of the head has no whole day yet.
+        let dir = TempDir::new("backfill");
+        chain.created = Some(head - 10);
+        let report = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-10-31"),
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(report.created, Some(day("2026-11-03")));
+        assert_eq!((report.snapshot, report.written.len()), (None, 0));
+        assert!(
+            report.notes()[0].contains("2026-11-04"),
+            "{:?}",
+            report.notes()
+        );
+
+        // An address with no code at all is not a pool.
+        chain.created = Some(head + 1);
+        let error = backfill_pool(
+            &chain,
+            dir.path(),
+            "ethereum",
+            pool(),
+            day("2026-10-31"),
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no code"), "{error}");
+    }
+
+    #[test]
+    fn the_creation_block_is_found_by_halving() {
+        let mut chain = chain();
+        let address = pool().address;
+        assert_eq!(
+            first_block_with_code(&chain, address, 5, 900).unwrap(),
+            Some(5)
+        );
+        for created in [6, 7, 450, 899, 900] {
+            chain.created = Some(created);
+            assert_eq!(
+                first_block_with_code(&chain, address, 5, 900).unwrap(),
+                Some(created)
+            );
+        }
+        chain.created = Some(901);
+        assert_eq!(
+            first_block_with_code(&chain, address, 5, 900).unwrap(),
+            None
+        );
+        assert_eq!(first_block_with_code(&chain, address, 9, 8).unwrap(), None);
     }
 
     #[test]

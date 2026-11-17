@@ -5,7 +5,10 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 # Pool history is stored beside the node's data: under DATA_DIR from
 # deploy/.env once that file exists, else under ./data.
 -include deploy/.env
-export LPBOT_DATA_DIR ?= $(if $(DATA_DIR),$(DATA_DIR),data)/lake
+# Make reads quotes around a value as part of it; Compose and the scripts
+# drop them. Drop them here too, so DATA_DIR="/data/lpbot" means the same.
+data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
+export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
 .PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history rank backtest calibrate load
 

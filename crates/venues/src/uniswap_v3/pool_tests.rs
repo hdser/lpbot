@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use alloy_primitives::{I256, U256};
 
+use super::super::events::PoolEvent;
 use super::super::liquidity_amounts::get_amounts_for_liquidity;
 use super::super::swap_math::compute_swap_step;
 use super::super::tick_math::{get_sqrt_ratio_at_tick, MAX_SQRT_RATIO, MIN_SQRT_RATIO};
@@ -808,6 +811,745 @@ fn watching_and_unwatching_leaves_no_trace() {
     assert_eq!(pool.tick_info(50).unwrap().watchers, 1);
     assert_eq!(pool.tick_info(50).unwrap().liquidity_gross, 0);
     assert!(pool.tick_info(150).is_none());
+}
+
+// --- watched ticks: the contract's tick ---------------------------------
+
+/// A swap with unlimited exact input that stops exactly on `tick`.
+fn swap_exactly_to(pool: &mut Pool, tick: i32) -> Option<SwapEvent> {
+    let limit = get_sqrt_ratio_at_tick(tick).unwrap();
+    let down = limit < pool.sqrt_price_x96();
+    let amounts = pool.swap(down, pos(u128::MAX >> 2), limit, &mut ()).ok()?;
+    Some(event_of(pool, amounts))
+}
+
+/// A swap of `amount` (positive: exact input, negative: exact output) with
+/// no price limit to speak of.
+fn swap_amount(pool: &mut Pool, zero_for_one: bool, amount: I256) -> Option<SwapEvent> {
+    let limit = if zero_for_one {
+        MIN_SQRT_RATIO + one()
+    } else {
+        MAX_SQRT_RATIO - one()
+    };
+    let amounts = pool.swap(zero_for_one, amount, limit, &mut ()).ok()?;
+    Some(event_of(pool, amounts))
+}
+
+/// Panics unless `watching` holds what the contract holds in `executed`:
+/// price, tick, active liquidity and every tick's liquidity. Fee growth can
+/// differ by rounding once steps are split.
+fn assert_contract_state(watching: &Pool, executed: &Pool, context: &str) {
+    assert_eq!(
+        watching.sqrt_price_x96(),
+        executed.sqrt_price_x96(),
+        "{context}: price"
+    );
+    assert_eq!(watching.tick(), executed.tick(), "{context}: tick");
+    assert_eq!(
+        watching.liquidity(),
+        executed.liquidity(),
+        "{context}: liquidity"
+    );
+    let liquidity_by_tick = |pool: &Pool| -> Vec<(i32, u128, i128)> {
+        pool.snapshot()
+            .ticks
+            .iter()
+            .map(|(tick, info)| (*tick, info.liquidity_gross, info.liquidity_net))
+            .collect()
+    };
+    assert_eq!(
+        liquidity_by_tick(watching),
+        liquidity_by_tick(executed),
+        "{context}: ticks"
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Move {
+    /// A swap with unlimited input to exactly this tick's price.
+    To(i32),
+    /// One unit in, down (`true`) or up: all of it is fee, the price stays.
+    Dust(bool),
+    /// One unit out, down or up: the price moves by the least it can.
+    Out(bool),
+    Mint(i32, i32),
+    Burn(i32, i32),
+}
+
+/// Liquidity of the positions `Move::Mint` and `Move::Burn` add and remove.
+const MOVE_LIQUIDITY: u128 = 7_000_000_000_000_000_000;
+
+/// Runs a move on the executed pool and returns the event it emitted.
+fn run_move(executed: &mut Pool, step: Move) -> Option<PoolEvent> {
+    Some(match step {
+        Move::To(tick) => PoolEvent::Swap(swap_exactly_to(executed, tick)?),
+        Move::Dust(down) => PoolEvent::Swap(swap_amount(executed, down, pos(1))?),
+        Move::Out(down) => PoolEvent::Swap(swap_amount(executed, down, neg(1))?),
+        Move::Mint(tick_lower, tick_upper) => {
+            let (amount0, amount1) = executed.mint(tick_lower, tick_upper, MOVE_LIQUIDITY).ok()?;
+            PoolEvent::Mint {
+                tick_lower,
+                tick_upper,
+                amount: MOVE_LIQUIDITY,
+                amount0,
+                amount1,
+            }
+        }
+        Move::Burn(tick_lower, tick_upper) => {
+            let (amount0, amount1) = executed.burn(tick_lower, tick_upper, MOVE_LIQUIDITY).ok()?;
+            PoolEvent::Burn {
+                tick_lower,
+                tick_upper,
+                amount: MOVE_LIQUIDITY,
+                amount0,
+                amount1,
+            }
+        }
+    })
+}
+
+/// Replays an event the way the simulator does: mints and burns must match
+/// exactly, swaps through watched ticks may differ by rounding.
+fn replay(pool: &mut Pool, event: &PoolEvent, observer: &mut impl SwapObserver) -> PoolResult<()> {
+    let mode = if matches!(event, PoolEvent::Swap(_)) {
+        Replay::Tolerant
+    } else {
+        Replay::Strict
+    };
+    pool.apply_event(event, mode, observer)
+}
+
+/// Runs `moves` on `executed` and replays every event on `watching`,
+/// checking after each one that `watching` holds the contract's state.
+fn follow(
+    executed: &mut Pool,
+    watching: &mut Pool,
+    moves: &[Move],
+    observer: &mut impl SwapObserver,
+) {
+    for (i, step) in moves.iter().enumerate() {
+        let context = format!("move {i} ({step:?})");
+        let event = run_move(executed, *step)
+            .unwrap_or_else(|| panic!("{context}: the executed pool refused it"));
+        replay(watching, &event, observer).unwrap_or_else(|e| panic!("{context}: {e}"));
+        assert_contract_state(watching, executed, &context);
+    }
+}
+
+#[test]
+fn the_contract_stops_at_initialized_ticks_word_edges_and_the_limits() {
+    let mut pool = pool_with_background();
+    pool.watch_tick(130).unwrap();
+    // Spacing 10: a word covers 2560 ticks.
+    assert!(pool.contract_stops_at(0, true) && !pool.contract_stops_at(0, false));
+    assert!(pool.contract_stops_at(2550, false) && !pool.contract_stops_at(2550, true));
+    assert!(pool.contract_stops_at(-10, false) && !pool.contract_stops_at(-10, true));
+    // A watched tick is not the contract's, an initialized one is both ways.
+    assert!(!pool.contract_stops_at(130, true) && !pool.contract_stops_at(130, false));
+    assert!(pool.contract_stops_at(20_000, true) && pool.contract_stops_at(20_000, false));
+    assert!(!pool.contract_stops_at(5, true), "not on the spacing");
+    assert!(pool.contract_stops_at(MIN_TICK, true) && pool.contract_stops_at(MAX_TICK, false));
+}
+
+#[test]
+fn an_upward_swap_that_stays_on_a_watched_word_start_keeps_the_contracts_tick() {
+    // Tick 0 starts a bitmap word, so a swap down to its price stops there
+    // in the contract and leaves the tick at -1. Going up it is not a
+    // boundary: a swap that cannot move the price keeps the tick at -1,
+    // while the replica's first, zero-length step crosses the watched tick.
+    let mut executed = pool_with_background();
+    swap_exactly_to(&mut executed, 455).unwrap();
+    let mut watching = executed.clone();
+    watching.watch_tick(0).unwrap();
+    watching.watch_tick(100).unwrap();
+
+    let down = swap_exactly_to(&mut executed, 0).unwrap();
+    assert_eq!(executed.tick(), -1);
+    watching
+        .apply_swap_event(&down, Replay::Tolerant, &mut ())
+        .unwrap();
+    assert_eq!(watching.tick(), -1);
+
+    let stay = swap_amount(&mut executed, false, pos(1)).unwrap();
+    assert_eq!(executed.sqrt_price_x96(), Q96);
+    assert_eq!(executed.tick(), -1);
+    watching
+        .apply_swap_event(&stay, Replay::Tolerant, &mut ())
+        .unwrap();
+    assert_contract_state(&watching, &executed, "after the swap that stayed");
+}
+
+#[test]
+fn swaps_that_end_on_or_start_from_a_watched_tick_leave_the_contracts_state() {
+    use Move::*;
+    // A word covers 2560 ticks: 0 and 2560 start one (the contract stops
+    // there going down), -10 and 2550 end one (it stops there going up),
+    // 130 is neither.
+    for w in [130, 0, 2560, -10, 2550] {
+        let moves = [
+            // Onto the tick from above and from below, and swaps that
+            // start there, with and without moving the price.
+            To(w + 300),
+            To(w),
+            Dust(false),
+            Dust(true),
+            Dust(false),
+            Out(false),
+            To(w),
+            Dust(true),
+            Out(true),
+            To(w - 200),
+            To(w),
+            Dust(true),
+            Dust(false),
+            Dust(true),
+            Out(true),
+            To(w),
+            Dust(false),
+            Out(false),
+            To(w + 40),
+            To(w),
+            // The same with a real position on the tick.
+            Mint(w, w + 100),
+            Dust(false),
+            Dust(true),
+            To(w + 50),
+            To(w),
+            Dust(false),
+            Dust(true),
+            To(w - 50),
+            To(w),
+            Dust(true),
+            Dust(false),
+            Out(false),
+            // Arrive from above while the tick holds liquidity, so the
+            // contract's tick is below it, then burn the liquidity.
+            To(w + 50),
+            To(w),
+            Burn(w, w + 100),
+            Dust(false),
+            Dust(true),
+            Dust(false),
+            // Arrive from below onto a tick that holds liquidity, burn it.
+            To(w - 30),
+            Mint(w - 100, w),
+            To(w),
+            Dust(true),
+            Dust(false),
+            Burn(w - 100, w),
+            Dust(true),
+            Dust(false),
+            To(w + 10),
+            To(w),
+            Dust(true),
+        ];
+        let mut executed = pool_with_background();
+        let mut watching = executed.clone();
+        watching.watch_tick(w).unwrap();
+        follow(&mut executed, &mut watching, &moves, &mut ());
+        watching.unwatch_tick(w);
+        assert!(watching.tick_info(w).is_none(), "tick {w}");
+    }
+}
+
+// --- watched ticks: fee growth inside -----------------------------------
+
+/// What the simulator's observer credits a virtual position, step by step,
+/// next to what `fee_growth_inside` says it earned since it started.
+struct Tracker {
+    lower: i32,
+    upper: i32,
+    liquidity: u128,
+    start: (U256, U256),
+    credited: (U256, U256),
+    steps: u64,
+}
+
+impl Tracker {
+    fn start(pool: &Pool, lower: i32, upper: i32, liquidity: u128) -> Self {
+        Self {
+            lower,
+            upper,
+            liquidity,
+            start: pool.fee_growth_inside(lower, upper),
+            credited: (U256::ZERO, U256::ZERO),
+            steps: 0,
+        }
+    }
+
+    fn on_step(&mut self, step: &StepInfo) {
+        if step.liquidity == 0 || step.tick_start < self.lower || step.tick_start >= self.upper {
+            return;
+        }
+        let share = mul_div(
+            step.lp_fee,
+            U256::from(self.liquidity),
+            U256::from(step.liquidity),
+        )
+        .unwrap();
+        if step.zero_for_one {
+            self.credited.0 += share;
+        } else {
+            self.credited.1 += share;
+        }
+        self.steps += 1;
+    }
+
+    /// Both round down once per step, so they agree within one unit per
+    /// credited step.
+    fn check(&self, pool: &Pool, context: &str) {
+        let now = pool.fee_growth_inside(self.lower, self.upper);
+        let earned = (
+            fees_earned(now.0, self.start.0, self.liquidity),
+            fees_earned(now.1, self.start.1, self.liquidity),
+        );
+        let tolerance = U256::from(self.steps + 1);
+        for (token, a, b) in [
+            (0, earned.0, self.credited.0),
+            (1, earned.1, self.credited.1),
+        ] {
+            let diff = if a > b { a - b } else { b - a };
+            assert!(
+                diff <= tolerance,
+                "{context}: range [{}, {}) token {token}: fee growth inside says {a}, the observer {b}",
+                self.lower,
+                self.upper
+            );
+        }
+    }
+}
+
+#[test]
+fn fee_growth_inside_a_watched_range_survives_swaps_that_end_on_its_bounds() {
+    let (lower, upper) = (130, 200);
+    let paths: [&[i32]; 4] = [
+        // Never exactly on a bound.
+        &[131, 180, 50, 190, 100],
+        // Down onto the lower bound, then on.
+        &[130, 180, 50, 190, 100],
+        // Onto both bounds from either side.
+        &[200, 130, 200, 50, 200, 130, 300, 130],
+        &[130, 200, 130, 200],
+    ];
+    for path in paths {
+        let mut executed = pool_with_background();
+        swap_exactly_to(&mut executed, 455).unwrap();
+        let mut watching = executed.clone();
+        watching.watch_tick(lower).unwrap();
+        watching.watch_tick(upper).unwrap();
+        let mut tracker = Tracker::start(&watching, lower, upper, 1_000_000_000_000_000_000);
+        let moves: Vec<Move> = path
+            .iter()
+            .flat_map(|tick| [Move::To(*tick), Move::Dust(true), Move::Dust(false)])
+            .collect();
+        follow(
+            &mut executed,
+            &mut watching,
+            &moves,
+            &mut |step: &StepInfo| tracker.on_step(step),
+        );
+        tracker.check(&watching, &format!("path {path:?}"));
+        assert!(tracker.credited.0 > U256::ZERO && tracker.credited.1 > U256::ZERO);
+    }
+}
+
+#[test]
+fn real_mints_and_burns_on_watched_ticks_do_not_shift_fee_growth_inside() {
+    use Move::*;
+    let (lower, upper) = (130, 200);
+    let mut executed = pool_with_background();
+    swap_exactly_to(&mut executed, 455).unwrap();
+    let mut watching = executed.clone();
+    watching.watch_tick(lower).unwrap();
+    watching.watch_tick(upper).unwrap();
+    // Cross the watched ticks first, so their records are not trivial.
+    follow(&mut executed, &mut watching, &[To(50), To(455)], &mut ());
+
+    let mut tracker = Tracker::start(&watching, lower, upper, 1_000_000_000_000_000_000);
+    let moves = [
+        To(180),
+        // Real positions appear on both bounds and are crossed both ways...
+        Mint(lower, 300),
+        To(50),
+        To(190),
+        Mint(100, upper),
+        To(250),
+        To(160),
+        // ...and go again while the bounds stay watched.
+        Burn(lower, 300),
+        To(130),
+        Dust(true),
+        To(220),
+        Burn(100, upper),
+        To(200),
+        Dust(false),
+        To(140),
+        Mint(lower, upper),
+        To(60),
+        Burn(lower, upper),
+        To(170),
+    ];
+    follow(
+        &mut executed,
+        &mut watching,
+        &moves,
+        &mut |step: &StepInfo| tracker.on_step(step),
+    );
+    tracker.check(&watching, "after mints and burns on the bounds");
+}
+
+#[test]
+fn a_watched_tick_keeps_its_record_apart_from_the_contracts() {
+    let mut pool = pool_with_background();
+    pool.watch_tick(100).unwrap();
+    for tick in [150, 50, 150] {
+        swap_exactly_to(&mut pool, tick).unwrap();
+    }
+    // The contract has no tick 100, so neither does the pool's contract state.
+    assert_eq!(
+        *pool.tick_info(100).unwrap(),
+        TickInfo {
+            watchers: 1,
+            ..TickInfo::default()
+        }
+    );
+    let inside = pool.fee_growth_inside(100, 200);
+
+    // A real position starts the contract's record by its convention: the
+    // price is above the tick, so all growth so far counts as below it.
+    pool.mint(100, 200, 1_000).unwrap();
+    let info = *pool.tick_info(100).unwrap();
+    assert_eq!(
+        (info.fee_growth_outside0, info.fee_growth_outside1),
+        pool.fee_growth_global()
+    );
+    // The watched record goes on as it was, and so does the range.
+    assert_eq!(pool.fee_growth_inside(100, 200), inside);
+    pool.burn(100, 200, 1_000).unwrap();
+    assert_eq!(pool.fee_growth_inside(100, 200), inside);
+}
+
+/// For a tick that both holds liquidity and is watched, the contract's
+/// record and the watched one flip together, so their difference only
+/// changes sign, each time the tick is crossed. Checks every such tick
+/// against the difference first seen for it.
+fn check_watched_records(pool: &Pool, seen: &mut BTreeMap<i32, (U256, U256, bool)>, context: &str) {
+    let both = |state: &TickState| state.info.liquidity_gross > 0 && state.info.watchers > 0;
+    seen.retain(|tick, _| pool.ticks.get(tick).is_some_and(both));
+    for (tick, state) in pool.ticks.iter().filter(|(_, state)| both(state)) {
+        let diff = (
+            state
+                .info
+                .fee_growth_outside0
+                .wrapping_sub(state.watched_outside0),
+            state
+                .info
+                .fee_growth_outside1
+                .wrapping_sub(state.watched_outside1),
+        );
+        let above = pool.tick() >= *tick;
+        match seen.get(tick) {
+            None => {
+                seen.insert(*tick, (diff.0, diff.1, above));
+            }
+            Some(&(d0, d1, above_then)) => {
+                let expected = if above == above_then {
+                    (d0, d1)
+                } else {
+                    (d0.wrapping_neg(), d1.wrapping_neg())
+                };
+                assert_eq!(diff, expected, "{context}: tick {tick}");
+            }
+        }
+    }
+}
+
+/// Random swaps, mints, burns and extra watches near several watched
+/// ranges, replayed on a pool that watches them. Checks after every event
+/// that the replica holds the contract's state, and at the end that fee
+/// growth inside each range agrees with the observer.
+fn watched_fee_scenario(
+    seed: u64,
+    (fee_pips, spacing): (u32, i32),
+    fee_protocol: (u8, u8),
+    rounds: usize,
+) {
+    let s = spacing;
+    // A bitmap word covers 256 spacings. Ranges on plain ticks, on word
+    // starts (0, 256) and on word ends (-1, 255), some sharing a bound.
+    let ranges = [
+        (-13 * s, 17 * s),
+        (0, 13 * s),
+        (-s, 255 * s),
+        (255 * s, 256 * s),
+        (13 * s, 256 * s),
+    ];
+    let liquidity = 3_000_000_000_000_000_000u128;
+    let mut special: Vec<i32> = ranges.iter().flat_map(|(l, u)| [*l, *u]).collect();
+    special.extend([-256 * s, 512 * s, 254 * s, s, 257 * s]);
+    special.sort_unstable();
+    special.dedup();
+    let bound_prices: Vec<U256> = special
+        .iter()
+        .map(|t| get_sqrt_ratio_at_tick(*t).unwrap())
+        .collect();
+
+    let mut rng = Rng(seed);
+    let mut executed = Pool::new(fee_pips, s);
+    executed.initialize(Q96).unwrap();
+    executed
+        .mint(-2_000 * s, 2_000 * s, 1_000_000_000_000_000_000_000)
+        .unwrap();
+    executed.set_fee_protocol(fee_protocol.0, fee_protocol.1);
+    let mut watching = executed.clone();
+    for (lower, upper) in ranges {
+        watching.watch_tick(lower).unwrap();
+        watching.watch_tick(upper).unwrap();
+    }
+    let mut trackers: Vec<Tracker> = ranges
+        .iter()
+        .map(|(lower, upper)| Tracker::start(&watching, *lower, *upper, liquidity))
+        .collect();
+
+    let pick = |rng: &mut Rng, pool: &Pool| -> i32 {
+        if rng.chance(60) {
+            special[rng.below(special.len() as u64) as usize]
+        } else {
+            let near = pool.tick() + (rng.below(120) as i32 - 60) * s;
+            near.clamp(-400 * s, 600 * s).div_euclid(s) * s
+        }
+    };
+
+    let mut positions: Vec<(i32, i32, u128)> = Vec::new();
+    let mut extra_watches: Vec<i32> = Vec::new();
+    let mut seen = BTreeMap::new();
+    let mut swaps = 0;
+    let mut swaps_onto_special_ticks = 0;
+    // Whether the next round swaps a unit or two from where the price is:
+    // most often wanted right after the price landed on a watched tick.
+    let mut stay = false;
+
+    for round in 0..rounds {
+        let context = format!("seed {seed} round {round}");
+        let roll = if stay { 19 } else { rng.below(20) };
+        let event = match roll {
+            0..=2 => {
+                let (a, b) = (pick(&mut rng, &executed), pick(&mut rng, &executed));
+                let (tick_lower, tick_upper) = (a.min(b), a.max(b));
+                let amount = (1 + rng.below(1_000_000) as u128) * 100_000_000_000_000;
+                executed
+                    .mint(tick_lower, tick_upper, amount)
+                    .ok()
+                    .map(|(amount0, amount1)| {
+                        positions.push((tick_lower, tick_upper, amount));
+                        PoolEvent::Mint {
+                            tick_lower,
+                            tick_upper,
+                            amount,
+                            amount0,
+                            amount1,
+                        }
+                    })
+            }
+            3..=4 if !positions.is_empty() => {
+                let index = rng.below(positions.len() as u64) as usize;
+                let (tick_lower, tick_upper, amount) = positions.swap_remove(index);
+                let (amount0, amount1) = executed.burn(tick_lower, tick_upper, amount).unwrap();
+                Some(PoolEvent::Burn {
+                    tick_lower,
+                    tick_upper,
+                    amount,
+                    amount0,
+                    amount1,
+                })
+            }
+            5 => {
+                let tick = pick(&mut rng, &executed);
+                watching.watch_tick(tick).unwrap();
+                extra_watches.push(tick);
+                None
+            }
+            6 if !extra_watches.is_empty() => {
+                let index = rng.below(extra_watches.len() as u64) as usize;
+                watching.unwatch_tick(extra_watches.swap_remove(index));
+                None
+            }
+            _ => {
+                let down = rng.chance(50);
+                let kind = if stay { 2 + rng.below(2) } else { rng.below(5) };
+                let swap = match kind {
+                    0 | 1 => {
+                        let tick = pick(&mut rng, &executed);
+                        swap_exactly_to(&mut executed, tick)
+                    }
+                    2 => swap_amount(&mut executed, down, pos(1 + rng.below(3) as u128)),
+                    3 => swap_amount(&mut executed, down, neg(1 + rng.below(1_000) as u128)),
+                    _ => {
+                        // Part of the way toward a tick, by a random amount.
+                        let limit = get_sqrt_ratio_at_tick(pick(&mut rng, &executed)).unwrap();
+                        let magnitude = (1 + rng.below(1_000_000) as u128)
+                            * 10u128.pow(9 + rng.below(10) as u32);
+                        let amount = if rng.chance(60) {
+                            pos(magnitude)
+                        } else {
+                            neg(magnitude)
+                        };
+                        let down = limit < executed.sqrt_price_x96();
+                        executed
+                            .swap(down, amount, limit, &mut ())
+                            .ok()
+                            .map(|amounts| event_of(&executed, amounts))
+                    }
+                };
+                swap.map(|event| {
+                    swaps += 1;
+                    if bound_prices.contains(&event.sqrt_price_x96) {
+                        swaps_onto_special_ticks += 1;
+                    }
+                    PoolEvent::Swap(event)
+                })
+            }
+        };
+        if let Some(event) = event {
+            let mut observer = |step: &StepInfo| {
+                for tracker in trackers.iter_mut() {
+                    tracker.on_step(step);
+                }
+            };
+            replay(&mut watching, &event, &mut observer)
+                .unwrap_or_else(|e| panic!("{context}: {e}"));
+        }
+        assert_contract_state(&watching, &executed, &context);
+        check_watched_records(&watching, &mut seen, &context);
+        stay = bound_prices.contains(&executed.sqrt_price_x96()) && rng.chance(60);
+    }
+
+    assert!(swaps > rounds / 2, "seed {seed}: only {swaps} swaps");
+    assert!(
+        swaps_onto_special_ticks > rounds / 10,
+        "seed {seed}: only {swaps_onto_special_ticks} swaps ended on a watched tick"
+    );
+    for tracker in &trackers {
+        tracker.check(&watching, &format!("seed {seed}"));
+        assert!(tracker.steps > 0, "seed {seed}: a range never earned");
+    }
+}
+
+#[test]
+fn fee_growth_inside_watched_ranges_matches_the_observer_over_a_long_random_run() {
+    watched_fee_scenario(0x5EED_0000_0000_0002, (500, 10), (0, 0), 800);
+    watched_fee_scenario(0x5EED_0000_0000_0003, (500, 10), (4, 6), 800);
+    watched_fee_scenario(0x0BAD_CAFE_F00D_0004, (100, 1), (0, 0), 800);
+    watched_fee_scenario(0x0BAD_CAFE_F00D_0005, (3000, 60), (0, 0), 800);
+    watched_fee_scenario(0x0BAD_CAFE_F00D_0006, (10_000, 200), (0, 5), 800);
+}
+
+// --- failures change nothing --------------------------------------------
+
+#[test]
+fn a_mint_or_burn_that_fails_on_its_upper_tick_changes_nothing() {
+    let mut pool = pool_with_background();
+    pool.mint(-100, 100, 5_000).unwrap();
+    pool.watch_tick(-100).unwrap();
+    let before = pool.clone();
+
+    // The lower tick holds enough liquidity, the upper one holds none.
+    assert_eq!(
+        pool.burn(-100, 300, 5_000),
+        Err(PoolError::Math(MathError::LiquidityDelta))
+    );
+    assert_eq!(pool, before);
+    assert!(
+        pool.tick_info(300).is_none(),
+        "no empty tick is left behind"
+    );
+
+    // The lower tick is new, the upper one would go over the per-tick maximum.
+    let room = tick_spacing_to_max_liquidity_per_tick(10)
+        - pool.tick_info(20_000).unwrap().liquidity_gross;
+    assert_eq!(
+        pool.mint(-300, 20_000, room + 1),
+        Err(PoolError::TickLiquidityOverflow)
+    );
+    assert_eq!(pool, before);
+    assert!(pool.tick_info(-300).is_none());
+    pool.mint(-300, 20_000, room).unwrap();
+}
+
+#[test]
+fn a_flash_that_overflows_changes_nothing() {
+    let mut pool = Pool::new(500, 10);
+    pool.initialize(Q96).unwrap();
+    pool.mint(-100, 100, 1).unwrap();
+    let before = pool.clone();
+    // Token 0's growth fits, token 1's does not.
+    assert_eq!(
+        pool.flash(U256::from(5u8), U256::MAX),
+        Err(PoolError::Math(MathError::Overflow256))
+    );
+    assert_eq!(pool, before);
+}
+
+#[test]
+fn a_swap_that_fails_midway_changes_nothing_and_reports_no_steps() {
+    // Corrupt state: the active liquidity is less than what tick -100 takes
+    // away when crossed going down. The swap trades and crosses a watched
+    // tick before the crossing fails.
+    let mut source = Pool::new(500, 10);
+    source.initialize(Q96).unwrap();
+    source.mint(-100, 100, 5_000_000_000).unwrap();
+    let mut snapshot = source.snapshot();
+    snapshot.liquidity = 1_000_000_000;
+    let mut pool = Pool::from_snapshot(snapshot);
+    pool.watch_tick(-50).unwrap();
+    let before = pool.clone();
+
+    let mut steps = 0;
+    let limit = get_sqrt_ratio_at_tick(-200).unwrap();
+    let result = pool.swap(true, pos(u128::MAX >> 2), limit, &mut |_: &StepInfo| {
+        steps += 1
+    });
+    assert_eq!(result, Err(PoolError::Math(MathError::LiquidityDelta)));
+    assert_eq!(pool, before);
+    assert_eq!(steps, 0);
+
+    // The same walk as a replayed event.
+    let event = SwapEvent {
+        amount0: pos(1_000_000),
+        amount1: neg(1),
+        sqrt_price_x96: limit,
+        liquidity: 0,
+        tick: -200,
+    };
+    let result = pool.apply_swap_event(&event, Replay::Tolerant, &mut |_: &StepInfo| steps += 1);
+    assert_eq!(result, Err(PoolError::Math(MathError::LiquidityDelta)));
+    assert_eq!(pool, before);
+    assert_eq!(steps, 0);
+}
+
+#[test]
+fn a_refused_replay_changes_nothing_and_reports_no_steps() {
+    let mut executed = pool_with_background();
+    executed.mint(100, 200, 7_000_000_000_000_000_000).unwrap();
+    let mut watching = executed.clone();
+    watching.watch_tick(150).unwrap();
+    let mut event = swap_exactly_to(&mut executed, 250).unwrap();
+    event.tick += 1;
+
+    let before = watching.clone();
+    let mut steps = 0;
+    for mode in [Replay::Strict, Replay::Tolerant] {
+        let result = watching.apply_swap_event(&event, mode, &mut |_: &StepInfo| steps += 1);
+        assert!(matches!(result, Err(PoolError::ReplayMismatch(_))));
+        assert_eq!(watching, before);
+    }
+    assert_eq!(steps, 0);
+
+    event.tick -= 1;
+    watching
+        .apply_swap_event(&event, Replay::Tolerant, &mut |_: &StepInfo| steps += 1)
+        .unwrap();
+    assert!(steps > 2, "the steps come once the swap has gone through");
 }
 
 // --- snapshots ----------------------------------------------------------

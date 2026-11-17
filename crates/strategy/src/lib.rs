@@ -27,8 +27,41 @@ pub trait Strategy: Send {
 /// What the patience decision can see about the pool.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketView {
+    /// The pool's tick, as the contract reports it.
     pub current_tick: Tick,
     pub tick_spacing: Tick,
+    /// The tick whose price the pool price is exactly, if it is one.
+    ///
+    /// A price on a tick boundary is the edge of the ranges on both sides
+    /// of it, and the tick alone does not say which way it reads: after a
+    /// swap down that stops exactly on an initialized tick the pool
+    /// reports the tick below, otherwise the tick itself. A range whose
+    /// bound the price sits on is wholly in one token either way.
+    pub price_on_tick: Option<Tick>,
+}
+
+/// True when price has gone through the whole range away from the entry
+/// side, so the position is wholly in the other token.
+///
+/// Decided on the price, so it agrees with what the position holds even
+/// with the price exactly on the range's far bound, where the tick alone
+/// can say the price is still inside.
+pub fn is_beyond_range(campaign: &Campaign, market: &MarketView) -> bool {
+    let past = match campaign.side {
+        EntrySide::Above => market.current_tick >= campaign.tick_upper,
+        EntrySide::Below => market.current_tick < campaign.tick_lower,
+    };
+    past || on_far_bound(campaign, market)
+}
+
+/// True when the price sits exactly on the bound the position converted
+/// towards: wholly in the other token, and still right next to the price.
+fn on_far_bound(campaign: &Campaign, market: &MarketView) -> bool {
+    let far = match campaign.side {
+        EntrySide::Above => campaign.tick_upper,
+        EntrySide::Below => campaign.tick_lower,
+    };
+    market.price_on_tick == Some(far)
 }
 
 /// The three things the bot can do when price is beyond a campaign's range.
@@ -70,15 +103,25 @@ impl FixedRule {
 
 impl PatiencePolicy for FixedRule {
     fn decide(&self, campaign: &Campaign, market: &MarketView) -> PatienceAction {
-        if !campaign.is_beyond_range(market.current_tick) {
+        if !is_beyond_range(campaign, market) {
             return PatienceAction::Wait;
         }
         match self {
             Self::Wait => PatienceAction::Wait,
             Self::Close => PatienceAction::Close,
-            Self::Flip => PatienceAction::Flip {
-                target: flip_target(campaign, market),
-            },
+            Self::Flip => {
+                // A position the price has only just left is already where
+                // a flip would put it: next to the price, in the other
+                // token. Flipping it would move it nowhere, or further away.
+                let target = flip_target(campaign, market);
+                let same = (target.tick_lower, target.tick_upper)
+                    == (campaign.tick_lower, campaign.tick_upper);
+                if same || on_far_bound(campaign, market) {
+                    PatienceAction::Wait
+                } else {
+                    PatienceAction::Flip { target }
+                }
+            }
         }
     }
 }
@@ -141,7 +184,70 @@ mod tests {
         MarketView {
             current_tick: tick,
             tick_spacing: 10,
+            price_on_tick: None,
         }
+    }
+
+    /// The price exactly on the price of tick `on`, the pool reporting `tick`.
+    fn on_tick(tick: Tick, on: Tick) -> MarketView {
+        MarketView {
+            price_on_tick: Some(on),
+            ..market(tick)
+        }
+    }
+
+    #[test]
+    fn a_price_on_the_far_bound_is_beyond_the_range_whichever_tick_the_pool_reports() {
+        // Above: the range [1000, 1200) is wholly token1 from the price of
+        // tick 1200 on. After a swap down onto an initialized 1200 the pool
+        // reports 1199; arriving from below it reports 1200.
+        let above = campaign(EntrySide::Above);
+        assert!(!is_beyond_range(&above, &market(1199)));
+        assert!(is_beyond_range(&above, &on_tick(1199, 1200)));
+        assert!(is_beyond_range(&above, &on_tick(1200, 1200)));
+        assert!(!is_beyond_range(&above, &on_tick(1199, 1199)));
+
+        // Below: the range is wholly token0 up to the price of tick 1000,
+        // where the tick reads 1000, which on its own says inside.
+        let below = campaign(EntrySide::Below);
+        assert!(!is_beyond_range(&below, &market(1000)));
+        assert!(is_beyond_range(&below, &on_tick(1000, 1000)));
+        assert!(is_beyond_range(&below, &on_tick(999, 1000)));
+        assert!(!is_beyond_range(&below, &on_tick(1001, 1001)));
+    }
+
+    #[test]
+    fn on_the_far_bound_close_closes_and_flip_waits() {
+        for (side, market) in [
+            (EntrySide::Below, on_tick(1000, 1000)),
+            (EntrySide::Above, on_tick(1199, 1200)),
+        ] {
+            let c = campaign(side);
+            assert_eq!(FixedRule::Close.decide(&c, &market), PatienceAction::Close);
+            // Already next to the price: there is nowhere nearer to flip to.
+            assert_eq!(FixedRule::Flip.decide(&c, &market), PatienceAction::Wait);
+            assert_eq!(FixedRule::Wait.decide(&c, &market), PatienceAction::Wait);
+        }
+    }
+
+    #[test]
+    fn a_flip_into_the_campaigns_own_range_is_a_wait() {
+        // Within one tick spacing beyond the bound, the range next to the
+        // price is the campaign's own.
+        let above = campaign(EntrySide::Above);
+        assert_eq!(
+            FixedRule::Flip.decide(&above, &market(1203)),
+            PatienceAction::Wait
+        );
+        let below = campaign(EntrySide::Below);
+        assert_eq!(
+            FixedRule::Flip.decide(&below, &market(995)),
+            PatienceAction::Wait
+        );
+        assert!(matches!(
+            FixedRule::Flip.decide(&below, &market(985)),
+            PatienceAction::Flip { .. }
+        ));
     }
 
     #[test]

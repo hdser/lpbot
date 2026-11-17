@@ -4,6 +4,7 @@ use alloy_primitives::{keccak256, B256, I256, U256};
 use thiserror::Error;
 
 use super::pool::{Pool, PoolError, PoolResult, Replay, SwapEvent, SwapObserver};
+use super::tick_math::get_tick_at_sqrt_ratio;
 
 /// An event that changes pool state. Events that do not (Collect,
 /// CollectProtocol, observation-cardinality changes) are not represented.
@@ -270,7 +271,8 @@ impl Pool {
     /// Applies one event to the replica.
     ///
     /// In strict mode the token amounts the replica computes for a mint or
-    /// burn must equal the event's, and a swap must replay exactly.
+    /// burn must equal the event's, and a swap must replay exactly. An event
+    /// that is refused leaves the pool as it was.
     pub fn apply_event(
         &mut self,
         event: &PoolEvent,
@@ -282,14 +284,16 @@ impl Pool {
                 sqrt_price_x96,
                 tick,
             } => {
-                self.initialize(*sqrt_price_x96)?;
-                if self.tick() != *tick {
+                if self.is_initialized() {
+                    return Err(PoolError::AlreadyInitialized);
+                }
+                let computed = get_tick_at_sqrt_ratio(*sqrt_price_x96)?;
+                if computed != *tick {
                     return Err(PoolError::ReplayMismatch(format!(
-                        "initialized at tick {}, event says {tick}",
-                        self.tick()
+                        "initialized at tick {computed}, event says {tick}"
                     )));
                 }
-                Ok(())
+                self.initialize(*sqrt_price_x96)
             }
             PoolEvent::Mint {
                 tick_lower,
@@ -298,8 +302,10 @@ impl Pool {
                 amount0,
                 amount1,
             } => {
-                let computed = self.mint(*tick_lower, *tick_upper, *amount)?;
-                check_amounts("mint", mode, computed, (*amount0, *amount1))
+                let change = self.plan_mint(*tick_lower, *tick_upper, *amount)?;
+                check_amounts("mint", mode, change.amounts, (*amount0, *amount1))?;
+                self.apply_position_change(change);
+                Ok(())
             }
             PoolEvent::Burn {
                 tick_lower,
@@ -308,8 +314,10 @@ impl Pool {
                 amount0,
                 amount1,
             } => {
-                let computed = self.burn(*tick_lower, *tick_upper, *amount)?;
-                check_amounts("burn", mode, computed, (*amount0, *amount1))
+                let change = self.plan_burn(*tick_lower, *tick_upper, *amount)?;
+                check_amounts("burn", mode, change.amounts, (*amount0, *amount1))?;
+                self.apply_position_change(change);
+                Ok(())
             }
             PoolEvent::Swap(swap) => self.apply_swap_event(swap, mode, observer),
             PoolEvent::Flash { paid0, paid1 } => self.flash(*paid0, *paid1),
@@ -634,10 +642,60 @@ mod tests {
             amount0: U256::from(1u8),
             amount1: U256::from(1u8),
         };
+        let before = pool.clone();
         assert!(matches!(
-            pool.clone().apply_event(&wrong, Replay::Strict, &mut ()),
+            pool.apply_event(&wrong, Replay::Strict, &mut ()),
             Err(PoolError::ReplayMismatch(_))
         ));
+        assert_eq!(pool, before, "a refused mint changes nothing");
         assert!(pool.apply_event(&wrong, Replay::Tolerant, &mut ()).is_ok());
+        assert_eq!(pool.liquidity(), 1_000_000);
+    }
+
+    #[test]
+    fn refused_events_leave_the_pool_as_it_was() {
+        // An initialization at the wrong tick.
+        let mut pool = Pool::new(500, 10);
+        let wrong_tick = PoolEvent::Initialize {
+            sqrt_price_x96: Q96,
+            tick: 1,
+        };
+        assert!(matches!(
+            pool.apply_event(&wrong_tick, Replay::Strict, &mut ()),
+            Err(PoolError::ReplayMismatch(_))
+        ));
+        assert_eq!(pool, Pool::new(500, 10));
+        assert!(!pool.is_initialized());
+
+        // A burn whose amounts do not match, on a watched tick.
+        pool.initialize(Q96).unwrap();
+        let minted = pool.mint(-100, 100, 1_000_000).unwrap();
+        pool.watch_tick(100).unwrap();
+        let before = pool.clone();
+        let wrong_burn = PoolEvent::Burn {
+            tick_lower: -100,
+            tick_upper: 100,
+            amount: 1_000_000,
+            amount0: minted.0 + U256::from(5u8),
+            amount1: minted.1,
+        };
+        assert!(matches!(
+            pool.apply_event(&wrong_burn, Replay::Strict, &mut ()),
+            Err(PoolError::ReplayMismatch(_))
+        ));
+        assert_eq!(pool, before);
+
+        // A burn of more than the range holds.
+        let too_much = PoolEvent::Burn {
+            tick_lower: -100,
+            tick_upper: 100,
+            amount: 2_000_000,
+            amount0: U256::ZERO,
+            amount1: U256::ZERO,
+        };
+        assert!(pool
+            .apply_event(&too_much, Replay::Tolerant, &mut ())
+            .is_err());
+        assert_eq!(pool, before);
     }
 }

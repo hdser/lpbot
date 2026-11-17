@@ -42,7 +42,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 | Job | When | To carry on after an interruption |
 | --- | --- | --- |
 | `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. It carries on with the snapshot it began with, written down in `DATA_DIR/reth-snapshot-manifest`, and Reth keeps the files it has already verified. Before downloading, Reth checks what is on disk and prints nothing until `Startup integrity summary`: tens of minutes after an interruption, about 90 for 2 TB on disk. It is not stuck; see "Is the snapshot download working?" below before pressing Ctrl-C. If it is stopped before it finishes, the script says so and gives the resume command |
-| `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again |
+| `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again. A day file a power cut left empty or cut short is renamed to `<name>.damaged`, named in the output, and fetched again; the `.damaged` files can be deleted |
 | `make history`, `make backtest`, `make calibrate`, `make load` | The steps of `make gates`, one by one | The same command again |
 
 ### Is the snapshot download working?
@@ -71,7 +71,7 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
    tmux ls           # which jobs are running: none after a restart
    ```
 
-2. **Services need nothing.** Docker starts at boot and brings back every container that was running. If `make status` lists none, they had been stopped with `make down`: start them with `make up`, or with `make viewer` if the node has not been started yet.
+2. **Services need nothing.** Docker starts at boot and brings back every container that was running. If `make status` lists none, they had been stopped with `make down`: start them with `make up`, or with `make viewer` if the node has not been started yet. While a snapshot download is unfinished, `make up` refuses to start the node and says to resume the download first.
 
 3. **Jobs have to be started again**, in a new `tmux` session, with the command from the table above. For a snapshot download that was under way:
 
@@ -81,7 +81,7 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
    LPBOT_SNAPSHOT_RESUME=1 make snapshot
    ```
 
-   Not sure whether the download had finished? Run it: Reth passes over what it already has. If it refuses because `reth-snapshot-manifest` is missing, it says how to name the snapshot you began with. Reth lists the snapshots of the last two weeks or so, so a download should not be left paused longer than that. Do not run it once the node has been started with `make up`. The database is complete by then, and the command would stop the node to download into it.
+   Not sure whether the download had finished? Run it: Reth passes over what it already has. If it refuses because `reth-snapshot-manifest` is missing, it says how to name the snapshot you began with. Reth lists the snapshots of the last two weeks or so, so a download should not be left paused longer than that. Once the node has been started with `make up`, the command refuses to run: the database is the node's own by then, and a download would overwrite it. `make up` writes `DATA_DIR/reth-node-started` the first time it starts the node, and that file is what tells. The other way round, `make up` refuses to start the node while a download is running or unfinished.
 
 4. **Find out why it went off**, if you do not know. The log of the previous start says how it ended, and what asked for it:
 

@@ -28,16 +28,16 @@ command -v docker >/dev/null 2>&1 || die "Docker is not installed. Run ./scripts
 docker info >/dev/null 2>&1 \
   || die "this shell cannot talk to Docker. If you just ran scripts/host-setup.sh, log out and back in (or run 'newgrp docker') and try again. A tmux session started before that login keeps the old permissions."
 
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
+# shellcheck source=scripts/env.sh
+. "$ROOT/scripts/env.sh"
+env_load "$ENV_FILE"
 case "$DATA_DIR" in
   /*) ;;
   *) DATA_DIR="$ROOT/${DATA_DIR#./}" ;;
 esac
 RETH_DIR="$DATA_DIR/reth"
 MANIFEST_FILE="$DATA_DIR/reth-snapshot-manifest"
+NODE_MARKER="$DATA_DIR/reth-node-started"
 IMAGE="ghcr.io/paradigmxyz/reth:${RETH_VERSION}"
 mkdir -p "$RETH_DIR"
 
@@ -51,10 +51,15 @@ compose() {
   docker compose --env-file "$ENV_FILE" -f "$DEPLOY/docker-compose.yml" "$@"
 }
 
-# The database must not be open while it is being replaced.
-if [[ -n "$(compose ps -q reth 2>/dev/null)" ]]; then
-  say "Stopping the node while its database is downloaded."
-  compose stop lighthouse reth
+# Once the node has run on this database it is the node's own, synced past
+# any snapshot. A download would overwrite it, so refuse. `make up` writes
+# the marker; a reth container, running or stopped, means the same.
+if [[ -f "$NODE_MARKER" || -n "$(compose ps -a -q reth 2>/dev/null)" ]]; then
+  die "the node has already been started on $RETH_DIR (make up), so there is nothing to download:
+the node syncs by itself. Check it with 'make status'.
+To throw the database away and start again from a new snapshot (a download of about
+2 TB): make down, empty $RETH_DIR, delete $NODE_MARKER and $MANIFEST_FILE,
+then run 'make snapshot'."
 fi
 
 if [[ -n "$(ls -A "$RETH_DIR" 2>/dev/null)" && "${LPBOT_SNAPSHOT_RESUME:-0}" != 1 ]]; then
@@ -63,10 +68,11 @@ if [[ -n "$(ls -A "$RETH_DIR" 2>/dev/null)" && "${LPBOT_SNAPSHOT_RESUME:-0}" != 
 If it holds a synced node, there is nothing to download. To start over, empty that folder first."
 fi
 
-# Which snapshot: the one named by hand, else the one this download began
-# with, else (on a first run) the newest of the profile.
+# Which snapshot: the one named by hand, else, on a resume, the one this
+# download began with, else the newest of the profile. A first run ignores
+# a manifest left from an earlier download: that snapshot may be delisted.
 manifest="${LPBOT_SNAPSHOT_MANIFEST:-}"
-if [[ -z "$manifest" && -f "$MANIFEST_FILE" ]]; then
+if [[ -z "$manifest" && -f "$MANIFEST_FILE" && "${LPBOT_SNAPSHOT_RESUME:-0}" == 1 ]]; then
   manifest="$(head -n 1 "$MANIFEST_FILE")"
 fi
 if [[ -z "$manifest" ]]; then

@@ -3,9 +3,12 @@
 //! It replays the pool's stored events through the pool replica and holds
 //! the bot's position beside it as a virtual one. The position is assumed
 //! small against the liquidity in range (the passive fill model): the
-//! historical swaps are left unchanged and the position takes its pro-rata
-//! share of each swap step's fee. Token amounts are exact integers
-//! throughout; floating point is used only for decisions and reporting.
+//! historical swaps are left unchanged and the position takes its share of
+//! each swap step's fee and each flash loan's fee, with its own liquidity
+//! counted in beside the pool's. Entries are capped at a share of the
+//! liquidity in their range, which keeps the assumption honest. Token
+//! amounts are exact integers throughout; floating point is used only for
+//! decisions and reporting.
 //!
 //! Decisions are taken at the end of a block and carried out at a later
 //! block, on the state then, so nothing is ever decided and filled on the
@@ -18,7 +21,7 @@ use lpbot_core::{Campaign, EntrySide, PoolId, Tick};
 use lpbot_data::lake::TimedEvent;
 use lpbot_data::odds::TickBuckets;
 use lpbot_data::zone_map::{zone_stats, PathPoint, DAY};
-use lpbot_risk::{LossCheck, LossLimit};
+use lpbot_risk::{parts_per_million, LiquidityShareCap, LossCheck, LossLimit, MILLION};
 use lpbot_strategy::adaptive::{self, AdaptiveParams, Choice, Expected, Gamble, Options};
 use lpbot_strategy::zone_round_trip::{choose_zone, entry_candidates, gap, ZoneScore};
 use lpbot_strategy::{FixedRule, MarketView, PatienceAction, PatiencePolicy};
@@ -27,10 +30,14 @@ use lpbot_venues::uniswap_v3::full_math::mul_div;
 use lpbot_venues::uniswap_v3::liquidity_amounts::{
     get_amounts_for_liquidity, get_liquidity_for_amount0, get_liquidity_for_amount1,
 };
-use lpbot_venues::uniswap_v3::pool::{Pool, PoolError, PoolSnapshot, Replay, StepInfo};
+use lpbot_venues::uniswap_v3::pool::{
+    fees_earned, Pool, PoolError, PoolSnapshot, Replay, StepInfo,
+};
 use lpbot_venues::uniswap_v3::sqrt_price_math::{get_amount0_delta, get_amount1_delta};
-use lpbot_venues::uniswap_v3::tick_math::{get_sqrt_ratio_at_tick, MAX_SQRT_RATIO, MIN_SQRT_RATIO};
-use lpbot_venues::uniswap_v3::MathError;
+use lpbot_venues::uniswap_v3::tick_math::{
+    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MIN_SQRT_RATIO,
+};
+use lpbot_venues::uniswap_v3::{MathError, Q128};
 
 /// One of a pool's two tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +56,10 @@ impl Token {
 }
 
 /// What each kind of action costs in gas, charged in the value token.
+///
+/// The gas price and the value of an ETH come from the config and the
+/// price signal as decimals. The run turns them into integers once, at its
+/// start (`GasPrice`); every gas amount charged after that is integer math.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasModel {
     pub open_units: u64,
@@ -70,15 +81,55 @@ impl GasModel {
             value_raw_per_eth: 0.0,
         }
     }
+}
 
-    fn cost(&self, units: u64) -> U256 {
-        let raw = units as f64 * self.gas_price_gwei * 1e-9 * self.value_raw_per_eth;
-        if raw.is_finite() && raw > 0.0 {
-            U256::from(raw as u128)
-        } else {
-            U256::ZERO
-        }
+const WEI_PER_GWEI: f64 = 1e9;
+const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
+
+/// The gas model's prices as integers: the boundary between the decimals
+/// of the config and price signal, and the exact amounts charged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GasPrice {
+    wei_per_gas: U256,
+    value_raw_per_eth: U256,
+}
+
+impl GasPrice {
+    fn new(model: &GasModel) -> Result<Self, SimError> {
+        let wei_per_gas = whole(model.gas_price_gwei * WEI_PER_GWEI).ok_or_else(|| {
+            SimError::Settings(format!(
+                "the gas price of {} gwei is not a price; set costs.gas_price_gwei to a number \
+                 of at least 0",
+                model.gas_price_gwei
+            ))
+        })?;
+        let value_raw_per_eth = whole(model.value_raw_per_eth).ok_or_else(|| {
+            SimError::Settings(format!(
+                "one ETH is said to be worth {} of the value token's smallest unit, which \
+                 cannot price gas; check costs.eth_price_usd and the pool's price",
+                model.value_raw_per_eth
+            ))
+        })?;
+        Ok(Self {
+            wei_per_gas,
+            value_raw_per_eth,
+        })
     }
+
+    /// What `units` of gas cost in the value token's smallest unit,
+    /// rounded down.
+    fn cost(&self, units: u64) -> U256 {
+        let wei = U256::from(units) * self.wei_per_gas;
+        // Only fails on a cost beyond 2^256, which no real price makes.
+        mul_div(wei, self.value_raw_per_eth, U256::from(WEI_PER_ETH)).unwrap_or(U256::MAX)
+    }
+}
+
+/// A non-negative decimal rounded to the nearest whole number. `None` for
+/// anything negative, not a number, or too large for 128 bits.
+fn whole(value: f64) -> Option<U256> {
+    (value.is_finite() && value >= 0.0 && value < u128::MAX as f64)
+        .then(|| U256::from(value.round() as u128))
 }
 
 /// How the run decides when price has left a position behind.
@@ -106,8 +157,14 @@ pub struct Settings {
     pub max_gap: Tick,
     /// Capital of the run in the value token, smallest unit.
     pub capital: U256,
-    /// Share of the free capital put into a campaign.
+    /// Share of the free capital put into a campaign, between 0 and 1.
+    /// Larger values are taken as 1.
     pub capital_share: f64,
+    /// Largest share of the liquidity in its range a position may have at
+    /// entry (`universe.max_share_of_in_range_liquidity`), above 0 and at
+    /// most 1. What the capital would buy beyond it stays as cash. `None`
+    /// leaves entries uncapped.
+    pub max_share_of_in_range_liquidity: Option<f64>,
     pub loss_limit: LossLimit,
     pub policy: Policy,
     /// Seconds between patience decisions.
@@ -156,6 +213,9 @@ pub struct CampaignRow {
     pub opened_block: u64,
     pub closed_time: u64,
     pub closed_block: u64,
+    /// `round_trip_complete`, `repositioned`, `patience_close`,
+    /// `flip_failed` (a flip whose new range could not open, closed
+    /// instead), `loss_limit` or `window_end`.
     pub exit_reason: String,
     pub amount_in: f64,
     /// Capital after the campaign minus capital before it: fees, losses,
@@ -179,8 +239,12 @@ pub struct DecisionRow {
     /// `entry` or `flip`: which leg of the campaign was stranded.
     pub leg: String,
     pub seconds_stranded: u64,
-    /// `wait`, `flip` or `close`.
+    /// `wait`, `flip` or `close`. What came of it is in the campaign's
+    /// row: a flip whose new range could not open ends it as `flip_failed`.
     pub action: String,
+    /// For a flip, the range it went to: the one next to the price when it
+    /// was carried out, which a move during the latency can make differ
+    /// from the one next to the price when it was decided.
     pub target_lower: Option<Tick>,
     pub target_upper: Option<Tick>,
     /// What the adaptive decision expected from each option, in whole
@@ -239,6 +303,9 @@ pub struct Summary {
     pub max_drawdown_pct: f64,
     pub halted_by_loss_limit: bool,
     pub events: u64,
+    /// Entries made smaller by the cap on the position's share of the
+    /// liquidity in its range.
+    pub capped_entries: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -261,8 +328,104 @@ struct Leg {
     sqrt_lower: U256,
     sqrt_upper: U256,
     liquidity: u128,
-    fee0: U256,
-    fee1: U256,
+    /// Fee growth inside the range per unit of liquidity since the leg
+    /// opened, in Q128, with the leg's own liquidity counted in.
+    growth0: U256,
+    growth1: U256,
+}
+
+impl Leg {
+    /// Fees the leg has earned in each token: its liquidity times its fee
+    /// growth, rounded down, as the pool pays them.
+    fn fees(&self) -> (U256, U256) {
+        (
+            fees_earned(self.growth0, U256::ZERO, self.liquidity),
+            fees_earned(self.growth1, U256::ZERO, self.liquidity),
+        )
+    }
+
+    fn is_active_at(&self, tick: Tick) -> bool {
+        self.lower <= tick && tick < self.upper
+    }
+}
+
+/// Fee growth per unit of liquidity from `fee` paid to LPs with `pool`
+/// liquidity active, once a position with `position` liquidity is counted
+/// in beside it, in Q128.
+///
+/// The passive fill model leaves the historical swaps as they were, so the
+/// replica's active liquidity never includes the virtual position. Dividing
+/// by the pool's liquidity alone would pay a position larger than the pool
+/// more than the fee there was; counting it in keeps its share below the
+/// whole fee however large it is. Where the pool had no liquidity at all
+/// nothing was earned in history, and the passive model cannot say what
+/// the position alone would have traded, so it earns nothing.
+pub(crate) fn diluted_fee_growth(fee: U256, pool: u128, position: u128) -> U256 {
+    if pool == 0 || fee.is_zero() {
+        return U256::ZERO;
+    }
+    // The divisor is at least one, and the quotient is below the fee times
+    // 2^128, so this cannot fail.
+    mul_div(fee, Q128, U256::from(pool) + U256::from(position)).unwrap_or(U256::ZERO)
+}
+
+/// The LPs' part of a fee once the protocol has taken its cut, as the pool
+/// takes it: one `fee_protocol`-th, rounded down, or nothing when off.
+pub(crate) fn after_protocol(fee: U256, fee_protocol: u8) -> U256 {
+    if fee_protocol == 0 {
+        fee
+    } else {
+        fee - fee / U256::from(fee_protocol)
+    }
+}
+
+/// The least active liquidity the pool has anywhere in `[lower, upper)`,
+/// read from the replica's tick map.
+///
+/// This is what "the liquidity in range" means for a range the price has
+/// not reached yet, as an entry range never contains the price: the
+/// position's share of each swap's fee, and the error of the passive fill
+/// model, are largest where the pool is thinnest. A range with a gap in
+/// the pool's liquidity reads zero.
+pub(crate) fn thinnest_liquidity(pool: &Pool, lower: Tick, upper: Tick) -> u128 {
+    let current = pool.tick();
+    // The pool's liquidity holds for the ticks between the initialized
+    // ticks around the current one. Crossing a tick upwards adds its net
+    // liquidity, crossing it downwards takes it away.
+    let net_between = |from: Tick, to: Tick| {
+        pool.ticks()
+            .filter(|(t, _)| *t > from && *t <= to)
+            .fold(0i128, |sum, (_, info)| {
+                sum.saturating_add(info.liquidity_net)
+            })
+    };
+    let mut liquidity = pool.liquidity();
+    liquidity = if lower > current {
+        liquidity.saturating_add_signed(net_between(current, lower))
+    } else {
+        liquidity.saturating_add_signed(net_between(lower, current).saturating_neg())
+    };
+    // `liquidity` is now what is active at `lower`; walk up the range.
+    let mut thinnest = liquidity;
+    for (_, info) in pool.ticks().filter(|(t, _)| *t > lower && *t < upper) {
+        liquidity = liquidity.saturating_add_signed(info.liquidity_net);
+        thinnest = thinnest.min(liquidity);
+    }
+    thinnest
+}
+
+/// `amount` times a share in parts per million, rounded down.
+pub(crate) fn share_of(amount: U256, ppm: u32) -> U256 {
+    // `ppm` is at most a million, so the result never exceeds `amount`.
+    mul_div(amount, U256::from(ppm), U256::from(MILLION)).unwrap_or(amount)
+}
+
+/// What a leg that opened put in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Opened {
+    used: U256,
+    /// The share cap made it smaller than the amount would have bought.
+    capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,15 +463,18 @@ enum Action {
     Close {
         reason: &'static str,
     },
-    /// Withdraw and place the other token next to the price.
-    Flip,
+    /// Withdraw and place the other token next to the price. `decision` is
+    /// the row of the decision it carries out.
+    Flip {
+        decision: usize,
+    },
     /// Withdraw a position that is wholly in the value token.
     Withdraw {
         reason: &'static str,
     },
 }
 
-fn to_f64(value: U256) -> f64 {
+pub(crate) fn to_f64(value: U256) -> f64 {
     value.to_string().parse().unwrap_or(f64::INFINITY)
 }
 
@@ -329,8 +495,16 @@ struct Engine<'a> {
     out: Output,
     campaigns_opened: u32,
     fees_total: f64,
+    gas: GasPrice,
     gas_total: U256,
     gas_owed_units: u64,
+    /// The capital share in parts per million.
+    capital_ppm: u32,
+    share_cap: Option<LiquidityShareCap>,
+    /// The other token held outside any position: what a flip's range
+    /// could not take. It stays as it would in the Safe, and goes back to
+    /// the value token with the campaign's closing swap.
+    loose_other: U256,
     peak: f64,
     value_unit: f64,
 }
@@ -394,26 +568,36 @@ impl<'a> Engine<'a> {
         Ok(self.split(amount0, amount1))
     }
 
-    /// Capital plus position at the pool price, in value-token units. The
-    /// other token is marked after the pool's swap fee.
+    /// The leg's fees: (value token, other token).
+    fn leg_fees(&self, leg: &Leg) -> (U256, U256) {
+        let (fee0, fee1) = leg.fees();
+        self.split(fee0, fee1)
+    }
+
+    /// Capital plus position at the pool price, less the gas still owed, in
+    /// value-token units. The other token is marked after the pool's swap
+    /// fee.
     fn equity(&self) -> Result<f64, MathError> {
-        let mut total = to_f64(self.cash);
+        let mut value = self.cash;
+        let mut other = self.loose_other;
         if let Some(leg) = &self.leg {
-            let (value, other) = self.holdings(leg)?;
-            let (fee_value, fee_other) = self.split(leg.fee0, leg.fee1);
-            let keep = 1.0 - f64::from(self.pool.fee_pips()) / 1_000_000.0;
-            total += to_f64(value + fee_value)
-                + to_f64(other + fee_other) * self.value_per_other() * keep;
+            let (held_value, held_other) = self.holdings(leg)?;
+            let (fee_value, fee_other) = self.leg_fees(leg);
+            value += held_value + fee_value;
+            other += held_other + fee_other;
         }
-        Ok(total)
+        let keep = 1.0 - f64::from(self.pool.fee_pips()) / f64::from(MILLION);
+        let owed = self.gas.cost(self.gas_owed_units);
+        Ok(to_f64(value) + to_f64(other) * self.value_per_other() * keep - to_f64(owed))
     }
 
     /// Takes an action's gas out of the free capital. When the free capital
     /// cannot cover it, as after a flip that put everything back into the
-    /// pool, it is owed and settled with the next charge.
+    /// pool, it is owed and settled with the next charge; until then the
+    /// equity counts it as spent.
     fn charge_gas(&mut self, units: u64) {
         let units = units + std::mem::take(&mut self.gas_owed_units);
-        let cost = self.s.gas.cost(units);
+        let cost = self.gas.cost(units);
         if cost > self.cash {
             self.gas_owed_units = units;
             return;
@@ -425,9 +609,22 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// What the patience decision sees of the pool now.
+    fn market(&self) -> Result<MarketView, MathError> {
+        let price = self.pool.sqrt_price_x96();
+        let tick = get_tick_at_sqrt_ratio(price)?;
+        let on_tick = get_sqrt_ratio_at_tick(tick)? == price;
+        Ok(MarketView {
+            current_tick: self.pool.tick(),
+            tick_spacing: self.pool.tick_spacing(),
+            price_on_tick: on_tick.then_some(tick),
+        })
+    }
+
     /// Puts `amount` of one token into a range that holds only that token
-    /// at the current price. `None` when the price is not on the right
-    /// side of the range or the amount buys no liquidity.
+    /// at the current price, shrunk to `cap`'s share of the range's
+    /// thinnest liquidity when given. `None` when the price is not on the
+    /// right side of the range or the amount buys no liquidity.
     fn open_leg(
         &mut self,
         token: Token,
@@ -435,36 +632,33 @@ impl<'a> Engine<'a> {
         lower: Tick,
         upper: Tick,
         flip: bool,
-    ) -> Result<Option<U256>, MathError> {
+        cap: Option<LiquidityShareCap>,
+    ) -> Result<Option<Opened>, MathError> {
         let sqrt_lower = get_sqrt_ratio_at_tick(lower)?;
         let sqrt_upper = get_sqrt_ratio_at_tick(upper)?;
         let price = self.pool.sqrt_price_x96();
-        let (liquidity, used) = match token {
-            Token::Zero => {
-                if price > sqrt_lower {
-                    return Ok(None);
-                }
-                let liquidity = get_liquidity_for_amount0(sqrt_lower, sqrt_upper, amount)?;
-                (
-                    liquidity,
-                    get_amount0_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
-                )
-            }
-            Token::One => {
-                if price < sqrt_upper {
-                    return Ok(None);
-                }
-                let liquidity = get_liquidity_for_amount1(sqrt_lower, sqrt_upper, amount)?;
-                (
-                    liquidity,
-                    get_amount1_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
-                )
-            }
+        let bought = match token {
+            Token::Zero if price > sqrt_lower => return Ok(None),
+            Token::One if price < sqrt_upper => return Ok(None),
+            Token::Zero => get_liquidity_for_amount0(sqrt_lower, sqrt_upper, amount)?,
+            Token::One => get_liquidity_for_amount1(sqrt_lower, sqrt_upper, amount)?,
+        };
+        let (liquidity, capped) = match cap {
+            Some(cap) => cap.shrink(bought, thinnest_liquidity(&self.pool, lower, upper)),
+            None => (bought, false),
+        };
+        let used = match token {
+            Token::Zero => get_amount0_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
+            Token::One => get_amount1_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
         };
         if liquidity == 0 || used > amount {
             return Ok(None);
         }
-        if self.pool.watch_tick(lower).is_err() || self.pool.watch_tick(upper).is_err() {
+        if self.pool.watch_tick(lower).is_err() {
+            return Ok(None);
+        }
+        if self.pool.watch_tick(upper).is_err() {
+            self.pool.unwatch_tick(lower);
             return Ok(None);
         }
         self.leg = Some(Leg {
@@ -474,10 +668,10 @@ impl<'a> Engine<'a> {
             sqrt_lower,
             sqrt_upper,
             liquidity,
-            fee0: U256::ZERO,
-            fee1: U256::ZERO,
+            growth0: U256::ZERO,
+            growth1: U256::ZERO,
         });
-        Ok(Some(used))
+        Ok(Some(Opened { used, capped }))
     }
 
     /// Takes the position out: (value token, other token), fees included.
@@ -486,7 +680,7 @@ impl<'a> Engine<'a> {
             return Ok((U256::ZERO, U256::ZERO));
         };
         let (value, other) = self.holdings(&leg)?;
-        let (fee_value, fee_other) = self.split(leg.fee0, leg.fee1);
+        let (fee_value, fee_other) = self.leg_fees(&leg);
         self.pool.unwatch_tick(leg.lower);
         self.pool.unwatch_tick(leg.upper);
         let earned = to_f64(fee_value) + to_f64(fee_other) * self.value_per_other();
@@ -558,18 +752,25 @@ impl<'a> Engine<'a> {
                     return Ok(());
                 }
                 // Gas comes out of the same capital, so it is set aside first.
-                let gas = self.s.gas.cost(self.s.gas.open_units);
+                let gas = self.gas.cost(self.s.gas.open_units);
                 if gas >= self.cash {
                     return Ok(());
                 }
-                let share = self.s.capital_share.clamp(0.0, 1.0);
-                let free = self.cash - gas;
-                let budget = U256::from((to_f64(free) * share) as u128).min(free);
+                let budget = share_of(self.cash - gas, self.capital_ppm);
                 let cash_before = self.cash;
-                let Some(used) = self.open_leg(self.s.value, budget, lower, upper, false)? else {
-                    // Price moved onto the range in the meantime. Look again later.
+                let Some(opened) =
+                    self.open_leg(self.s.value, budget, lower, upper, false, self.share_cap)?
+                else {
+                    // Price moved onto the range in the meantime, or the
+                    // pool has no liquidity in part of it to take a share
+                    // of. Look again later.
                     return Ok(());
                 };
+                // Whatever the cap left unused stays as cash.
+                let used = opened.used;
+                if opened.capped {
+                    self.out.summary.capped_entries += 1;
+                }
                 self.cash -= used;
                 self.campaigns_opened += 1;
                 self.campaign = Some(OpenCampaign {
@@ -598,29 +799,15 @@ impl<'a> Engine<'a> {
                 if !self.holdings(leg)?.1.is_zero() {
                     return Ok(());
                 }
-                let (value, other) = self.withdraw()?;
-                self.cash += value;
-                self.charge_gas(self.s.gas.close_units);
-                if !other.is_zero() {
-                    self.cash += self.swap_to_value(other)?;
-                    self.charge_gas(self.s.gas.swap_units);
-                }
-                self.end_campaign(reason, time, block);
+                self.close_out(reason, time, block)?;
             }
             Action::Close { reason } => {
                 if self.leg.is_none() {
                     return Ok(());
                 }
-                let (value, other) = self.withdraw()?;
-                self.cash += value;
-                self.charge_gas(self.s.gas.close_units);
-                if !other.is_zero() {
-                    self.cash += self.swap_to_value(other)?;
-                    self.charge_gas(self.s.gas.swap_units);
-                }
-                self.end_campaign(reason, time, block);
+                self.close_out(reason, time, block)?;
             }
-            Action::Flip => {
+            Action::Flip { decision } => {
                 let Some(leg) = &self.leg else {
                     return Ok(());
                 };
@@ -628,10 +815,7 @@ impl<'a> Engine<'a> {
                 // while the position is still wholly in the other token.
                 let (held_value, _) = self.holdings(leg)?;
                 let view = self.campaign_view(leg);
-                let market = MarketView {
-                    current_tick: self.pool.tick(),
-                    tick_spacing: self.pool.tick_spacing(),
-                };
+                let market = self.market()?;
                 let PatienceAction::Flip { target } = FixedRule::Flip.decide(&view, &market) else {
                     return Ok(());
                 };
@@ -640,8 +824,16 @@ impl<'a> Engine<'a> {
                 {
                     return Ok(());
                 }
+                // The decision's row shows the range the flip went to. It
+                // can differ from the one next to the price when it was
+                // decided, if the price moved in the meantime.
+                if let Some(row) = self.out.decisions.get_mut(decision) {
+                    row.target_lower = Some(target.tick_lower);
+                    row.target_upper = Some(target.tick_upper);
+                }
                 let (value, other) = self.withdraw()?;
                 self.cash += value;
+                let other = other + std::mem::take(&mut self.loose_other);
                 let other_token = self.s.value.other();
                 match self.open_leg(
                     other_token,
@@ -649,22 +841,53 @@ impl<'a> Engine<'a> {
                     target.tick_lower,
                     target.tick_upper,
                     true,
+                    None,
                 )? {
-                    Some(used) => {
-                        // Dust the range could not take is swapped back.
-                        self.cash += self.swap_to_value(other - used)?;
+                    Some(opened) => {
+                        // The few units the range could not take stay in
+                        // the other token, as they would in the Safe. They
+                        // go back with the campaign's closing swap, so no
+                        // swap is made here.
+                        self.loose_other = other - opened.used;
                         self.charge_gas(self.s.gas.close_units + self.s.gas.open_units);
                         if let Some(campaign) = &mut self.campaign {
                             campaign.flips += 1;
                         }
                     }
                     None => {
-                        self.cash += self.swap_to_value(other)?;
-                        self.charge_gas(self.s.gas.close_units + self.s.gas.swap_units);
-                        self.end_campaign("patience_close", time, block);
+                        // The new leg could not open: everything goes back
+                        // to the value token and the campaign ends. Its exit
+                        // says so, beside the decision row's `flip`.
+                        self.loose_other = other;
+                        self.charge_gas(self.s.gas.close_units);
+                        self.swap_loose_to_value()?;
+                        self.end_campaign("flip_failed", time, block);
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Withdraws the leg, swaps all the other token back and ends the
+    /// campaign.
+    fn close_out(&mut self, reason: &str, time: u64, block: u64) -> Result<(), SimError> {
+        let (value, other) = self.withdraw()?;
+        self.cash += value;
+        self.loose_other += other;
+        self.charge_gas(self.s.gas.close_units);
+        self.swap_loose_to_value()?;
+        self.end_campaign(reason, time, block);
+        Ok(())
+    }
+
+    /// Swaps all the other token held outside a position back to the value
+    /// token, and charges the swap.
+    fn swap_loose_to_value(&mut self) -> Result<(), SimError> {
+        let other = std::mem::take(&mut self.loose_other);
+        if !other.is_zero() {
+            self.cash += self.swap_to_value(other)?;
+            self.charge_gas(self.s.gas.swap_units);
         }
         Ok(())
     }
@@ -751,10 +974,13 @@ impl<'a> Engine<'a> {
         let fee = f64::from(self.pool.fee_pips()) / 1_000_000.0;
         let per_other = self.value_per_other();
         let (held_value, held_other) = self.holdings(leg)?;
-        let (fee_value, fee_other) = self.split(leg.fee0, leg.fee1);
-        let other = to_f64(held_other + fee_other);
+        let (fee_value, fee_other) = self.leg_fees(leg);
+        // The other token the leg does not hold as liquidity: its fees and
+        // what an earlier flip's range could not take.
+        let other_outside = fee_other + self.loose_other;
+        let other = to_f64(held_other + other_outside);
         let kept = to_f64(held_value + fee_value);
-        let gas = |units: u64| to_f64(self.s.gas.cost(units));
+        let gas = |units: u64| to_f64(self.gas.cost(units));
         let (open, close, swap) = (
             self.s.gas.open_units,
             self.s.gas.close_units,
@@ -788,7 +1014,7 @@ impl<'a> Engine<'a> {
         });
         let wait = Gamble {
             odds: back_odds.p_hit,
-            if_made: whole_range * (1.0 + fee) + kept + to_f64(fee_other) * per_other,
+            if_made: whole_range * (1.0 + fee) + kept + to_f64(other_outside) * per_other,
             if_missed: swapped_at(back_odds.drift_if_missed),
         };
 
@@ -922,7 +1148,7 @@ impl<'a> Engine<'a> {
                 hold: to_f64(self.s.capital) / unit,
                 fees: (self.fees_total
                     + self.leg.as_ref().map_or(0.0, |leg| {
-                        let (fee_value, fee_other) = self.split(leg.fee0, leg.fee1);
+                        let (fee_value, fee_other) = self.leg_fees(leg);
                         to_f64(fee_value) + to_f64(fee_other) * self.value_per_other()
                     }))
                     / unit,
@@ -1010,10 +1236,7 @@ impl<'a> Engine<'a> {
             if leg.flip && gap(tick, leg.lower, leg.upper, other_side) < self.s.width {
                 return Ok(());
             }
-            let market = MarketView {
-                current_tick: tick,
-                tick_spacing: self.pool.tick_spacing(),
-            };
+            let market = self.market()?;
             let view = self.campaign_view(&leg);
             let (action, expected) = match self.s.policy {
                 Policy::Fixed(rule) => (rule.decide(&view, &market), None),
@@ -1045,7 +1268,10 @@ impl<'a> Engine<'a> {
             });
             match action {
                 PatienceAction::Wait => {}
-                PatienceAction::Flip { .. } => self.schedule(block, Action::Flip),
+                PatienceAction::Flip { .. } => {
+                    let decision = self.out.decisions.len() - 1;
+                    self.schedule(block, Action::Flip { decision });
+                }
                 PatienceAction::Close => self.schedule(
                     block,
                     Action::Close {
@@ -1082,6 +1308,23 @@ pub fn run(
         Token::Zero => settings.decimals0,
         Token::One => settings.decimals1,
     };
+    // The decimals that decide amounts become integers here, once.
+    let capital_ppm =
+        parts_per_million(settings.capital_share.clamp(0.0, 1.0)).ok_or_else(|| {
+            SimError::Settings(
+                "the strategy's capital_share is not a number; set it between 0 and 1".into(),
+            )
+        })?;
+    let share_cap = match settings.max_share_of_in_range_liquidity {
+        None => None,
+        Some(share) => Some(LiquidityShareCap::new(share).ok_or_else(|| {
+            SimError::Settings(format!(
+                "universe.max_share_of_in_range_liquidity is {share}; set it above 0 and at \
+                 most 1"
+            ))
+        })?),
+    };
+    let gas = GasPrice::new(&settings.gas)?;
 
     let mut engine = Engine {
         s: settings,
@@ -1100,8 +1343,12 @@ pub fn run(
         out: Output::default(),
         campaigns_opened: 0,
         fees_total: 0.0,
+        gas,
         gas_total: U256::ZERO,
         gas_owed_units: 0,
+        capital_ppm,
+        share_cap,
+        loose_other: U256::ZERO,
         peak: to_f64(settings.capital),
         value_unit: 10f64.powi(i32::from(value_decimals)),
     };
@@ -1125,26 +1372,37 @@ pub fn run(
             engine.execute(action, event.time, event.block)?;
         }
 
-        // The position takes its share of every swap step inside its range.
-        let mut earned = (U256::ZERO, U256::ZERO);
+        // A flash loan's fee goes to the liquidity active at the price, as
+        // the pool computes it: after the protocol's cut, over its active
+        // liquidity, which the position joins while the price is in its
+        // range. Read before the event, which changes neither.
+        let mut growth = (U256::ZERO, U256::ZERO);
+        if let (PoolEvent::Flash { paid0, paid1 }, Some(leg)) = (&event.event, &engine.leg) {
+            if leg.is_active_at(engine.pool.tick()) {
+                let (protocol0, protocol1) = engine.pool.fee_protocol();
+                let active = engine.pool.liquidity();
+                let lp0 = after_protocol(*paid0, protocol0);
+                let lp1 = after_protocol(*paid1, protocol1);
+                growth.0 = diluted_fee_growth(lp0, active, leg.liquidity);
+                growth.1 = diluted_fee_growth(lp1, active, leg.liquidity);
+            }
+        }
+
+        // The position takes its share of every swap step inside its range,
+        // as fee growth with its own liquidity counted in.
         let range = engine.leg.as_ref().map(|l| (l.lower, l.upper, l.liquidity));
         let mut observer = |step: &StepInfo| {
             let Some((lower, upper, liquidity)) = range else {
                 return;
             };
-            if step.liquidity == 0 || step.tick_start < lower || step.tick_start >= upper {
+            if step.tick_start < lower || step.tick_start >= upper {
                 return;
             }
-            let share = mul_div(
-                step.lp_fee,
-                U256::from(liquidity),
-                U256::from(step.liquidity),
-            )
-            .unwrap_or(U256::ZERO);
+            let added = diluted_fee_growth(step.lp_fee, step.liquidity, liquidity);
             if step.zero_for_one {
-                earned.0 += share;
+                growth.0 = growth.0.wrapping_add(added);
             } else {
-                earned.1 += share;
+                growth.1 = growth.1.wrapping_add(added);
             }
         };
         // With a position in place its bounds split swap steps, so input
@@ -1163,8 +1421,8 @@ pub fn run(
                 source,
             })?;
         if let Some(leg) = &mut engine.leg {
-            leg.fee0 += earned.0;
-            leg.fee1 += earned.1;
+            leg.growth0 = leg.growth0.wrapping_add(growth.0);
+            leg.growth1 = leg.growth1.wrapping_add(growth.1);
         }
 
         if let PoolEvent::Swap(swap) = &event.event {

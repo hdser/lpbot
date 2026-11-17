@@ -134,9 +134,10 @@ struct LoadArgs {
 struct VerifyFeesArgs {
     /// Address of a pool with stored history.
     pool: String,
-    /// Which chain the stored history belongs to.
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
+    /// The node that says which positions started empty and what the pool
+    /// still owes them; an archive node for a history older than its state.
+    #[command(flatten)]
+    chain: ChainArgs,
     /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -461,11 +462,17 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::VerifyFees(args) => {
-            let summary = fees_cmd::run(
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let summary = fees_cmd::run_with(
                 &backfill_cmd::data_dir(args.data_dir.as_deref()),
-                &args.chain,
+                &args.chain.chain,
                 chain_cmd::checked_address("pool", &args.pool)?,
                 args.positions,
+                Some(&chain.client),
             )?;
             if summary.passed(args.positions) {
                 Ok(())

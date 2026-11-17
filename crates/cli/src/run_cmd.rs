@@ -9,7 +9,6 @@ use alloy_primitives::{Address, U256};
 use anyhow::{anyhow, bail, Context, Result};
 use lpbot_core::config::{Mode, StrategyConfig};
 use lpbot_core::experiment::ResolvedRun;
-use lpbot_core::ranking::rank;
 use lpbot_core::{Config, Tick};
 use lpbot_data::day::Day;
 use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
@@ -23,7 +22,7 @@ use lpbot_strategy::FixedRule;
 use serde_yaml::Value;
 
 use crate::chain_cmd::{chain_addresses, checked_address, Tokens};
-use crate::rank_cmd::{build_stats, floors, reading_from_events, token_of};
+use crate::rank_cmd::{floors, rank_readings, reading_from_events, token_of};
 
 const DAY: u64 = 86_400;
 const RANK_DAYS: u32 = 7;
@@ -159,11 +158,36 @@ struct History {
     events: Vec<TimedEvent>,
 }
 
+/// The pool a strategy names with `pool`, if it names one.
+pub(crate) fn named_pool(strategy: &StrategyConfig) -> Result<Option<Address>> {
+    match strategy.extra.get("pool") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => checked_address("strategy pool", text).map(Some),
+        Some(_) => bail!(
+            "the strategy's `pool` must be a checksummed pool address; leave it out to trade \
+             the pool that ranks highest"
+        ),
+    }
+}
+
+/// What the choice of a run's pool depends on. Runs with the same key
+/// trade the same pool and share its ranking.
+pub(crate) type PoolKey = (String, Day, Option<Address>);
+
+/// The pool key of a run: its value token, the first day of its window and
+/// the pool its strategy names, if any.
+pub(crate) fn pool_key(strategy: &StrategyConfig, from: Day) -> Result<PoolKey> {
+    Ok((strategy.value_token.clone(), from, named_pool(strategy)?))
+}
+
 /// Picks the pool a run trades and ranks the candidates as of `from`.
 ///
-/// A `pool` address on the strategy decides it. Otherwise it is the stored
-/// pool holding the value token that ranks highest by implied volatility
-/// over the week before the window.
+/// A `pool` address on the strategy decides it, even when the pool fails
+/// the floors (with a warning). Otherwise it is the stored pool holding
+/// the value token that ranks highest by implied volatility over the week
+/// before the window; when none clears the floors, the run is refused.
+/// Each pool's daily volume is averaged over the days of that week that
+/// are stored.
 pub(crate) fn choose_pool(
     root: &Path,
     chain: &str,
@@ -176,8 +200,10 @@ pub(crate) fn choose_pool(
         .get(&strategy.value_token)
         .map(|(address, _)| *address)
         .ok_or_else(|| anyhow!("value token {} has no address", strategy.value_token))?;
+    let named = named_pool(strategy)?;
     let snapshots = SnapshotStore::new(root);
     let store = EventStore::new(root);
+    let week_start = from.minus(RANK_DAYS);
 
     let mut candidates = Vec::new();
     let mut readings = Vec::new();
@@ -188,17 +214,18 @@ pub(crate) fn choose_pool(
         if snapshot.token0 != value_address && snapshot.token1 != value_address {
             continue;
         }
-        // The week before the window, as far as it is stored.
-        let stored = store.days(chain, pool)?;
-        let before: Vec<Day> = stored
-            .iter()
-            .map(|(day, _)| *day)
-            .filter(|day| *day < from && *day >= from.minus(RANK_DAYS) && *day >= snapshot.day)
+        // The week before the window, as far as it is stored. Read day by
+        // day, so a day missing in between only shortens what is averaged.
+        let before: Vec<Day> = store
+            .days(chain, pool)?
+            .into_iter()
+            .map(|(day, _)| day)
+            .filter(|day| *day < from && *day >= week_start)
             .collect();
-        let events = match (before.first(), before.last()) {
-            (Some(first), Some(last)) => read_events(root, chain, pool, *first, *last)?,
-            _ => Vec::new(),
-        };
+        let mut events = Vec::new();
+        for day in &before {
+            events.extend(read_events(root, chain, pool, *day, *day)?);
+        }
         let token0 = token_of(tokens, snapshot.token0)?;
         let token1 = token_of(tokens, snapshot.token1)?;
         let id = format!(
@@ -207,13 +234,26 @@ pub(crate) fn choose_pool(
             token1.0,
             snapshot.state.fee_pips as f64 / 10_000.0
         );
+        if before.len() < RANK_DAYS as usize {
+            println!(
+                "warning: {id} ({pool:#x}) has {} of the {RANK_DAYS} days before {from} stored; \
+                 its daily volume is the average over {}. `lpbot backfill --from {week_start}` \
+                 stores the rest",
+                before.len(),
+                match before.len() {
+                    0 => "no day, so it is not ranked".to_string(),
+                    1 => "that one day".to_string(),
+                    n => format!("those {n} days"),
+                }
+            );
+        }
         readings.push(reading_from_events(
             id,
             (token0, token1),
-            &snapshot.state,
+            &snapshot,
             &events,
-            from.start(),
-            u64::from(RANK_DAYS),
+            (from.start(), u64::from(RANK_DAYS)),
+            before.len() as f64,
         ));
         candidates.push(pool);
     }
@@ -226,12 +266,8 @@ pub(crate) fn choose_pool(
         );
     }
 
-    let (_, stats) = build_stats(
-        &readings,
-        &config.universe.usd_stables,
-        f64::from(RANK_DAYS),
-    );
-    let ranked = rank(stats, &floors(config)?);
+    let floors_config = floors(config)?;
+    let (_, ranked) = rank_readings(&readings, &config.universe.usd_stables, &floors_config);
     let rows: Vec<PoolRankRow> = ranked
         .iter()
         .map(|r| PoolRankRow {
@@ -247,17 +283,44 @@ pub(crate) fn choose_pool(
         })
         .collect();
 
-    if let Some(text) = strategy.extra.get("pool").and_then(Value::as_str) {
-        let address = checked_address("strategy pool", text)?;
-        if !candidates.contains(&address) {
+    if let Some(address) = named {
+        let Some(position) = candidates.iter().position(|pool| *pool == address) else {
             bail!("pool {address:#x} is not stored, or does not hold the value token");
+        };
+        let id = &readings[position].id;
+        if let Some(reason) = ranked
+            .iter()
+            .find(|r| &r.stats.id == id)
+            .and_then(|r| r.excluded.as_ref())
+        {
+            println!(
+                "warning: {id} ({address:#x}) fails universe.floors as of {from}: {reason}. \
+                 It is traded because the strategy names it"
+            );
         }
         return Ok((address, rows));
     }
-    let top = &ranked[0].stats.id;
+    let top = &ranked[0];
+    if top.excluded.is_some() {
+        let reasons: Vec<String> = ranked
+            .iter()
+            .map(|r| format!("  {}: {}", r.stats.id, r.excluded.as_deref().unwrap_or("")))
+            .collect();
+        bail!(
+            "no stored pool holding {} clears universe.floors (volume_usd_per_day {}, \
+             in_range_liquidity_usd {}) over the {RANK_DAYS} days before {from}:\n{}\n\
+             Backfill from an earlier date so the week before the window is stored \
+             (`lpbot backfill --from {week_start}`), lower universe.floors in the base config, \
+             or name a pool with `pool:` in the strategy",
+            strategy.value_token,
+            floors_config.volume_per_day,
+            floors_config.depth_1pct,
+            reasons.join("\n")
+        );
+    }
     let position = readings
         .iter()
-        .position(|r| &r.id == top)
+        .position(|r| r.id == top.stats.id)
         .expect("ranked pools come from the readings");
     Ok((candidates[position], rows))
 }
@@ -385,6 +448,10 @@ fn settings(
         max_gap: number(&strategy.extra, &["entry", "max_gap_ticks"]).map_or(width, |v| v as Tick),
         capital,
         capital_share: number(&strategy.extra, &["capital_share"]).unwrap_or(1.0),
+        max_share_of_in_range_liquidity: number(
+            &config.universe.extra,
+            &["max_share_of_in_range_liquidity"],
+        ),
         loss_limit,
         policy,
         decide_every: duration(&strategy.patience.extra, &["decide_every"], 3_600)?,
@@ -416,8 +483,10 @@ pub(crate) fn window(config: &Config) -> Result<(Day, Day)> {
 
 /// Runs every run of an experiment and writes its tables under `results`.
 pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Result<()> {
-    let mut histories: HashMap<(Address, Day, Day), Rc<History>> = HashMap::new();
-    let mut pools: HashMap<(String, Day), (Address, Vec<PoolRankRow>)> = HashMap::new();
+    // A history depends on the pool, the window and how far back the run
+    // looks; a pool on what `pool_key` holds. Runs share what they agree on.
+    let mut histories: HashMap<(Address, Day, Day, u32), Rc<History>> = HashMap::new();
+    let mut pools: HashMap<PoolKey, (Address, Vec<PoolRankRow>)> = HashMap::new();
     let mut done = 0;
 
     println!(
@@ -440,7 +509,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         let (from, to) = window(config)?;
         let (_, tokens) = chain_addresses(config, chain)?;
 
-        let key = (strategy.value_token.clone(), from);
+        let key = pool_key(strategy, from)?;
         if !pools.contains_key(&key) {
             let chosen = choose_pool(root, chain, &tokens, config, strategy, from)?;
             pools.insert(key.clone(), chosen);
@@ -448,11 +517,12 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         let (pool, rank_rows) = &pools[&key];
 
         let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
-        let history = match histories.get(&(*pool, from, to)) {
+        let history_key = (*pool, from, to, longest);
+        let history = match histories.get(&history_key) {
             Some(history) => Rc::clone(history),
             None => {
                 let loaded = Rc::new(load_history(root, chain, *pool, from, to, longest)?);
-                histories.insert((*pool, from, to), Rc::clone(&loaded));
+                histories.insert(history_key, Rc::clone(&loaded));
                 loaded
             }
         };
@@ -815,14 +885,300 @@ pub fn calibrate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::chain_cmd::Tokens;
+    use crate::demo_cmd::DEMO_POOL;
+    use alloy_primitives::address;
+    use lpbot_core::config::FloorsConfig;
+    use lpbot_core::experiment::{resolve_experiment, RunOverrides};
+    use lpbot_sim::tables::table_path;
+    use std::path::PathBuf;
 
     fn strategy(yaml: &str) -> StrategyConfig {
         serde_yaml::from_str(yaml).unwrap()
     }
 
     const BASE: &str = "id: s\nkind: zone_round_trip\nvalue_token: WETH\n";
+
+    /// Where a second simulated pool is stored, next to the demo pool.
+    pub(crate) const OTHER_POOL: Address = address!("5157000000000000000000000000000000000002");
+
+    /// A second simulated USDC/WETH pool, from another seed, stored under
+    /// `OTHER_POOL` beside the demo pool in `lake`.
+    pub(crate) fn store_other_pool(lake: &Path, tokens: &Tokens, days: u32) {
+        let elsewhere = lake.with_extension("other");
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        crate::demo_cmd::run(&elsewhere, "ethereum", tokens, days, 2).unwrap();
+        for kind in ["events", "snapshots"] {
+            let folder = |root: &Path, pool: Address| {
+                root.join(kind)
+                    .join("chain=ethereum")
+                    .join(format!("pool={pool:#x}"))
+            };
+            std::fs::rename(folder(&elsewhere, DEMO_POOL), folder(lake, OTHER_POOL)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// The demo history over `days` days in a fresh folder, and the demo
+    /// experiment's runs on a window of three days so the test stays quick.
+    fn demo(label: &str, days: u32) -> (PathBuf, Vec<ResolvedRun>, Tokens) {
+        let root = std::env::temp_dir().join(format!("lpbot-run-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut runs = resolve_experiment(
+            &repo.join("experiments/demo-patience.yml"),
+            &RunOverrides::default(),
+        )
+        .unwrap();
+        for run in &mut runs {
+            run.config.window.as_mut().unwrap().to = "2026-01-10".into();
+        }
+        let (_, tokens) = chain_addresses(&runs[0].config, "ethereum").unwrap();
+        crate::demo_cmd::run(&root.join("lake"), "ethereum", &tokens, days, 1).unwrap();
+        (root, runs, tokens)
+    }
+
+    /// The six tables of a run, as written.
+    fn tables(results: &Path, run_id: &str) -> Vec<Vec<u8>> {
+        lpbot_sim::RESULT_TABLES
+            .iter()
+            .map(|table| std::fs::read(table_path(results, table, run_id)).unwrap())
+            .collect()
+    }
+
+    fn day(text: &str) -> Day {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_named_pool_is_part_of_what_picks_the_pool() {
+        let checksummed = DEMO_POOL.to_checksum(None);
+        let named = strategy(&format!("{BASE}pool: \"{checksummed}\"\n"));
+        assert_eq!(named_pool(&named).unwrap(), Some(DEMO_POOL));
+        assert_eq!(named_pool(&strategy(BASE)).unwrap(), None);
+        assert_eq!(
+            named_pool(&strategy(&format!("{BASE}pool: null\n"))).unwrap(),
+            None
+        );
+        for bad in ["pool: 5", "pool: [a, b]", "pool: \"0x51\""] {
+            assert!(
+                named_pool(&strategy(&format!("{BASE}{bad}\n"))).is_err(),
+                "{bad}"
+            );
+        }
+        let from = day("2026-01-08");
+        let other = strategy(&format!(
+            "{BASE}pool: \"{}\"\n",
+            OTHER_POOL.to_checksum(None)
+        ));
+        assert_ne!(
+            pool_key(&named, from).unwrap(),
+            pool_key(&other, from).unwrap()
+        );
+        assert_ne!(
+            pool_key(&named, from).unwrap(),
+            pool_key(&strategy(BASE), from).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_sweep_over_pools_trades_each_run_on_its_own_pool() {
+        let (root, runs, tokens) = demo("pools", 11);
+        let lake = root.join("lake");
+        store_other_pool(&lake, &tokens, 11);
+
+        let named = |run: &ResolvedRun, pool: Address, suffix: &str| {
+            let mut run = run.clone();
+            run.run_id = format!("{}-{suffix}", run.run_id);
+            run.config.strategies[0]
+                .extra
+                .insert("pool".into(), Value::String(pool.to_checksum(None)));
+            run
+        };
+        let first = named(&runs[1], DEMO_POOL, "demo");
+        let second = named(&runs[1], OTHER_POOL, "other");
+        run(
+            &[first.clone(), second.clone()],
+            &lake,
+            &root.join("both"),
+            "ethereum",
+        )
+        .unwrap();
+        run(
+            std::slice::from_ref(&second),
+            &lake,
+            &root.join("alone"),
+            "ethereum",
+        )
+        .unwrap();
+
+        // The second run traded its own pool, as it does on its own.
+        assert_eq!(
+            tables(&root.join("both"), &second.run_id),
+            tables(&root.join("alone"), &second.run_id)
+        );
+        // And the two pools do give different results.
+        let summary = |run_id: &str| {
+            let table =
+                lpbot_sim::tables::read_table(&table_path(&root.join("both"), "runs", run_id))
+                    .unwrap();
+            table.column("end_capital").cloned()
+        };
+        assert_ne!(summary(&first.run_id), summary(&second.run_id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runs_that_look_back_differently_load_their_own_history() {
+        use lpbot_data::lake::replay_from_snapshot;
+
+        let (root, runs, _) = demo("lookback", 11);
+        let lake = root.join("lake");
+        // A second snapshot, on 5 January: the state after the first four days.
+        let snapshots = SnapshotStore::new(&lake);
+        let first = snapshots
+            .read("ethereum", DEMO_POOL, day("2026-01-01"))
+            .unwrap();
+        let (pool, _) =
+            replay_from_snapshot(&lake, "ethereum", first.clone(), day("2026-01-04")).unwrap();
+        snapshots
+            .write(
+                "ethereum",
+                &StoredSnapshot {
+                    block: first.block + 4 * 7_200,
+                    day: day("2026-01-05"),
+                    state: pool.snapshot(),
+                    ..first
+                },
+            )
+            .unwrap();
+
+        let looking_back = |days: &str, suffix: &str| {
+            let mut run = runs[1].clone();
+            run.run_id = format!("{}-{suffix}", run.run_id);
+            let zone = run.config.strategies[0].extra.get_mut("zone").unwrap();
+            zone["lookbacks"] = serde_yaml::from_str(days).unwrap();
+            run
+        };
+        // One day back starts from the snapshot of 5 January, seven days
+        // back from the one of 1 January.
+        let short = looking_back("[1d]", "short");
+        let long = looking_back("[7d]", "long");
+        run(
+            &[short, long.clone()],
+            &lake,
+            &root.join("both"),
+            "ethereum",
+        )
+        .unwrap();
+        run(
+            std::slice::from_ref(&long),
+            &lake,
+            &root.join("alone"),
+            "ethereum",
+        )
+        .unwrap();
+        assert_eq!(
+            tables(&root.join("both"), &long.run_id),
+            tables(&root.join("alone"), &long.run_id)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_run_refuses_a_pool_below_the_floors_unless_the_strategy_names_it() {
+        let (root, runs, _) = demo("floors", 11);
+        let lake = root.join("lake");
+        let mut thin = runs[1].clone();
+        thin.config.universe.floors = Some(FloorsConfig {
+            volume_usd_per_day: 1e15,
+            in_range_liquidity_usd: 1.0,
+        });
+        let error = format!(
+            "{:#}",
+            run(
+                std::slice::from_ref(&thin),
+                &lake,
+                &root.join("runs"),
+                "ethereum"
+            )
+            .unwrap_err()
+        );
+        for wanted in [
+            "USDC/WETH 0.05",
+            "daily volume",
+            "universe.floors",
+            "lpbot backfill --from 2026-01-01",
+        ] {
+            assert!(error.contains(wanted), "{wanted}: {error}");
+        }
+
+        // Named in the strategy, the pool is traded all the same.
+        thin.config.strategies[0]
+            .extra
+            .insert("pool".into(), Value::String(DEMO_POOL.to_checksum(None)));
+        run(&[thin], &lake, &root.join("runs"), "ethereum").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_daily_volume_is_averaged_over_the_days_actually_stored() {
+        let (root, runs, tokens) = demo("days", 11);
+        let lake = root.join("lake");
+        let config = &runs[1].config;
+        let strategy = &config.strategies[0];
+
+        // On 2 January only 1 January is stored before the window: its
+        // average day is that one day, not a seventh of it.
+        let (_, rows) = choose_pool(
+            &lake,
+            "ethereum",
+            &tokens,
+            config,
+            strategy,
+            day("2026-01-02"),
+        )
+        .unwrap();
+        let ratio = rows[0].volume_per_day_usd / rows[0].volume_24h_usd;
+        assert!((ratio - 1.0).abs() < 0.01, "{ratio}");
+        assert!(rows[0].excluded.is_none(), "{:?}", rows[0].excluded);
+
+        // A full week averages over seven days.
+        let (_, week) = choose_pool(
+            &lake,
+            "ethereum",
+            &tokens,
+            config,
+            strategy,
+            day("2026-01-08"),
+        )
+        .unwrap();
+        let ratio = week[0].volume_per_day_usd / week[0].volume_24h_usd;
+        assert!((0.5..2.0).contains(&ratio), "{ratio}");
+
+        // With nothing stored before the window the pool is not ranked,
+        // and the run is refused with what to do.
+        let error = format!(
+            "{:#}",
+            choose_pool(
+                &lake,
+                "ethereum",
+                &tokens,
+                config,
+                strategy,
+                day("2026-01-01")
+            )
+            .unwrap_err()
+        );
+        assert!(
+            error.contains("no history stored")
+                && error.contains("lpbot backfill --from 2025-12-25"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_demo_experiment_runs_end_to_end_and_writes_all_six_tables() {

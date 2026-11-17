@@ -9,9 +9,17 @@
 //! whose last block is final is written once as `events.parquet` and never
 //! touched again. The day still in progress is `events.partial.parquet`,
 //! rewritten by every backfill until the day closes.
+//!
+//! A file is written under a name of its own, synced to the disk and only
+//! then renamed into place, so a power cut leaves either the old file or
+//! the new one. A file that is damaged anyway (empty, or cut short, from a
+//! writer older than this rule) counts as missing: it is set aside as
+//! `<name>.damaged` and the backfill fetches the day again.
 
 use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256};
@@ -44,6 +52,11 @@ pub enum StoreError {
     Arrow { path: PathBuf, source: ArrowError },
     #[error("{path} is not an event file: {reason}")]
     BadFile { path: PathBuf, reason: String },
+    #[error(
+        "{path} cannot be read: {reason}. Run `lpbot backfill` for that pool again: it sets \
+         damaged files aside and fetches them anew"
+    )]
+    Unreadable { path: PathBuf, reason: String },
     #[error(
         "no events stored for pool {pool:#x} on {day}; run `lpbot backfill` for that range first"
     )]
@@ -100,8 +113,131 @@ fn schema() -> Arc<Schema> {
     ]))
 }
 
+/// A name beside `path` that no other writer uses at the same time: the
+/// process id and a counter. Concurrent writers of the same file each
+/// write their own temporary file, and the last rename wins whole.
+pub(crate) fn temporary_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        "{name}.{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Makes a written temporary file the file at `path`, for good: its
+/// contents reach the disk before the rename, and the rename reaches the
+/// disk before this returns.
+pub(crate) fn commit(file: &File, temporary: &Path, path: &Path) -> std::io::Result<()> {
+    file.sync_all()?;
+    fs::rename(temporary, path)?;
+    sync_dir(path.parent())
+}
+
+/// Writes `bytes` to `path` the way `commit` describes.
+pub(crate) fn write_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_path(path);
+    let written = File::create(&temporary).and_then(|mut file| {
+        file.write_all(bytes)?;
+        commit(&file, &temporary, path)
+    });
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: Option<&Path>) -> std::io::Result<()> {
+    match dir {
+        Some(dir) if !dir.as_os_str().is_empty() => File::open(dir)?.sync_all(),
+        _ => File::open(".")?.sync_all(),
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: Option<&Path>) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Sets a damaged file aside as `<name>.damaged`, so the next backfill
+/// fetches what it held again, and says so on standard error.
+pub(crate) fn discard(path: &Path, reason: &str) {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".damaged");
+    match fs::rename(path, &aside) {
+        Ok(()) => eprintln!(
+            "discarded {} ({reason}); it is kept as {} and `lpbot backfill` fetches it again",
+            path.display(),
+            Path::new(&aside).display()
+        ),
+        Err(error) => eprintln!(
+            "ignoring {} ({reason}); it could not be set aside ({error}). Delete it by hand",
+            path.display()
+        ),
+    }
+}
+
+/// Parquet files start and end with this marker.
+const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
+
+/// Why an event file cannot be whole, or `None` when it looks whole: it
+/// starts and ends with the Parquet marker. Cheap: it reads eight bytes.
+pub fn damage(path: &Path) -> Option<String> {
+    let check = || -> std::io::Result<Option<String>> {
+        let mut file = File::open(path)?;
+        let length = file.metadata()?.len();
+        if length == 0 {
+            return Ok(Some("it is empty".into()));
+        }
+        // Marker, footer length and marker at the least.
+        if length < 12 {
+            return Ok(Some(format!(
+                "it is {length} bytes, too short for a Parquet file"
+            )));
+        }
+        let mut marker = [0u8; 4];
+        file.read_exact(&mut marker)?;
+        if &marker != PARQUET_MAGIC {
+            return Ok(Some("it does not start like a Parquet file".into()));
+        }
+        file.seek(SeekFrom::End(-4))?;
+        file.read_exact(&mut marker)?;
+        if &marker != PARQUET_MAGIC {
+            return Ok(Some(
+                "it is cut short: the Parquet footer is missing".into(),
+            ));
+        }
+        Ok(None)
+    };
+    check().unwrap_or_else(|error| Some(format!("it cannot be read: {error}")))
+}
+
+/// Whether a stored event file is there and looks whole. A damaged one is
+/// set aside.
+fn usable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    match damage(path) {
+        None => true,
+        Some(reason) => {
+            discard(path, &reason);
+            false
+        }
+    }
+}
+
 /// Writes logs to a Parquet file. The file appears under its name only
-/// once it is whole: it is written beside it first, then renamed.
+/// once it is whole and on the disk: it is written beside it under a name
+/// of its own first, synced, then renamed.
 pub fn write_logs(path: &Path, logs: &[StoredLog]) -> StoreResult<()> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
@@ -162,20 +298,27 @@ pub fn write_logs(path: &Path, logs: &[StoredLog]) -> StoreResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io)?;
     }
-    let temporary = path.with_extension("tmp");
-    let file = File::create(&temporary).map_err(io)?;
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .build();
-    let mut writer = ArrowWriter::try_new(file, schema(), Some(properties)).map_err(parquet)?;
-    writer.write(&batch).map_err(parquet)?;
-    writer.close().map_err(parquet)?;
-    fs::rename(&temporary, path).map_err(io)
+    let temporary = temporary_path(path);
+    let written = (|| {
+        let file = File::create(&temporary).map_err(io)?;
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+        let mut writer = ArrowWriter::try_new(file, schema(), Some(properties)).map_err(parquet)?;
+        writer.write(&batch).map_err(parquet)?;
+        writer.finish().map_err(parquet)?;
+        commit(writer.inner(), &temporary, path).map_err(io)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Reads a file written by `write_logs`, in the order it was written.
+/// A file that cannot be read is `Unreadable`, with what to do about it.
 pub fn read_logs(path: &Path) -> StoreResult<Vec<StoredLog>> {
-    let bad = |reason: String| StoreError::BadFile {
+    let bad = |reason: String| StoreError::Unreadable {
         path: path.to_path_buf(),
         reason,
     };
@@ -185,17 +328,11 @@ pub fn read_logs(path: &Path) -> StoreResult<Vec<StoredLog>> {
     })?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .and_then(|builder| builder.build())
-        .map_err(|source| StoreError::Parquet {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| bad(source.to_string()))?;
 
     let mut logs = Vec::new();
     for batch in reader {
-        let batch = batch.map_err(|source| StoreError::Arrow {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let batch = batch.map_err(|source| bad(source.to_string()))?;
         fn column<'a, T: Array + 'static>(
             batch: &'a RecordBatch,
             name: &str,
@@ -267,11 +404,14 @@ impl EventStore {
         self.pool_dir(chain, pool).join(format!("day={day}"))
     }
 
+    /// What is stored for a day. A file that is empty or cut short, as a
+    /// power cut can leave one, does not count: it is set aside and the
+    /// day reads as missing, so the backfill fetches it again.
     pub fn day_state(&self, chain: &str, pool: Address, day: Day) -> DayState {
         let dir = self.day_dir(chain, pool, day);
-        if dir.join(COMPLETE_FILE).is_file() {
+        if usable(&dir.join(COMPLETE_FILE)) {
             DayState::Complete
-        } else if dir.join(PARTIAL_FILE).is_file() {
+        } else if usable(&dir.join(PARTIAL_FILE)) {
             DayState::Partial
         } else {
             DayState::Missing
@@ -441,7 +581,96 @@ mod tests {
         let path = dir.path().join("a/b/events.parquet");
         write_logs(&path, &sample()).unwrap();
         assert_eq!(read_logs(&path).unwrap(), sample());
-        assert!(!path.with_extension("tmp").exists());
+        // Nothing but the file itself is left behind.
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("events.parquet")]);
+        assert_eq!(damage(&path), None);
+    }
+
+    #[test]
+    fn every_write_gets_a_temporary_name_of_its_own() {
+        let path = Path::new("/data/events.parquet");
+        let (a, b) = (temporary_path(path), temporary_path(path));
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), path.parent());
+        let name = a.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with(&format!("events.parquet.{}-", std::process::id()))
+                && name.ends_with(".tmp"),
+            "{name}"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_file_leave_a_whole_file() {
+        let dir = TempDir::new("store");
+        let path = dir.path().join("events.parquet");
+        let writers: Vec<_> = (0..8u32)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let logs: Vec<StoredLog> =
+                        (0..200).map(|b| log(b, i, 2, &[i as u8; 64])).collect();
+                    write_logs(&path, &logs).unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let logs = read_logs(&path).unwrap();
+        assert_eq!(logs.len(), 200);
+        // One writer's file, not a mix of several.
+        assert!(logs.iter().all(|l| l.log_index == logs[0].log_index));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_file_left_empty_or_cut_short_by_a_power_cut_counts_as_missing() {
+        let dir = TempDir::new("store");
+        let store = EventStore::new(dir.path());
+        let day: Day = "2026-11-01".parse().unwrap();
+        let file = store.day_dir("ethereum", pool(), day).join(COMPLETE_FILE);
+
+        // An empty file under the final name, as an unsynced write leaves.
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"").unwrap();
+        assert_eq!(damage(&file).as_deref(), Some("it is empty"));
+        assert_eq!(store.day_state("ethereum", pool(), day), DayState::Missing);
+        assert_eq!(store.read_day("ethereum", pool(), day).unwrap(), None);
+        assert_eq!(store.days("ethereum", pool()).unwrap(), vec![]);
+        // It was set aside, not left to be found again.
+        assert!(!file.exists());
+        assert!(file.with_file_name("events.parquet.damaged").is_file());
+
+        // A file cut short loses its footer.
+        store
+            .write_day("ethereum", pool(), day, &sample(), true)
+            .unwrap();
+        let whole = fs::read(&file).unwrap();
+        fs::write(&file, &whole[..whole.len() / 2]).unwrap();
+        assert!(damage(&file).unwrap().contains("cut short"));
+        assert_eq!(store.day_state("ethereum", pool(), day), DayState::Missing);
+
+        // The backfill writes the day again and it reads back.
+        store
+            .write_day("ethereum", pool(), day, &sample(), true)
+            .unwrap();
+        assert_eq!(store.day_state("ethereum", pool(), day), DayState::Complete);
+        assert_eq!(
+            store.read_day("ethereum", pool(), day).unwrap().unwrap(),
+            sample()
+        );
+
+        // A damaged complete file gives way to a whole partial one.
+        fs::write(&file, b"PAR").unwrap();
+        store
+            .write_day("ethereum", pool(), day, &sample()[..1], false)
+            .unwrap();
+        assert_eq!(store.day_state("ethereum", pool(), day), DayState::Partial);
     }
 
     #[test]
@@ -470,7 +699,9 @@ mod tests {
         assert!(!path.exists());
 
         fs::write(&path, b"not parquet").unwrap();
-        assert!(matches!(read_logs(&path), Err(StoreError::Parquet { .. })));
+        let error = read_logs(&path).unwrap_err();
+        assert!(matches!(error, StoreError::Unreadable { .. }), "{error}");
+        assert!(error.to_string().contains("lpbot backfill"), "{error}");
         assert!(matches!(
             read_logs(&dir.path().join("absent.parquet")),
             Err(StoreError::Io { .. })

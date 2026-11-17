@@ -17,7 +17,21 @@
 //! without holding liquidity, so a virtual position's range boundaries line
 //! up with step boundaries. A pool with watched ticks follows the same price
 //! path, with input amounts that can differ from history by a few units of
-//! rounding; the strict replica never has watched ticks.
+//! rounding; the strict replica never has watched ticks. Watching never
+//! changes what the contract would hold:
+//!
+//! * During a swap the replica walks as if watched ticks were initialized.
+//!   At the end it puts the tick where the contract has it (`settle_tick`),
+//!   so price, tick and active liquidity end equal to the contract's.
+//! * Ticks that hold liquidity keep the contract's fee growth outside them.
+//!   A watched tick keeps a second record of its own (`TickState`), flipped
+//!   every time the replica's tick passes it, settling included.
+//!   `fee_growth_inside` uses that record for a range bounded by a watched
+//!   tick, so it agrees with what an observer credits step by step, also
+//!   across real mints and burns on the tick.
+//!
+//! Every state change is atomic: when it returns an error, the pool is as it
+//! was. A swap hands its steps to the observer only once it has succeeded.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +47,9 @@ use super::tick_math::{
 };
 use super::{add_liquidity_delta, MathError, Q128};
 
-/// State the contract keeps per initialized tick.
+/// State the contract keeps per initialized tick. For a tick that is only
+/// watched, every field but `watchers` is zero: the contract has no such
+/// tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TickInfo {
     /// Total liquidity that references this tick.
@@ -49,6 +65,40 @@ pub struct TickInfo {
 impl TickInfo {
     fn is_boundary(&self) -> bool {
         self.liquidity_gross > 0 || self.watchers > 0
+    }
+}
+
+/// A tick in the replica's map: what the contract holds for it, and, while
+/// the tick is watched, the replica's own fee growth outside it.
+///
+/// The contract flips `fee_growth_outside` only when it crosses an
+/// initialized tick, and starts it over whenever the tick is initialized
+/// again. A virtual position needs a record that lasts as long as its watch
+/// and follows the replica's tick, which also passes watched ticks the
+/// contract never crosses. So a watched tick keeps one apart: it starts by
+/// the contract's convention (all growth so far happened below the tick)
+/// when the first watch is placed, and flips every time the replica's tick
+/// moves across the tick, whether by a swap step or by `settle_tick`. It
+/// never touches contract state, and it is zero while the tick is not
+/// watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TickState {
+    info: TickInfo,
+    watched_outside0: U256,
+    watched_outside1: U256,
+}
+
+impl TickState {
+    /// Flips the watched record: the replica's tick moved across this tick.
+    fn flip_watched(&mut self, fee_growth_global0: U256, fee_growth_global1: U256) {
+        if self.info.watchers > 0 {
+            self.watched_outside0 = fee_growth_global0.wrapping_sub(self.watched_outside0);
+            self.watched_outside1 = fee_growth_global1.wrapping_sub(self.watched_outside1);
+        }
+    }
+
+    fn is_watched_only(&self) -> bool {
+        self.info.liquidity_gross == 0 && self.info.watchers > 0
     }
 }
 
@@ -71,7 +121,7 @@ pub struct StepInfo {
     pub protocol_fee: U256,
 }
 
-/// Receives every step of a swap.
+/// Receives every step of a swap, once the swap has succeeded.
 pub trait SwapObserver {
     fn on_step(&mut self, step: &StepInfo);
 }
@@ -157,6 +207,29 @@ pub struct PoolSnapshot {
     pub ticks: Vec<(i32, TickInfo)>,
 }
 
+/// A mint or burn worked out against the current state, not yet applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PositionChange {
+    /// The two ticks as they will be, or nothing for a zero change.
+    ticks: Option<[(i32, TickState); 2]>,
+    liquidity: u128,
+    /// Owed to the pool for a mint, to the owner for a burn.
+    pub(super) amounts: (U256, U256),
+}
+
+/// What a swap has done so far: the steps for the observer, and the state
+/// before the swap so that a swap that fails can be undone.
+struct SwapRecord {
+    steps: Vec<StepInfo>,
+    sqrt_price_x96: U256,
+    tick: i32,
+    liquidity: u128,
+    fee_growth_global0: U256,
+    fee_growth_global1: U256,
+    /// Ticks as they were before the swap changed them, oldest change first.
+    ticks: Vec<(i32, TickState)>,
+}
+
 /// The pool-state replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
@@ -172,7 +245,8 @@ pub struct Pool {
     /// Protocol's share of fees as a denominator (0 means off), per input token.
     fee_protocol0: u8,
     fee_protocol1: u8,
-    ticks: BTreeMap<i32, TickInfo>,
+    /// Every tick that holds liquidity or is watched, and no other.
+    ticks: BTreeMap<i32, TickState>,
 }
 
 impl Pool {
@@ -214,9 +288,12 @@ impl Pool {
             .map(|(tick, info)| {
                 (
                     tick,
-                    TickInfo {
-                        watchers: 0,
-                        ..info
+                    TickState {
+                        info: TickInfo {
+                            watchers: 0,
+                            ..info
+                        },
+                        ..TickState::default()
                     },
                 )
             })
@@ -237,21 +314,25 @@ impl Pool {
             fee_growth_global1: self.fee_growth_global1,
             fee_protocol0: self.fee_protocol0,
             fee_protocol1: self.fee_protocol1,
-            ticks: self
-                .ticks
-                .iter()
-                .filter(|(_, info)| info.liquidity_gross > 0)
-                .map(|(tick, info)| {
-                    (
-                        *tick,
-                        TickInfo {
-                            watchers: 0,
-                            ..*info
-                        },
-                    )
-                })
-                .collect(),
+            ticks: self.contract_ticks().into_iter().collect(),
         }
+    }
+
+    /// The ticks the contract holds, as it holds them.
+    fn contract_ticks(&self) -> BTreeMap<i32, TickInfo> {
+        self.ticks
+            .iter()
+            .filter(|(_, state)| state.info.liquidity_gross > 0)
+            .map(|(tick, state)| {
+                (
+                    *tick,
+                    TickInfo {
+                        watchers: 0,
+                        ..state.info
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Lists every way this pool differs from another, in plain words.
@@ -296,22 +377,7 @@ impl Pool {
             format!("{}/{}", other.fee_protocol0, other.fee_protocol1),
         );
 
-        let with_liquidity = |pool: &Pool| -> BTreeMap<i32, TickInfo> {
-            pool.ticks
-                .iter()
-                .filter(|(_, info)| info.liquidity_gross > 0)
-                .map(|(tick, info)| {
-                    (
-                        *tick,
-                        TickInfo {
-                            watchers: 0,
-                            ..*info
-                        },
-                    )
-                })
-                .collect()
-        };
-        let (mine, theirs) = (with_liquidity(self), with_liquidity(other));
+        let (mine, theirs) = (self.contract_ticks(), other.contract_ticks());
         let all_ticks: std::collections::BTreeSet<i32> =
             mine.keys().chain(theirs.keys()).copied().collect();
         for tick in all_ticks {
@@ -363,40 +429,55 @@ impl Pool {
         (self.fee_protocol0, self.fee_protocol1)
     }
     pub fn tick_info(&self, tick: i32) -> Option<&TickInfo> {
-        self.ticks.get(&tick)
+        self.ticks.get(&tick).map(|state| &state.info)
     }
     /// All ticks that hold liquidity or are watched, in ascending order.
     pub fn ticks(&self) -> impl Iterator<Item = (i32, &TickInfo)> {
-        self.ticks.iter().map(|(t, info)| (*t, info))
+        self.ticks.iter().map(|(t, state)| (*t, &state.info))
     }
 
     /// Fee growth per unit of liquidity inside a range, for both tokens.
     /// Differences of this value over time are what a position earned.
+    ///
+    /// A bound that is watched uses the tick's own record (see `TickState`)
+    /// in place of the contract's, so differences stay right for a virtual
+    /// position across swaps that end on its bounds and across real mints
+    /// and burns on them. Take differences only while the bound stays
+    /// watched: a new watch starts a new record.
     pub fn fee_growth_inside(&self, tick_lower: i32, tick_upper: i32) -> (U256, U256) {
-        let lower = self.ticks.get(&tick_lower).copied().unwrap_or_default();
-        let upper = self.ticks.get(&tick_upper).copied().unwrap_or_default();
+        let (lower0, lower1) = self.fee_growth_outside_for_ranges(tick_lower);
+        let (upper0, upper1) = self.fee_growth_outside_for_ranges(tick_upper);
         let (g0, g1) = (self.fee_growth_global0, self.fee_growth_global1);
 
         let (below0, below1) = if self.tick >= tick_lower {
-            (lower.fee_growth_outside0, lower.fee_growth_outside1)
+            (lower0, lower1)
         } else {
-            (
-                g0.wrapping_sub(lower.fee_growth_outside0),
-                g1.wrapping_sub(lower.fee_growth_outside1),
-            )
+            (g0.wrapping_sub(lower0), g1.wrapping_sub(lower1))
         };
         let (above0, above1) = if self.tick < tick_upper {
-            (upper.fee_growth_outside0, upper.fee_growth_outside1)
+            (upper0, upper1)
         } else {
-            (
-                g0.wrapping_sub(upper.fee_growth_outside0),
-                g1.wrapping_sub(upper.fee_growth_outside1),
-            )
+            (g0.wrapping_sub(upper0), g1.wrapping_sub(upper1))
         };
         (
             g0.wrapping_sub(below0).wrapping_sub(above0),
             g1.wrapping_sub(below1).wrapping_sub(above1),
         )
+    }
+
+    /// Fee growth outside a tick as range calculations read it: the watched
+    /// record for a watched tick, the contract's for any other.
+    fn fee_growth_outside_for_ranges(&self, tick: i32) -> (U256, U256) {
+        match self.ticks.get(&tick) {
+            Some(state) if state.info.watchers > 0 => {
+                (state.watched_outside0, state.watched_outside1)
+            }
+            Some(state) => (
+                state.info.fee_growth_outside0,
+                state.info.fee_growth_outside1,
+            ),
+            None => (U256::ZERO, U256::ZERO),
+        }
     }
 
     // --- state changes ----------------------------------------------------
@@ -427,8 +508,10 @@ impl Pool {
         tick_upper: i32,
         amount: u128,
     ) -> PoolResult<(U256, U256)> {
-        let delta = i128::try_from(amount).map_err(|_| MathError::LiquidityDelta)?;
-        self.modify_position(tick_lower, tick_upper, delta)
+        let change = self.plan_mint(tick_lower, tick_upper, amount)?;
+        let amounts = change.amounts;
+        self.apply_position_change(change);
+        Ok(amounts)
     }
 
     /// Removes liquidity from a range (the `Burn` event). Returns the token
@@ -439,29 +522,60 @@ impl Pool {
         tick_upper: i32,
         amount: u128,
     ) -> PoolResult<(U256, U256)> {
-        let delta = i128::try_from(amount).map_err(|_| MathError::LiquidityDelta)?;
-        self.modify_position(tick_lower, tick_upper, -delta)
+        let change = self.plan_burn(tick_lower, tick_upper, amount)?;
+        let amounts = change.amounts;
+        self.apply_position_change(change);
+        Ok(amounts)
     }
 
-    fn modify_position(
-        &mut self,
+    /// Works out a mint without applying it.
+    pub(super) fn plan_mint(
+        &self,
+        tick_lower: i32,
+        tick_upper: i32,
+        amount: u128,
+    ) -> PoolResult<PositionChange> {
+        let delta = i128::try_from(amount).map_err(|_| MathError::LiquidityDelta)?;
+        self.plan_position_change(tick_lower, tick_upper, delta)
+    }
+
+    /// Works out a burn without applying it.
+    pub(super) fn plan_burn(
+        &self,
+        tick_lower: i32,
+        tick_upper: i32,
+        amount: u128,
+    ) -> PoolResult<PositionChange> {
+        let delta = i128::try_from(amount).map_err(|_| MathError::LiquidityDelta)?;
+        self.plan_position_change(tick_lower, tick_upper, -delta)
+    }
+
+    /// The contract's `_modifyPosition`, worked out against the current
+    /// state. Everything that can fail fails here, before anything changes.
+    fn plan_position_change(
+        &self,
         tick_lower: i32,
         tick_upper: i32,
         delta: i128,
-    ) -> PoolResult<(U256, U256)> {
+    ) -> PoolResult<PositionChange> {
         self.require_initialized()?;
         self.check_ticks(tick_lower, tick_upper)?;
 
-        if delta != 0 {
-            self.update_tick(tick_lower, delta, false)?;
-            self.update_tick(tick_upper, delta, true)?;
-        }
+        let ticks = if delta != 0 {
+            Some([
+                (tick_lower, self.updated_tick(tick_lower, delta, false)?),
+                (tick_upper, self.updated_tick(tick_upper, delta, true)?),
+            ])
+        } else {
+            None
+        };
 
         let magnitude = delta.unsigned_abs();
         let round_up = delta > 0;
         let sqrt_lower = get_sqrt_ratio_at_tick(tick_lower)?;
         let sqrt_upper = get_sqrt_ratio_at_tick(tick_upper)?;
 
+        let mut liquidity = self.liquidity;
         let amounts = if self.tick < tick_lower {
             // Below the range: all token0.
             (
@@ -469,12 +583,11 @@ impl Pool {
                 U256::ZERO,
             )
         } else if self.tick < tick_upper {
-            let amounts = (
+            liquidity = add_liquidity_delta(liquidity, delta)?;
+            (
                 get_amount0_delta(self.sqrt_price_x96, sqrt_upper, magnitude, round_up)?,
                 get_amount1_delta(sqrt_lower, self.sqrt_price_x96, magnitude, round_up)?,
-            );
-            self.liquidity = add_liquidity_delta(self.liquidity, delta)?;
-            amounts
+            )
         } else {
             // Above the range: all token1.
             (
@@ -483,31 +596,65 @@ impl Pool {
             )
         };
 
-        if delta < 0 {
-            self.drop_tick_if_unused(tick_lower);
-            self.drop_tick_if_unused(tick_upper);
-        }
-        Ok(amounts)
+        Ok(PositionChange {
+            ticks,
+            liquidity,
+            amounts,
+        })
     }
 
-    fn update_tick(&mut self, tick: i32, delta: i128, upper: bool) -> PoolResult<()> {
-        let (g0, g1) = (self.fee_growth_global0, self.fee_growth_global1);
-        let current = self.tick;
-        let max = self.max_liquidity_per_tick;
-        let info = self.ticks.entry(tick).or_default();
+    /// Applies a change that `plan_mint` or `plan_burn` worked out against
+    /// the pool as it still is. Cannot fail.
+    pub(super) fn apply_position_change(&mut self, change: PositionChange) {
+        for (tick, state) in change.ticks.into_iter().flatten() {
+            if state.info.liquidity_gross > 0 {
+                self.ticks.insert(tick, state);
+            } else if state.info.watchers > 0 {
+                // The contract deletes the tick; keep only the watch and its
+                // record.
+                self.ticks.insert(
+                    tick,
+                    TickState {
+                        info: TickInfo {
+                            watchers: state.info.watchers,
+                            ..TickInfo::default()
+                        },
+                        ..state
+                    },
+                );
+            } else {
+                self.ticks.remove(&tick);
+            }
+        }
+        self.liquidity = change.liquidity;
+    }
+
+    /// The contract's `Tick.update`: what a tick becomes when a position
+    /// that uses it changes by `delta`.
+    fn updated_tick(&self, tick: i32, delta: i128, upper: bool) -> PoolResult<TickState> {
+        let mut state = self.ticks.get(&tick).copied().unwrap_or_default();
+        let info = &mut state.info;
 
         let gross_before = info.liquidity_gross;
         let gross_after = add_liquidity_delta(gross_before, delta)?;
-        if gross_after > max {
+        if gross_after > self.max_liquidity_per_tick {
             return Err(PoolError::TickLiquidityOverflow);
         }
         if gross_before == 0 {
             // By convention all growth before a tick was initialized happened
-            // below it. A tick that was only watched until now may carry
-            // values from being crossed; they are not the contract's.
-            let below = tick <= current;
-            info.fee_growth_outside0 = if below { g0 } else { U256::ZERO };
-            info.fee_growth_outside1 = if below { g1 } else { U256::ZERO };
+            // below it. A watched tick's own record is kept apart and goes on
+            // unchanged.
+            let below = tick <= self.tick;
+            info.fee_growth_outside0 = if below {
+                self.fee_growth_global0
+            } else {
+                U256::ZERO
+            };
+            info.fee_growth_outside1 = if below {
+                self.fee_growth_global1
+            } else {
+                U256::ZERO
+            };
         }
         info.liquidity_gross = gross_after;
         info.liquidity_net = if upper {
@@ -516,37 +663,34 @@ impl Pool {
             info.liquidity_net.checked_add(delta)
         }
         .ok_or(MathError::LiquidityDelta)?;
-        Ok(())
-    }
-
-    fn drop_tick_if_unused(&mut self, tick: i32) {
-        if let Some(info) = self.ticks.get_mut(&tick) {
-            if info.liquidity_gross == 0 {
-                if info.watchers == 0 {
-                    self.ticks.remove(&tick);
-                } else {
-                    // The contract deletes the tick; keep only the watch.
-                    *info = TickInfo {
-                        watchers: info.watchers,
-                        ..TickInfo::default()
-                    };
-                }
-            }
-        }
+        Ok(state)
     }
 
     /// Makes a tick a step boundary without adding liquidity.
     pub fn watch_tick(&mut self, tick: i32) -> PoolResult<()> {
         self.check_tick(tick)?;
-        self.ticks.entry(tick).or_default().watchers += 1;
+        let below = tick <= self.tick;
+        let (g0, g1) = (self.fee_growth_global0, self.fee_growth_global1);
+        let state = self.ticks.entry(tick).or_default();
+        if state.info.watchers == 0 {
+            // The first watch starts the tick's own record, by the same
+            // convention the contract uses for a new tick.
+            state.watched_outside0 = if below { g0 } else { U256::ZERO };
+            state.watched_outside1 = if below { g1 } else { U256::ZERO };
+        }
+        state.info.watchers += 1;
         Ok(())
     }
 
     /// Releases one watch on a tick.
     pub fn unwatch_tick(&mut self, tick: i32) {
-        if let Some(info) = self.ticks.get_mut(&tick) {
-            info.watchers = info.watchers.saturating_sub(1);
-            if !info.is_boundary() {
+        if let Some(state) = self.ticks.get_mut(&tick) {
+            state.info.watchers = state.info.watchers.saturating_sub(1);
+            if state.info.watchers == 0 {
+                state.watched_outside0 = U256::ZERO;
+                state.watched_outside1 = U256::ZERO;
+            }
+            if !state.info.is_boundary() {
                 self.ticks.remove(&tick);
             }
         }
@@ -559,18 +703,17 @@ impl Pool {
             return Err(PoolError::NoLiquidity);
         }
         let liquidity = U256::from(self.liquidity);
-        if !paid0.is_zero() {
-            let protocol = protocol_cut(paid0, self.fee_protocol0);
-            self.fee_growth_global0 =
-                self.fee_growth_global0
-                    .wrapping_add(mul_div(paid0 - protocol, Q128, liquidity)?);
-        }
-        if !paid1.is_zero() {
-            let protocol = protocol_cut(paid1, self.fee_protocol1);
-            self.fee_growth_global1 =
-                self.fee_growth_global1
-                    .wrapping_add(mul_div(paid1 - protocol, Q128, liquidity)?);
-        }
+        let growth = |paid: U256, fee_protocol: u8| -> PoolResult<U256> {
+            if paid.is_zero() {
+                return Ok(U256::ZERO);
+            }
+            let protocol = protocol_cut(paid, fee_protocol);
+            Ok(mul_div(paid - protocol, Q128, liquidity)?)
+        };
+        let growth0 = growth(paid0, self.fee_protocol0)?;
+        let growth1 = growth(paid1, self.fee_protocol1)?;
+        self.fee_growth_global0 = self.fee_growth_global0.wrapping_add(growth0);
+        self.fee_growth_global1 = self.fee_growth_global1.wrapping_add(growth1);
         Ok(())
     }
 
@@ -584,6 +727,23 @@ impl Pool {
         amount_specified: I256,
         sqrt_price_limit_x96: U256,
         observer: &mut impl SwapObserver,
+    ) -> PoolResult<SwapAmounts> {
+        let mut record = self.begin_swap();
+        let result = self.run_swap(
+            zero_for_one,
+            amount_specified,
+            sqrt_price_limit_x96,
+            &mut record,
+        );
+        self.end_swap(record, result, observer)
+    }
+
+    fn run_swap(
+        &mut self,
+        zero_for_one: bool,
+        amount_specified: I256,
+        sqrt_price_limit_x96: U256,
+        record: &mut SwapRecord,
     ) -> PoolResult<SwapAmounts> {
         self.require_initialized()?;
         if amount_specified.is_zero() {
@@ -631,11 +791,11 @@ impl Pool {
                 step.amount_in,
                 step.amount_out,
                 step.fee_amount,
-                observer,
+                record,
             )?;
         }
 
-        self.settle_tick(zero_for_one)?;
+        self.settle_tick(zero_for_one, record)?;
 
         let specified_used = amount_specified - remaining;
         Ok(if zero_for_one == exact_input {
@@ -665,6 +825,17 @@ impl Pool {
         event: &SwapEvent,
         mode: Replay,
         observer: &mut impl SwapObserver,
+    ) -> PoolResult<()> {
+        let mut record = self.begin_swap();
+        let result = self.run_swap_event(event, mode, &mut record);
+        self.end_swap(record, result, observer)
+    }
+
+    fn run_swap_event(
+        &mut self,
+        event: &SwapEvent,
+        mode: Replay,
+        record: &mut SwapRecord,
     ) -> PoolResult<()> {
         self.require_initialized()?;
 
@@ -719,7 +890,7 @@ impl Pool {
                 U256::ZERO,
                 U256::ZERO,
                 U256::ZERO,
-                observer,
+                record,
             )?;
         }
 
@@ -764,7 +935,7 @@ impl Pool {
                 step.amount_in,
                 step.amount_out,
                 fee_amount,
-                observer,
+                record,
             )?;
         }
 
@@ -780,7 +951,7 @@ impl Pool {
                     U256::ZERO,
                     U256::ZERO,
                     dust,
-                    observer,
+                    record,
                 )?;
             }
             Some(_) => {}
@@ -792,7 +963,7 @@ impl Pool {
             }
         }
 
-        self.settle_tick(zero_for_one)?;
+        self.settle_tick(zero_for_one, record)?;
 
         if self.tick != event.tick || self.liquidity != event.liquidity {
             return Err(PoolError::ReplayMismatch(format!(
@@ -812,28 +983,145 @@ impl Pool {
 
     // --- swap internals ---------------------------------------------------
 
-    /// Puts the tick where the contract has it after a swap down that ended
-    /// exactly on a watched tick.
+    fn begin_swap(&self) -> SwapRecord {
+        SwapRecord {
+            steps: Vec::new(),
+            sqrt_price_x96: self.sqrt_price_x96,
+            tick: self.tick,
+            liquidity: self.liquidity,
+            fee_growth_global0: self.fee_growth_global0,
+            fee_growth_global1: self.fee_growth_global1,
+            ticks: Vec::new(),
+        }
+    }
+
+    /// Hands a successful swap's steps to the observer, or puts back the
+    /// state from before a failed one. A swap never adds or removes ticks,
+    /// it only changes the ones it crosses.
+    fn end_swap<T>(
+        &mut self,
+        record: SwapRecord,
+        result: PoolResult<T>,
+        observer: &mut impl SwapObserver,
+    ) -> PoolResult<T> {
+        match result {
+            Ok(value) => {
+                for step in &record.steps {
+                    observer.on_step(step);
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                self.sqrt_price_x96 = record.sqrt_price_x96;
+                self.tick = record.tick;
+                self.liquidity = record.liquidity;
+                self.fee_growth_global0 = record.fee_growth_global0;
+                self.fee_growth_global1 = record.fee_growth_global1;
+                for (tick, state) in record.ticks.into_iter().rev() {
+                    self.ticks.insert(tick, state);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Puts the tick where the contract has it at the end of a swap.
     ///
-    /// Reaching a step boundary from above leaves the tick one below it. A
-    /// tick that is only watched is a boundary here but not in the
-    /// contract, where the same swap ends inside a range and the tick is
-    /// the one of the price. Word starts are boundaries in the contract
-    /// too, so they are left alone.
-    fn settle_tick(&mut self, zero_for_one: bool) -> PoolResult<()> {
-        if !zero_for_one {
+    /// The replica walks as if watched ticks were initialized: a step that
+    /// reaches a watched tick going down leaves the tick one below it, and a
+    /// swap that starts exactly on a watched tick takes a zero-length first
+    /// step across it. The contract has no such tick, so its tick can end
+    /// one away from the replica's, across a watched tick that holds no
+    /// liquidity. Moving the tick back across that tick changes no liquidity
+    /// and no contract state; it flips the tick's watched record, so that
+    /// `fee_growth_inside` keeps agreeing with the steps the observer saw.
+    fn settle_tick(&mut self, zero_for_one: bool, record: &mut SwapRecord) -> PoolResult<()> {
+        let tick =
+            self.contract_tick_after_swap(zero_for_one, record.sqrt_price_x96, record.tick)?;
+        if tick == self.tick {
             return Ok(());
         }
-        let above = self.tick + 1;
-        let watched_only = self
-            .ticks
-            .get(&above)
-            .is_some_and(|info| info.liquidity_gross == 0 && info.watchers > 0);
-        let word_start = above.div_euclid(self.tick_spacing).rem_euclid(256) == 0;
-        if watched_only && !word_start && self.sqrt_price_x96 == get_sqrt_ratio_at_tick(above)? {
-            self.tick = above;
-        }
+        // Ticks that hold liquidity and word edges are boundaries for both,
+        // so the two can only differ by one, across a watched-only tick. If
+        // that ever fails, refuse the swap rather than diverge from the
+        // contract (the debug assertion makes the tests catch it).
+        let across = tick.max(self.tick);
+        let state = self.ticks.get(&across).copied();
+        let explained = (tick - self.tick).abs() == 1 && state.is_some_and(|s| s.is_watched_only());
+        debug_assert!(
+            explained,
+            "the walk ended at tick {} but the contract's tick is {tick}",
+            self.tick
+        );
+        let Some(mut state) = state.filter(|_| explained) else {
+            return Err(PoolError::ReplayMismatch(format!(
+                "the walk ended at tick {} but the contract's tick is {tick}",
+                self.tick
+            )));
+        };
+        record.ticks.push((across, state));
+        state.flip_watched(self.fee_growth_global0, self.fee_growth_global1);
+        self.ticks.insert(across, state);
+        self.tick = tick;
         Ok(())
+    }
+
+    /// The tick the contract holds after a swap in `zero_for_one` direction
+    /// that started at `start_price` and `start_tick` and ended at the
+    /// current price. It depends only on contract state:
+    ///
+    /// * If the price moved, the tick is the one of the new price, except
+    ///   that a swap down that stopped exactly on one of its own step
+    ///   boundaries leaves the tick one below it.
+    /// * If the price did not move, the tick only changes when the price sat
+    ///   exactly on a boundary in the swap direction: the zero-length first
+    ///   step crosses it.
+    fn contract_tick_after_swap(
+        &self,
+        zero_for_one: bool,
+        start_price: U256,
+        start_tick: i32,
+    ) -> PoolResult<i32> {
+        let price = self.sqrt_price_x96;
+        if price != start_price {
+            let tick = get_tick_at_sqrt_ratio(price)?;
+            let on_boundary = zero_for_one
+                && self.contract_stops_at(tick, true)
+                && price == get_sqrt_ratio_at_tick(tick)?;
+            return Ok(if on_boundary { tick - 1 } else { tick });
+        }
+        if zero_for_one {
+            let crossed = start_tick >= MIN_TICK
+                && self.contract_stops_at(start_tick, true)
+                && start_price == get_sqrt_ratio_at_tick(start_tick)?;
+            Ok(if crossed { start_tick - 1 } else { start_tick })
+        } else {
+            let above = start_tick + 1;
+            let crossed = above <= MAX_TICK
+                && self.contract_stops_at(above, false)
+                && start_price == get_sqrt_ratio_at_tick(above)?;
+            Ok(if crossed { above } else { start_tick })
+        }
+    }
+
+    /// Whether the contract's tick search ends a step at `tick` when it
+    /// reaches the tick going in the given direction: initialized ticks,
+    /// the first tick of each 256-tick word going down, the last one going
+    /// up, and the tick limits. Watched ticks do not count.
+    fn contract_stops_at(&self, tick: i32, zero_for_one: bool) -> bool {
+        let limit = if zero_for_one { MIN_TICK } else { MAX_TICK };
+        if tick == limit {
+            return true;
+        }
+        if tick % self.tick_spacing != 0 {
+            return false;
+        }
+        let initialized = self
+            .ticks
+            .get(&tick)
+            .is_some_and(|state| state.info.liquidity_gross > 0);
+        let position = tick.div_euclid(self.tick_spacing).rem_euclid(256);
+        initialized || position == if zero_for_one { 0 } else { 255 }
     }
 
     /// The next step boundary in the swap direction: its tick and price.
@@ -846,6 +1134,7 @@ impl Pool {
     /// The contract walks its tick bitmap one 256-tick word at a time. The
     /// word boundaries are step boundaries even when no tick is initialized
     /// there, so they have to be reproduced for the rounding to match.
+    /// Watched ticks count as initialized here.
     pub fn next_initialized_tick_within_one_word(&self, tick: i32, lte: bool) -> (i32, bool) {
         let spacing = self.tick_spacing;
         let compressed = tick.div_euclid(spacing);
@@ -856,7 +1145,7 @@ impl Pool {
                 .ticks
                 .range(word_start..=here)
                 .rev()
-                .find(|(_, info)| info.is_boundary())
+                .find(|(_, state)| state.info.is_boundary())
             {
                 Some((t, _)) => (*t, true),
                 None => (word_start, false),
@@ -868,7 +1157,7 @@ impl Pool {
             match self
                 .ticks
                 .range(from..=word_end)
-                .find(|(_, info)| info.is_boundary())
+                .find(|(_, state)| state.info.is_boundary())
             {
                 Some((t, _)) => (*t, true),
                 None => (word_end, false),
@@ -888,7 +1177,7 @@ impl Pool {
         amount_in: U256,
         amount_out: U256,
         fee_amount: U256,
-        observer: &mut impl SwapObserver,
+        record: &mut SwapRecord,
     ) -> PoolResult<()> {
         let sqrt_price_start = self.sqrt_price_x96;
         self.account_step(
@@ -898,29 +1187,12 @@ impl Pool {
             amount_in,
             amount_out,
             fee_amount,
-            observer,
+            record,
         )?;
 
         self.sqrt_price_x96 = sqrt_price_after;
         if sqrt_price_after == sqrt_price_next {
-            if let Some(info) = self.ticks.get_mut(&tick_next) {
-                if info.is_boundary() {
-                    info.fee_growth_outside0 = self
-                        .fee_growth_global0
-                        .wrapping_sub(info.fee_growth_outside0);
-                    info.fee_growth_outside1 = self
-                        .fee_growth_global1
-                        .wrapping_sub(info.fee_growth_outside1);
-                    let net = if zero_for_one {
-                        info.liquidity_net
-                            .checked_neg()
-                            .ok_or(MathError::LiquidityDelta)?
-                    } else {
-                        info.liquidity_net
-                    };
-                    self.liquidity = add_liquidity_delta(self.liquidity, net)?;
-                }
-            }
+            self.cross(tick_next, zero_for_one, record)?;
             self.tick = if zero_for_one {
                 tick_next - 1
             } else {
@@ -932,8 +1204,35 @@ impl Pool {
         Ok(())
     }
 
+    /// Crosses a step boundary: the contract's `Tick.cross` for a tick that
+    /// holds liquidity, and a flip of the watched record for a watched one.
+    /// A word boundary with neither is not in the map and changes nothing.
+    fn cross(&mut self, tick: i32, zero_for_one: bool, record: &mut SwapRecord) -> PoolResult<()> {
+        let (g0, g1) = (self.fee_growth_global0, self.fee_growth_global1);
+        let Some(state) = self.ticks.get_mut(&tick) else {
+            return Ok(());
+        };
+        record.ticks.push((tick, *state));
+        state.flip_watched(g0, g1);
+        if state.info.liquidity_gross == 0 {
+            return Ok(());
+        }
+        let info = &mut state.info;
+        info.fee_growth_outside0 = g0.wrapping_sub(info.fee_growth_outside0);
+        info.fee_growth_outside1 = g1.wrapping_sub(info.fee_growth_outside1);
+        let net = if zero_for_one {
+            info.liquidity_net
+                .checked_neg()
+                .ok_or(MathError::LiquidityDelta)?
+        } else {
+            info.liquidity_net
+        };
+        self.liquidity = add_liquidity_delta(self.liquidity, net)?;
+        Ok(())
+    }
+
     /// Splits a step's fee between protocol and liquidity providers, adds the
-    /// providers' part to fee growth, and tells the observer.
+    /// providers' part to fee growth, and records the step for the observer.
     #[allow(clippy::too_many_arguments)]
     fn account_step(
         &mut self,
@@ -943,7 +1242,7 @@ impl Pool {
         amount_in: U256,
         amount_out: U256,
         fee_amount: U256,
-        observer: &mut impl SwapObserver,
+        record: &mut SwapRecord,
     ) -> PoolResult<()> {
         let fee_protocol = if zero_for_one {
             self.fee_protocol0
@@ -962,7 +1261,7 @@ impl Pool {
             }
         }
 
-        observer.on_step(&StepInfo {
+        record.steps.push(StepInfo {
             zero_for_one,
             tick_start: self.tick,
             sqrt_price_start,
