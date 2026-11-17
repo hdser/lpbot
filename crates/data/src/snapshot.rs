@@ -19,7 +19,7 @@ use lpbot_venues::uniswap_v3::pool::{PoolSnapshot, TickInfo};
 use serde_json::{json, Value};
 
 use crate::day::Day;
-use crate::store::{StoreError, StoreResult};
+use crate::store::{write_durably, StoreError, StoreResult};
 
 /// A pool's state before the first block of `day`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,22 +171,41 @@ impl SnapshotStore {
         self.pool_dir(chain, pool).join(format!("day={day}.json"))
     }
 
+    /// Whether a usable snapshot is stored for the day. A file that does
+    /// not read back (empty, or cut short by a power cut) is set aside as
+    /// `<name>.damaged` and does not count.
     pub fn has(&self, chain: &str, pool: Address, day: Day) -> bool {
-        self.path(chain, pool, day).is_file()
+        matches!(self.load(chain, pool, day), Ok(Some(_)))
     }
 
+    /// The day's snapshot, `None` when none is stored or the stored one
+    /// is damaged; a damaged one is set aside.
+    pub fn load(
+        &self,
+        chain: &str,
+        pool: Address,
+        day: Day,
+    ) -> StoreResult<Option<StoredSnapshot>> {
+        let path = self.path(chain, pool, day);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        match read_snapshot(&path) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(StoreError::Unreadable { reason, .. }) => {
+                crate::store::discard(&path, &reason);
+                Ok(None)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Stores a snapshot. The file appears under its name only once it is
+    /// whole and on the disk.
     pub fn write(&self, chain: &str, snapshot: &StoredSnapshot) -> StoreResult<()> {
         let path = self.path(chain, snapshot.pool, snapshot.day);
-        let io = |source| StoreError::Io {
-            path: path.clone(),
-            source,
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(io)?;
-        }
-        let temporary = path.with_extension("tmp");
-        fs::write(&temporary, to_json(snapshot).to_string()).map_err(io)?;
-        fs::rename(&temporary, &path).map_err(io)
+        write_durably(&path, to_json(snapshot).to_string().as_bytes())
+            .map_err(|source| StoreError::Io { path, source })
     }
 
     pub fn read(&self, chain: &str, pool: Address, day: Day) -> StoreResult<StoredSnapshot> {
@@ -227,27 +246,43 @@ impl SnapshotStore {
         pool: Address,
         day: Day,
     ) -> StoreResult<Option<StoredSnapshot>> {
-        match self
-            .days(chain, pool)?
-            .into_iter()
-            .rfind(|stored| *stored <= day)
-        {
-            Some(stored) => self.read(chain, pool, stored).map(Some),
-            None => Ok(None),
+        // A damaged file is set aside and the next older one is used.
+        for stored in self.days(chain, pool)?.into_iter().rev() {
+            if stored > day {
+                continue;
+            }
+            if let Some(snapshot) = self.load(chain, pool, stored)? {
+                return Ok(Some(snapshot));
+            }
         }
+        Ok(None)
+    }
+
+    /// The oldest usable snapshot, the start of the longest replay.
+    pub fn earliest(&self, chain: &str, pool: Address) -> StoreResult<Option<StoredSnapshot>> {
+        for stored in self.days(chain, pool)? {
+            if let Some(snapshot) = self.load(chain, pool, stored)? {
+                return Ok(Some(snapshot));
+            }
+        }
+        Ok(None)
     }
 }
 
-/// Reads one snapshot file.
+/// Reads one snapshot file. A file that is not a snapshot, such as an
+/// empty one, is `Unreadable`, with what to do about it.
 pub fn read_snapshot(path: &Path) -> StoreResult<StoredSnapshot> {
     let text = fs::read_to_string(path).map_err(|source| StoreError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let bad = |reason: String| StoreError::BadFile {
+    let bad = |reason: String| StoreError::Unreadable {
         path: path.to_path_buf(),
         reason,
     };
+    if text.trim().is_empty() {
+        return Err(bad("it is empty".into()));
+    }
     let value: Value = serde_json::from_str(&text).map_err(|e| bad(e.to_string()))?;
     from_json(&value).map_err(bad)
 }
@@ -360,10 +395,9 @@ pub(crate) mod tests {
         let dir = TempDir::new("snapshot");
         let path = dir.path().join("day=2026-11-01.json");
         fs::write(&path, "{not json").unwrap();
-        assert!(matches!(
-            read_snapshot(&path),
-            Err(StoreError::BadFile { .. })
-        ));
+        let error = read_snapshot(&path).unwrap_err();
+        assert!(matches!(error, StoreError::Unreadable { .. }), "{error}");
+        assert!(error.to_string().contains("lpbot backfill"), "{error}");
 
         let mut value = to_json(&sample("2026-11-01", 1));
         value["liquidity"] = json!("-1");
@@ -376,5 +410,39 @@ pub(crate) mod tests {
         fs::write(&path, value.to_string()).unwrap();
         let error = read_snapshot(&path).unwrap_err().to_string();
         assert!(error.contains("fee growth"), "{error}");
+    }
+
+    #[test]
+    fn a_snapshot_left_empty_by_a_power_cut_counts_as_missing() {
+        let dir = TempDir::new("snapshot");
+        let store = SnapshotStore::new(dir.path());
+        let (old, new) = (sample("2026-11-01", 100), sample("2026-11-10", 900));
+        store.write("ethereum", &old).unwrap();
+        store.write("ethereum", &new).unwrap();
+        let path = store.path("ethereum", new.pool, new.day);
+        // Only the file itself is left: no temporary file beside it.
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
+
+        // The newer file is empty, as an unsynced write leaves it.
+        fs::write(&path, b"").unwrap();
+        let read = |text: &str| {
+            store
+                .latest_on_or_before("ethereum", new.pool, text.parse().unwrap())
+                .unwrap()
+                .map(|s| s.block)
+        };
+        // A replay falls back on the older snapshot instead of failing.
+        assert_eq!(read("2026-11-12"), Some(100));
+        assert!(!path.exists());
+        assert!(path.with_file_name("day=2026-11-10.json.damaged").is_file());
+        assert!(!store.has("ethereum", new.pool, new.day));
+        assert_eq!(store.days("ethereum", new.pool).unwrap(), vec![old.day]);
+
+        // `has` sets a damaged file aside too, so the backfill takes it again.
+        fs::write(store.path("ethereum", old.pool, old.day), b"{\"pool\":").unwrap();
+        assert!(!store.has("ethereum", old.pool, old.day));
+        assert_eq!(store.earliest("ethereum", old.pool).unwrap(), None);
+        store.write("ethereum", &old).unwrap();
+        assert_eq!(store.earliest("ethereum", old.pool).unwrap(), Some(old));
     }
 }

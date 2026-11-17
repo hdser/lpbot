@@ -548,3 +548,69 @@ fn pools_are_discovered_through_the_factory_in_token_order() {
         .iter()
         .any(|p| p.token0 == wbtc && p.token1 == weth && p.fee_pips == 3000));
 }
+
+#[test]
+fn a_position_key_packs_the_owner_and_both_ticks_in_three_bytes() {
+    let owner: Address = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+        .parse()
+        .unwrap();
+    let mut packed = owner.as_slice().to_vec();
+    // -60 and 887220 as int24.
+    packed.extend_from_slice(&[0xFF, 0xFF, 0xC4, 0x0D, 0x89, 0xB4]);
+    assert_eq!(position_key(owner, -60, 887_220), keccak256(&packed));
+    assert_ne!(
+        position_key(owner, -60, 887_220),
+        position_key(owner, 60, 887_220)
+    );
+}
+
+#[test]
+fn positions_are_read_at_a_block_by_their_key() {
+    let owner = Address::repeat_byte(0xA1);
+    let known = position_key(owner, -120, 60);
+    let node = MockNode::start(move |method, params| {
+        assert_eq!(method, "eth_call");
+        assert_eq!(params[1], "0x2a");
+        let data = hex::decode(params[0]["data"].as_str().unwrap()).unwrap();
+        assert_eq!(hex::encode(&data[..4]), selector_of("positions(bytes32)"));
+        let values: Vec<U256> = if data[4..36] == known.0 {
+            [5u64, 7, 8, 9, 10].map(U256::from).to_vec()
+        } else {
+            vec![U256::ZERO; 5]
+        };
+        Ok(json!(words(&values)))
+    });
+    let client = RpcClient::new(node.url());
+    let read = fetch_positions(
+        &client,
+        pool_address(),
+        &[(owner, -120, 60), (owner, -120, 120)],
+        42,
+    )
+    .unwrap();
+    assert_eq!(
+        read,
+        vec![
+            PositionInfo {
+                liquidity: 5,
+                fee_growth_inside0_last: U256::from(7u8),
+                fee_growth_inside1_last: U256::from(8u8),
+                tokens_owed0: 9,
+                tokens_owed1: 10,
+            },
+            PositionInfo::default()
+        ]
+    );
+
+    // A pool that is not there yet answers with no data at all.
+    let empty = MockNode::start(|_, _| Ok(json!("0x")));
+    assert!(matches!(
+        fetch_positions(
+            &RpcClient::new(empty.url()),
+            pool_address(),
+            &[(owner, 0, 60)],
+            1
+        ),
+        Err(ChainError::ShortReturn { got: 0, .. })
+    ));
+}

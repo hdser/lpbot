@@ -141,6 +141,32 @@ impl RpcClient {
         Ok((timestamp, hash))
     }
 
+    /// Number and timestamp of the newest block the consensus layer has
+    /// finalized, which no reorg can change. `None` when the node does not
+    /// serve the `finalized` tag: it refuses it, or knows no such block
+    /// yet (before the merge, or without a consensus client).
+    pub fn finalized_block(&self) -> RpcResult<Option<(u64, u64)>> {
+        const M: &str = "eth_getBlockByNumber";
+        let block = match self.call(M, json!(["finalized", false])) {
+            Ok(block) => block,
+            Err(RpcError::Rpc { .. }) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        if block.is_null() {
+            return Ok(None);
+        }
+        let field = |name: &str| parse_quantity(M, block.get(name).unwrap_or(&Value::Null));
+        Ok(Some((field("number")?, field("timestamp")?)))
+    }
+
+    /// The contract code at an address after a block; empty when no
+    /// contract was there yet.
+    pub fn code_at(&self, address: Address, block: u64) -> RpcResult<Vec<u8>> {
+        const M: &str = "eth_getCode";
+        let code = self.call(M, json!([format!("{address:#x}"), quantity(block)]))?;
+        parse_bytes(M, &code)
+    }
+
     /// Timestamps of several blocks, in the order asked, read in batches.
     pub fn block_times(&self, numbers: &[u64]) -> RpcResult<Vec<u64>> {
         const M: &str = "eth_getBlockByNumber";
@@ -194,8 +220,9 @@ impl RpcClient {
     }
 
     /// Like `get_logs` for a long range. It asks in chunks and halves the
-    /// chunk whenever the node refuses a request, which is how public
-    /// endpoints signal "too many results" or "range too wide".
+    /// chunk whenever the node says a request asked for too much ("too
+    /// many results", "range too wide"). A rate limit is waited out by the
+    /// client and does not shrink the chunk; any other refusal is returned.
     pub fn get_logs_chunked(
         &self,
         address: Address,
@@ -220,7 +247,7 @@ impl RpcClient {
                         chunk = (chunk * 2).min(initial_chunk);
                     }
                 }
-                Err(RpcError::Rpc { .. }) if chunk > 1 => chunk /= 2,
+                Err(error) if error.is_range_too_wide() && chunk > 1 => chunk /= 2,
                 Err(other) => return Err(other),
             }
         }
@@ -441,6 +468,88 @@ mod tests {
             accepted.windows(2).all(|w| w[1].0 == w[0].1 + 1),
             "ranges are contiguous"
         );
+    }
+
+    #[test]
+    fn chunked_log_fetching_waits_out_a_rate_limit_without_shrinking_the_range() {
+        let requests: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        // The first two requests are rate limited, the way Infura says it.
+        let node = MockNode::start(move |_, params| {
+            let from = parse_quantity("t", &params[0]["fromBlock"]).unwrap();
+            let to = parse_quantity("t", &params[0]["toBlock"]).unwrap();
+            let mut requests = seen.lock().unwrap();
+            requests.push((from, to));
+            if requests.len() <= 2 {
+                return Err((-32005, "project ID request rate exceeded".into()));
+            }
+            Ok(Value::Array((from..=to).map(|b| log_json(b, 0)).collect()))
+        });
+        let waits = Arc::new(Mutex::new(0usize));
+        let counted = waits.clone();
+        let client = RpcClient::new(node.url()).with_sleep(move |_| *counted.lock().unwrap() += 1);
+        let logs = client
+            .get_logs_chunked(pool(), &[], 1_000, 1_099, 64, |_, _| {})
+            .unwrap();
+        assert_eq!(logs.len(), 100);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                (1_000, 1_063),
+                (1_000, 1_063),
+                (1_000, 1_063),
+                (1_064, 1_099)
+            ]
+        );
+        assert_eq!(*waits.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn chunked_log_fetching_returns_other_refusals_at_once() {
+        let requests = Arc::new(Mutex::new(0usize));
+        let seen = requests.clone();
+        let node = MockNode::start(move |_, _| {
+            *seen.lock().unwrap() += 1;
+            Err((-32000, "header not found".into()))
+        });
+        let client = RpcClient::new(node.url()).with_sleep(|_| {});
+        let error = client
+            .get_logs_chunked(pool(), &[], 1_000, 1_099, 64, |_, _| {})
+            .unwrap_err();
+        assert!(error.to_string().contains("header not found"), "{error}");
+        assert_eq!(*requests.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn the_finalized_block_is_read_when_the_node_serves_the_tag() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_getBlockByNumber");
+            assert_eq!(params[0], "finalized");
+            Ok(json!({"number": "0x64", "timestamp": "0x3e8", "hash": format!("0x{:064x}", 1)}))
+        });
+        assert_eq!(
+            RpcClient::new(node.url()).finalized_block(),
+            Ok(Some((100, 1_000)))
+        );
+        // A node that refuses the tag, or knows no finalized block yet.
+        let refusing = MockNode::start(|_, _| Err((-32602, "invalid block tag".into())));
+        assert_eq!(RpcClient::new(refusing.url()).finalized_block(), Ok(None));
+        let unaware = MockNode::start(|_, _| Ok(Value::Null));
+        assert_eq!(RpcClient::new(unaware.url()).finalized_block(), Ok(None));
+        let broken = MockNode::start(|_, _| Ok(json!({"timestamp": "0x1"})));
+        assert!(RpcClient::new(broken.url()).finalized_block().is_err());
+    }
+
+    #[test]
+    fn code_is_read_at_a_block() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_getCode");
+            assert_eq!(params[0], "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640");
+            Ok(json!(if params[1] == "0x10" { "0x6080" } else { "0x" }))
+        });
+        let client = RpcClient::new(node.url());
+        assert_eq!(client.code_at(pool(), 16), Ok(vec![0x60, 0x80]));
+        assert_eq!(client.code_at(pool(), 15), Ok(vec![]));
     }
 
     #[test]

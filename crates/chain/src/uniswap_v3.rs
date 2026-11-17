@@ -1,7 +1,7 @@
 //! Reading Uniswap v3 pools from a node: state snapshots, events, discovery,
 //! and the check that the replica agrees with the chain.
 
-use alloy_primitives::{keccak256, Address, I256, U256};
+use alloy_primitives::{keccak256, Address, B256, I256, U256};
 use lpbot_venues::uniswap_v3::events::{decode_log, topics, PoolEvent};
 use lpbot_venues::uniswap_v3::pool::{Pool, PoolSnapshot, Replay, TickInfo};
 use lpbot_venues::uniswap_v3::tick_math::MAX_TICK;
@@ -192,6 +192,64 @@ pub fn fetch_snapshot(client: &RpcClient, pool: Address, block: u64) -> ChainRes
         fee_protocol1: fee_protocol >> 4,
         ticks,
     })
+}
+
+// --- positions ----------------------------------------------------------
+
+/// A position as the pool stores it (`positions(bytes32)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PositionInfo {
+    pub liquidity: u128,
+    pub fee_growth_inside0_last: U256,
+    pub fee_growth_inside1_last: U256,
+    /// Fees and principal credited to the position and not yet collected.
+    pub tokens_owed0: u128,
+    pub tokens_owed1: u128,
+}
+
+/// The key the pool files a position under:
+/// `keccak256(abi.encodePacked(owner, tickLower, tickUpper))`, the ticks
+/// as three-byte two's complement.
+pub fn position_key(owner: Address, tick_lower: i32, tick_upper: i32) -> B256 {
+    let mut packed = Vec::with_capacity(26);
+    packed.extend_from_slice(owner.as_slice());
+    packed.extend_from_slice(&tick_lower.to_be_bytes()[1..]);
+    packed.extend_from_slice(&tick_upper.to_be_bytes()[1..]);
+    keccak256(packed)
+}
+
+/// Reads positions of a pool after a block, in the order asked. Each is
+/// `(owner, tick_lower, tick_upper)`. A position the pool never saw reads
+/// as all zeros.
+pub fn fetch_positions(
+    client: &RpcClient,
+    pool: Address,
+    positions: &[(Address, i32, i32)],
+    block: u64,
+) -> ChainResult<Vec<PositionInfo>> {
+    let calls: Vec<(Address, Vec<u8>)> = positions
+        .iter()
+        .map(|(owner, lower, upper)| {
+            let key = position_key(*owner, *lower, *upper);
+            (
+                pool,
+                call_data("positions(bytes32)", &[U256::from_be_bytes(key.0)]),
+            )
+        })
+        .collect();
+    let replies = client.eth_call_many(&calls, block, CALL_BATCH)?;
+    replies
+        .iter()
+        .map(|data| {
+            Ok(PositionInfo {
+                liquidity: as_u128("positions", word("positions", data, 0)?)?,
+                fee_growth_inside0_last: word("positions", data, 1)?,
+                fee_growth_inside1_last: word("positions", data, 2)?,
+                tokens_owed0: as_u128("positions", word("positions", data, 3)?)?,
+                tokens_owed1: as_u128("positions", word("positions", data, 4)?)?,
+            })
+        })
+        .collect()
 }
 
 // --- events -------------------------------------------------------------

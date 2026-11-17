@@ -3,8 +3,15 @@
 //! It does only what the bot needs: single calls, batches, and retries on
 //! transport errors and overload responses. It holds no keys and sends no
 //! transactions.
+//!
+//! Retried, with waits that double up to a cap: transport errors, HTTP
+//! 429 and 5xx (whatever their body says), and JSON-RPC errors that say
+//! the endpoint is rate limiting. A `Retry-After` header sets the wait.
+//! An answer that says a log query asked for too much is never retried:
+//! the caller narrows the query instead.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -29,12 +36,109 @@ pub enum RpcError {
 
 pub type RpcResult<T> = Result<T, RpcError>;
 
+/// Whether a JSON-RPC error says a log query asked for too much at once:
+/// too many results, too wide a block range or too large a response.
+/// Narrowing the range is the answer to it.
+///
+/// Endpoints use all sorts of codes for it (Infura answers `-32005 query
+/// returned more than 10000 results`, with the code it also uses for rate
+/// limits), so only the message decides.
+pub fn range_too_wide(_code: i64, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    if says_rate_limited(&message) {
+        return false;
+    }
+    [
+        "more than",
+        "too many results",
+        "max results",
+        "block range",
+        "range is too",
+        "range too",
+        "too large",
+        "too wide",
+        "response size",
+        "size exceeded",
+        "limited to",
+        "reduce the range",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+}
+
+fn says_rate_limited(message: &str) -> bool {
+    [
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "rate exceeded",
+        "too many requests",
+        "request limit",
+        "requests per",
+        "throttl",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+}
+
+/// Whether a JSON-RPC error says the endpoint is rate limiting: worth a
+/// wait and a retry, not a narrower query. `-32005` counts only when its
+/// message speaks of a limit or of an exceeded rate, since Infura also
+/// uses it for queries with too many results.
+pub fn rate_limited(code: i64, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    if says_rate_limited(&message) {
+        return true;
+    }
+    code == -32005
+        && (message.contains("limit") || message.contains("exceeded"))
+        && !range_too_wide(code, &message)
+}
+
+impl RpcError {
+    /// The endpoint is rate limiting; see [`rate_limited`].
+    pub fn is_rate_limit(&self) -> bool {
+        matches!(self, RpcError::Rpc { code, message, .. } if rate_limited(*code, message))
+    }
+
+    /// The query asked for too much; see [`range_too_wide`].
+    pub fn is_range_too_wide(&self) -> bool {
+        matches!(self, RpcError::Rpc { code, message, .. } if range_too_wide(*code, message))
+    }
+}
+
+/// The error objects of a reply, single or batched.
+fn reply_errors(reply: &Value) -> Vec<(i64, &str)> {
+    fn error_of(item: &Value) -> Option<(i64, &str)> {
+        item.get("error").map(|error| {
+            (
+                error.get("code").and_then(Value::as_i64).unwrap_or(0),
+                error.get("message").and_then(Value::as_str).unwrap_or(""),
+            )
+        })
+    }
+    match reply {
+        Value::Array(items) => items.iter().filter_map(error_of).collect(),
+        single => error_of(single).into_iter().collect(),
+    }
+}
+
+/// Seconds to wait from a `Retry-After` header. Dates are not read.
+fn retry_after(header: Option<&str>) -> Option<Duration> {
+    header?.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// How the client waits between attempts.
+pub type Sleep = Arc<dyn Fn(Duration) + Send + Sync>;
+
 /// A JSON-RPC endpoint.
 pub struct RpcClient {
     url: String,
     agent: ureq::Agent,
     max_retries: u32,
     retry_base: Duration,
+    max_wait: Duration,
+    sleep: Sleep,
     next_id: AtomicU64,
 }
 
@@ -48,15 +152,41 @@ impl RpcClient {
                 .build(),
             max_retries: 4,
             retry_base: Duration::from_millis(200),
+            max_wait: Duration::from_secs(30),
+            sleep: Arc::new(std::thread::sleep),
             next_id: AtomicU64::new(1),
         }
     }
 
     /// Changes how often and how patiently failed requests are retried.
+    /// The wait doubles from `retry_base` on each attempt.
     pub fn with_retries(mut self, max_retries: u32, retry_base: Duration) -> Self {
         self.max_retries = max_retries;
         self.retry_base = retry_base;
         self
+    }
+
+    /// The longest single wait, `Retry-After` included.
+    pub fn with_max_wait(mut self, max_wait: Duration) -> Self {
+        self.max_wait = max_wait;
+        self
+    }
+
+    /// Replaces how the client waits between attempts; tests record the
+    /// waits instead of sleeping.
+    pub fn with_sleep(mut self, sleep: impl Fn(Duration) + Send + Sync + 'static) -> Self {
+        self.sleep = Arc::new(sleep);
+        self
+    }
+
+    /// The wait before retry number `attempt + 1`: the server's
+    /// `Retry-After` when given, else the base doubled `attempt` times,
+    /// and never more than the cap.
+    pub fn backoff(&self, attempt: u32, retry_after: Option<Duration>) -> Duration {
+        let doubled = self
+            .retry_base
+            .saturating_mul(1u32.checked_shl(attempt).unwrap_or(u32::MAX));
+        retry_after.unwrap_or(doubled).min(self.max_wait)
     }
 
     pub fn url(&self) -> &str {
@@ -133,43 +263,66 @@ impl RpcClient {
     fn post(&self, method: &str, body: &Value) -> RpcResult<Value> {
         let mut attempt = 0;
         loop {
-            let outcome = self.agent.post(&self.url).send_json(body);
-            let retryable_reason = match outcome {
+            // Why to try again, how long the server asked to wait, and the
+            // JSON-RPC reply to hand back if no attempt is left.
+            let (reason, asked_wait, last_reply) = match self.agent.post(&self.url).send_json(body)
+            {
                 Ok(response) => {
-                    return response
-                        .into_json::<Value>()
-                        .map_err(|e| RpcError::BadResponse {
-                            method: method.to_string(),
-                            reason: format!("reply is not JSON: {e}"),
-                        })
+                    let reply =
+                        response
+                            .into_json::<Value>()
+                            .map_err(|e| RpcError::BadResponse {
+                                method: method.to_string(),
+                                reason: format!("reply is not JSON: {e}"),
+                            })?;
+                    let limited = reply_errors(&reply)
+                        .into_iter()
+                        .find(|(code, message)| rate_limited(*code, message))
+                        .map(|(_, message)| message.to_string());
+                    match limited {
+                        Some(message) => (format!("rate limited: {message}"), None, Some(reply)),
+                        None => return Ok(reply),
+                    }
                 }
                 Err(ureq::Error::Status(code, response)) => {
+                    let asked_wait = retry_after(response.header("retry-after"));
                     // JSON-RPC errors sometimes arrive with a non-200 status.
                     let text = response.into_string().unwrap_or_default();
-                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                        if value.get("error").is_some() || value.is_array() {
-                            return Ok(value);
-                        }
+                    let reply = serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .filter(|value| value.get("error").is_some() || value.is_array());
+                    let errors = reply.as_ref().map(reply_errors).unwrap_or_default();
+                    // A query that asked for too much is the caller's
+                    // to narrow, whatever the status.
+                    if errors.iter().any(|(c, m)| range_too_wide(*c, m)) {
+                        return Ok(reply.expect("errors come from a reply"));
                     }
-                    if code == 429 || code >= 500 {
-                        format!("HTTP {code}")
-                    } else {
-                        return Err(RpcError::Transport {
-                            url: self.url.clone(),
-                            reason: format!("HTTP {code}"),
-                        });
+                    let limited = errors.iter().any(|(c, m)| rate_limited(*c, m));
+                    if !(code == 429 || code >= 500 || limited) {
+                        return match reply {
+                            Some(reply) => Ok(reply),
+                            None => Err(RpcError::Transport {
+                                url: self.url.clone(),
+                                reason: format!("HTTP {code}"),
+                            }),
+                        };
                     }
+                    (format!("HTTP {code}"), asked_wait, reply)
                 }
-                Err(ureq::Error::Transport(t)) => t.to_string(),
+                Err(ureq::Error::Transport(t)) => (t.to_string(), None, None),
             };
 
             if attempt >= self.max_retries {
-                return Err(RpcError::Transport {
-                    url: self.url.clone(),
-                    reason: retryable_reason,
-                });
+                // The endpoint's own words say more than "HTTP 429".
+                return match last_reply {
+                    Some(reply) => Ok(reply),
+                    None => Err(RpcError::Transport {
+                        url: self.url.clone(),
+                        reason,
+                    }),
+                };
             }
-            std::thread::sleep(self.retry_base * 2u32.pow(attempt));
+            (self.sleep)(self.backoff(attempt, asked_wait));
             attempt += 1;
         }
     }
@@ -289,6 +442,155 @@ mod tests {
             client.call("eth_blockNumber", json!([])),
             Err(RpcError::Transport { .. })
         ));
+    }
+
+    /// A client that records its waits instead of sleeping.
+    fn recording(url: &str, retries: u32) -> (RpcClient, Arc<std::sync::Mutex<Vec<Duration>>>) {
+        let waits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = waits.clone();
+        let client = RpcClient::new(url)
+            .with_retries(retries, Duration::from_secs(1))
+            .with_sleep(move |wait| seen.lock().unwrap().push(wait));
+        (client, waits)
+    }
+
+    fn error_body(code: i64, message: &str) -> String {
+        json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}}).to_string()
+    }
+
+    #[test]
+    fn a_rate_limit_answered_with_a_json_rpc_error_is_retried_with_doubling_waits() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        // Alchemy and others answer 429 with a JSON-RPC error body.
+        let node = MockNode::start_raw(move |_| match seen.fetch_add(1, Ordering::SeqCst) {
+            0 | 1 => (429, error_body(429, "Your app has exceeded its capacity")),
+            // Infura answers a rate limit with status 200 and -32005.
+            2 => (200, error_body(-32005, "project ID request rate exceeded")),
+            _ => (
+                200,
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string(),
+            ),
+        });
+        let (client, waits) = recording(node.url(), 4);
+        assert_eq!(client.call("eth_chainId", json!([])), Ok(json!("0x1")));
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [1, 2, 4].map(Duration::from_secs).to_vec()
+        );
+    }
+
+    #[test]
+    fn a_server_error_with_a_json_rpc_body_is_retried_and_its_words_kept() {
+        let node = MockNode::start_raw(|_| (503, error_body(-32603, "upstream unavailable")));
+        let (client, waits) = recording(node.url(), 2);
+        // After the last attempt the endpoint's own message comes back.
+        let error = client.call("eth_blockNumber", json!([])).unwrap_err();
+        assert!(
+            error.to_string().contains("upstream unavailable"),
+            "{error}"
+        );
+        assert_eq!(waits.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retry_after_sets_the_wait_and_every_wait_has_a_cap() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let node = MockNode::start_with_headers(move |_| {
+            if seen.fetch_add(1, Ordering::SeqCst) < 2 {
+                let after = vec![("Retry-After".to_string(), "7".to_string())];
+                (429, after, "slow down".to_string())
+            } else {
+                let ok = json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"});
+                (200, Vec::new(), ok.to_string())
+            }
+        });
+        let (client, waits) = recording(node.url(), 4);
+        let client = client.with_max_wait(Duration::from_secs(5));
+        assert_eq!(client.call("eth_chainId", json!([])), Ok(json!("0x1")));
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [5, 5].map(Duration::from_secs).to_vec()
+        );
+
+        let client = RpcClient::new("http://unused")
+            .with_retries(9, Duration::from_secs(1))
+            .with_max_wait(Duration::from_secs(5));
+        let waits: Vec<u64> = (0..7).map(|a| client.backoff(a, None).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 5, 5, 5, 5]);
+        assert_eq!(client.backoff(40, None), Duration::from_secs(5));
+        assert_eq!(
+            client.backoff(0, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn a_query_that_asks_for_too_much_is_not_retried() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let node = MockNode::start_raw(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (
+                200,
+                error_body(-32005, "query returned more than 10000 results"),
+            )
+        });
+        let (client, waits) = recording(node.url(), 4);
+        let error = client.call("eth_getLogs", json!([])).unwrap_err();
+        assert!(
+            error.is_range_too_wide() && !error.is_rate_limit(),
+            "{error}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(waits.lock().unwrap().is_empty());
+
+        // The same, sent with a server error status.
+        let node = MockNode::start_raw(|_| (500, error_body(-32602, "block range too large")));
+        let (client, waits) = recording(node.url(), 4);
+        assert!(client
+            .call("eth_getLogs", json!([]))
+            .unwrap_err()
+            .is_range_too_wide());
+        assert!(waits.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rate_limits_and_ranges_that_are_too_wide_are_told_apart() {
+        for (code, message) in [
+            (-32005, "project ID request rate exceeded"),
+            (-32005, "daily request count exceeded, request rate limited"),
+            (-32005, "limit exceeded"),
+            (
+                -32007,
+                "100/second request limit reached - reduce calls per second",
+            ),
+            (429, "Too Many Requests"),
+            (-32000, "rate limited, retry later"),
+        ] {
+            assert!(rate_limited(code, message), "{message}");
+            assert!(!range_too_wide(code, message), "{message}");
+        }
+        for (code, message) in [
+            (-32005, "query returned more than 10000 results"),
+            (-32602, "query exceeds max block range 100000"),
+            (-32602, "query exceeds max results 20000"),
+            (-32602, "Log response size exceeded. You can make eth_getLogs requests with up to a 2K block range"),
+            (-32000, "exceed maximum block range: 50000"),
+            (-32600, "eth_getLogs is limited to a 10,000 range"),
+        ] {
+            assert!(range_too_wide(code, message), "{message}");
+            assert!(!rate_limited(code, message), "{message}");
+        }
+        for (code, message) in [
+            (-32000, "header not found"),
+            (-32000, "missing trie node"),
+            (3, "execution reverted"),
+        ] {
+            assert!(!rate_limited(code, message) && !range_too_wide(code, message));
+        }
     }
 
     #[test]

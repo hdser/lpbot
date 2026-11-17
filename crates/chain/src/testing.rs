@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 pub type Handler = dyn Fn(&str, Value) -> Result<Value, (i64, String)> + Send + Sync;
 /// Answers a raw request body with an HTTP status and a body.
 pub type RawHandler = dyn Fn(&str) -> (u16, String) + Send + Sync;
+/// Answers a raw request body with an HTTP status, extra headers and a body.
+pub type HeaderHandler = dyn Fn(&str) -> (u16, Vec<(String, String)>, String) + Send + Sync;
 
 pub struct MockNode {
     url: String,
@@ -49,9 +51,20 @@ impl MockNode {
 
     /// Starts a node with full control over status and body.
     pub fn start_raw(handler: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
+        Self::start_with_headers(move |body| {
+            let (status, reply) = handler(body);
+            (status, Vec::new(), reply)
+        })
+    }
+
+    /// Starts a node with full control over status, extra response
+    /// headers (such as `Retry-After`) and body.
+    pub fn start_with_headers(
+        handler: impl Fn(&str) -> (u16, Vec<(String, String)>, String) + Send + Sync + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let url = format!("http://{}", listener.local_addr().expect("local address"));
-        let handler: Arc<RawHandler> = Arc::new(handler);
+        let handler: Arc<HeaderHandler> = Arc::new(handler);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let handler = handler.clone();
@@ -66,7 +79,7 @@ impl MockNode {
     }
 }
 
-fn serve(stream: TcpStream, handler: &RawHandler) {
+fn serve(stream: TcpStream, handler: &HeaderHandler) {
     let mut reader = BufReader::new(stream);
     let mut content_length = 0usize;
     loop {
@@ -88,10 +101,14 @@ fn serve(stream: TcpStream, handler: &RawHandler) {
     if reader.read_exact(&mut body).is_err() {
         return;
     }
-    let (status, reply) = handler(&String::from_utf8_lossy(&body));
+    let (status, headers, reply) = handler(&String::from_utf8_lossy(&body));
     let reason = if status == 200 { "OK" } else { "Error" };
+    let extra: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
         reply.len()
     );
     let mut stream = reader.into_inner();
