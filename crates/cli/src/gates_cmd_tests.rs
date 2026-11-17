@@ -475,6 +475,78 @@ fn a_stored_day_is_compared_log_for_log_with_another_endpoint() {
 }
 
 #[test]
+fn the_row_count_compares_the_newest_day_that_has_logs() {
+    let (mut gates, root) = demo_gates("rowsempty", None);
+    let store = EventStore::new(root.join("lake"));
+    let pool = crate::demo_cmd::DEMO_POOL;
+    let last = day("2026-01-11");
+    let stored = store.read_day("ethereum", pool, last).unwrap().unwrap();
+    // A complete day without a single log, after the last day with some:
+    // two empty answers agree and prove nothing.
+    store
+        .write_day("ethereum", pool, day("2026-01-12"), &[], true)
+        .unwrap();
+    let logs: Vec<Value> = stored.iter().map(|log| log_json(pool, log)).collect();
+    let head = DEMO_FIRST_BLOCK + 14 * 7_200;
+    let node = demo_node(head, 1, 0, Vec::new());
+    gates.options.rpc = Some(node.url().to_string());
+    let same = demo_node(head, 1, 0, logs);
+    set_public(&mut gates, &[same.url()]);
+    assert_eq!(
+        gates.row_count().unwrap(),
+        Outcome::Pass(format!(
+            "USDC/WETH 0.05 on 2026-01-11: {} logs here and at {}, identical",
+            stored.len(),
+            host_of(same.url())
+        ))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pool_without_a_complete_day_that_has_logs_has_nothing_to_compare() {
+    let root = std::env::temp_dir().join(format!("lpbot-gates-quiet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = EventStore::new(&root);
+    let pool = crate::demo_cmd::DEMO_POOL;
+    assert_eq!(
+        newest_day_with_logs(&store, "ethereum", pool).unwrap(),
+        None
+    );
+    for text in ["2026-01-01", "2026-01-02"] {
+        store
+            .write_day("ethereum", pool, day(text), &[], true)
+            .unwrap();
+    }
+    assert_eq!(
+        newest_day_with_logs(&store, "ethereum", pool).unwrap(),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn every_pool_the_runs_name_is_checked() {
+    let (mut gates, root) = demo_gates("twopools", None);
+    let (_, tokens) = chain_addresses(&gates.runs[0].config, "ethereum").unwrap();
+    crate::run_cmd::tests::store_other_pool(&root.join("lake"), &tokens, 11);
+    let other = crate::run_cmd::tests::OTHER_POOL;
+    let demo = crate::demo_cmd::DEMO_POOL;
+    for (run, pool) in gates.runs.iter_mut().zip([demo, other]) {
+        run.config.strategies[0].extra.insert(
+            "pool".into(),
+            serde_yaml::Value::String(pool.to_checksum(None)),
+        );
+    }
+    let name = "USDC/WETH 0.05".to_string();
+    assert_eq!(
+        gates.traded_pools().unwrap(),
+        [(demo, name.clone()), (other, name)]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_day_the_node_has_not_finished_leaves_the_row_count_open() {
     let (mut gates, root) = demo_gates("rowsearly", None);
     // The node's head lies inside the last stored day.
