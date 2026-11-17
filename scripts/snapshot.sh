@@ -99,7 +99,9 @@ say "Downloading the ${profile#--} snapshot into $RETH_DIR (${avail_gb} GB free)
 echo "Reth prints the size and an estimate of the time. The estimate settles after a few minutes."
 echo "Leave it running in tmux: Ctrl-b then d detaches, 'tmux attach' comes back."
 echo "Before downloading, Reth checks what is already on disk and prints nothing until"
-echo "'Startup integrity summary'; after an interruption that takes tens of minutes."
+echo "'Startup integrity summary'; after an interruption that takes tens of minutes"
+echo "(about 90 for 2 TB on disk). It is not stuck: do not press Ctrl-C. 'vmstat 5' in"
+echo "another window shows it reading (the 'bi' column, hundreds of thousands)."
 echo "If the machine restarts meanwhile, the download does not: start tmux again and run"
 echo "  LPBOT_SNAPSHOT_RESUME=1 make snapshot"
 echo "deploy/RUNBOOK.md has the rest."
@@ -110,14 +112,38 @@ if [[ -t 0 && -t 1 ]]; then
   tty_flags=(-it)
 fi
 
+status=0
 docker run --rm ${tty_flags[@]+"${tty_flags[@]}"} \
   -v "$RETH_DIR:/root/.local/share/reth/mainnet" \
   "$IMAGE" \
-  download --chain mainnet "$profile" --manifest-url "$manifest"
+  download --chain mainnet "$profile" --manifest-url "$manifest" \
+  || status=$?
+
+# Reth exits with 0 when stopped with Ctrl-C, so its exit status alone does
+# not say the download finished. Archives still being downloaded sit in
+# .download-cache as *.part files; any left over mean it did not.
+partial=0
+if [[ -d "$RETH_DIR/.download-cache" ]]; then
+  partial="$(find "$RETH_DIR/.download-cache" -maxdepth 1 -name '*.part' | wc -l | tr -d ' ')"
+fi
+if [[ "$status" != 0 || "$partial" != 0 ]]; then
+  cat >&2 <<EOF
+
+The download did not finish (Reth exited with status $status; $partial archives
+are partly downloaded). This happens when it is stopped with Ctrl-C, the
+connection to Reth's servers fails, or the machine goes off. Do not run
+'make up'. Carry on with:
+
+  LPBOT_SNAPSHOT_RESUME=1 make snapshot
+EOF
+  exit 1
+fi
 
 cat <<EOF
 
-The snapshot is in place. Start the stack with:
+The snapshot is in place. (If you stopped Reth with Ctrl-C before it began
+downloading, it is not: run 'LPBOT_SNAPSHOT_RESUME=1 make snapshot' again.)
+Start the stack with:
 
   make up
 

@@ -30,6 +30,9 @@ pub struct SwapStep {
 /// `amount_remaining` is positive for an exact-input swap and negative for an
 /// exact-output swap. The direction follows from the two prices: the swap is
 /// token0-for-token1 when the target is at or below the current price.
+// The conditions keep the form of SwapMath.sol (`!(max && !exactIn)`) so the
+// port reads line for line against the contract.
+#[allow(clippy::nonminimal_bool)]
 pub fn compute_swap_step(
     sqrt_ratio_current: U256,
     sqrt_ratio_target: U256,
