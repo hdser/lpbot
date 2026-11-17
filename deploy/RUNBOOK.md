@@ -41,7 +41,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 
 | Job | When | To carry on after an interruption |
 | --- | --- | --- |
-| `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. Reth keeps the files it has already verified. With no snapshot named it takes the newest one published, so after a pause of days part of it may be downloaded again |
+| `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. It carries on with the snapshot it began with, written down in `DATA_DIR/reth-snapshot-manifest`, and Reth keeps the files it has already verified. Before downloading, Reth checks what is on disk and prints nothing until `Startup integrity summary`: tens of minutes after an interruption |
 | `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again |
 | `make history`, `make backtest`, `make calibrate`, `make load` | The steps of `make gates`, one by one | The same command again |
 
@@ -65,7 +65,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
    LPBOT_SNAPSHOT_RESUME=1 make snapshot
    ```
 
-   Not sure whether the download had finished? Run it: Reth passes over what it already has. Do not run it once the node has been started with `make up`. The database is complete by then, and the command would stop the node to download into it.
+   Not sure whether the download had finished? Run it: Reth passes over what it already has. If it refuses because `reth-snapshot-manifest` is missing, it says how to name the snapshot you began with. Reth lists the snapshots of the last two weeks or so, so a download should not be left paused longer than that. Do not run it once the node has been started with `make up`. The database is complete by then, and the command would stop the node to download into it.
 
 4. **Find out why it went off**, if you do not know. The log of the previous start says how it ended, and what asked for it:
 

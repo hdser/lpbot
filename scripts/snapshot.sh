@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Downloads Reth's published database snapshot into DATA_DIR, so the node
 # starts near the head of the chain instead of syncing from the first block.
-# Run it once, before the first `make up`. Running it again resumes.
+# Run it once, before the first `make up`.
 #
-#   make snapshot        # or: ./scripts/snapshot.sh
+#   make snapshot                              # start
+#   LPBOT_SNAPSHOT_RESUME=1 make snapshot      # carry on after an interruption
 #
 # It downloads the archive snapshot, or the full-node one when
-# RETH_EXTRA_ARGS in deploy/.env is --full.
+# RETH_EXTRA_ARGS in deploy/.env is --full. Reth publishes a new snapshot
+# every day, so the first run writes down which one it took, in
+# DATA_DIR/reth-snapshot-manifest, and a resume carries on with that one
+# instead of starting on a newer one. LPBOT_SNAPSHOT_MANIFEST=<url> picks
+# one by hand; `docker run --rm <reth image> download --list` lists them.
 
 set -euo pipefail
 
@@ -32,6 +37,8 @@ case "$DATA_DIR" in
   *) DATA_DIR="$ROOT/${DATA_DIR#./}" ;;
 esac
 RETH_DIR="$DATA_DIR/reth"
+MANIFEST_FILE="$DATA_DIR/reth-snapshot-manifest"
+IMAGE="ghcr.io/paradigmxyz/reth:${RETH_VERSION}"
 mkdir -p "$RETH_DIR"
 
 if [[ "${RETH_EXTRA_ARGS:-}" == *--full* ]]; then
@@ -56,10 +63,43 @@ if [[ -n "$(ls -A "$RETH_DIR" 2>/dev/null)" && "${LPBOT_SNAPSHOT_RESUME:-0}" != 
 If it holds a synced node, there is nothing to download. To start over, empty that folder first."
 fi
 
+# Which snapshot: the one named by hand, else the one this download began
+# with, else (on a first run) the newest of the profile.
+manifest="${LPBOT_SNAPSHOT_MANIFEST:-}"
+if [[ -z "$manifest" && -f "$MANIFEST_FILE" ]]; then
+  manifest="$(head -n 1 "$MANIFEST_FILE")"
+fi
+if [[ -z "$manifest" ]]; then
+  if [[ "${LPBOT_SNAPSHOT_RESUME:-0}" == 1 ]]; then
+    die "this download did not write down which snapshot it began with ($MANIFEST_FILE is missing).
+Resuming without it would start on a newer snapshot. List them with
+    docker run --rm $IMAGE download --chain mainnet --list
+and resume with the one you began with:
+    LPBOT_SNAPSHOT_RESUME=1 LPBOT_SNAPSHOT_MANIFEST=<its manifest URL> make snapshot"
+  fi
+  say "Looking up the newest ${profile#--} snapshot."
+  # Columns: date, block, profile, size, unit, manifest URL; newest first.
+  manifest="$(docker run --rm "$IMAGE" download --chain mainnet --list 2>/dev/null \
+    | awk -v want="${profile#--}" '$3 == want && $6 ~ /^https:/ {print $6; exit}' || true)"
+  [[ -n "$manifest" ]] \
+    || die "Reth's list has no ${profile#--} snapshot, or could not be fetched. See it with
+    docker run --rm $IMAGE download --chain mainnet --list
+and pick one by hand: LPBOT_SNAPSHOT_MANIFEST=<manifest URL> make snapshot"
+fi
+case "$manifest" in
+  https://*/manifest.json) ;;
+  *) die "'$manifest' is not a snapshot manifest URL (https://.../manifest.json)." ;;
+esac
+printf '%s\n' "$manifest" > "$MANIFEST_FILE"
+echo "Snapshot: $manifest"
+echo "(written down in $MANIFEST_FILE, so a resume carries on with it)"
+
 avail_gb="$(df -Pk "$RETH_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
 say "Downloading the ${profile#--} snapshot into $RETH_DIR (${avail_gb} GB free)."
 echo "Reth prints the size and an estimate of the time. The estimate settles after a few minutes."
 echo "Leave it running in tmux: Ctrl-b then d detaches, 'tmux attach' comes back."
+echo "Before downloading, Reth checks what is already on disk and prints nothing until"
+echo "'Startup integrity summary'; after an interruption that takes tens of minutes."
 echo "If the machine restarts meanwhile, the download does not: start tmux again and run"
 echo "  LPBOT_SNAPSHOT_RESUME=1 make snapshot"
 echo "deploy/RUNBOOK.md has the rest."
@@ -72,8 +112,8 @@ fi
 
 docker run --rm ${tty_flags[@]+"${tty_flags[@]}"} \
   -v "$RETH_DIR:/root/.local/share/reth/mainnet" \
-  "ghcr.io/paradigmxyz/reth:${RETH_VERSION}" \
-  download --chain mainnet "$profile"
+  "$IMAGE" \
+  download --chain mainnet "$profile" --manifest-url "$manifest"
 
 cat <<EOF
 

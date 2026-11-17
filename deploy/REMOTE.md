@@ -93,7 +93,7 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
 
    Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
 
-   If it is interrupted, or the machine restarts, the download does not come back by itself: start a new `tmux` session and run `LPBOT_SNAPSHOT_RESUME=1 make snapshot`, which carries on. [RUNBOOK.md](RUNBOOK.md) has the details.
+   If it is interrupted, or the machine restarts, the download does not come back by itself: start a new `tmux` session and run `LPBOT_SNAPSHOT_RESUME=1 make snapshot`, which carries on with the same snapshot. Reth publishes a new one every day; the first run writes down which one it took in `DATA_DIR/reth-snapshot-manifest`, so a resume does not switch to a newer one and download parts of it again. [RUNBOOK.md](RUNBOOK.md) has the details.
 
    Postgres, Prometheus and Grafana do not have to wait for it: `make viewer` in a second session starts them now.
 
