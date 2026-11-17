@@ -53,6 +53,7 @@ strategies:
     kind: zone_round_trip
     value_token: WETH                # enter and exit in this token; one of universe.tokens
     pools: ranked                    # top pools holding the value token; fee tier follows the ranking
+    pool: null                       # or a pool address to trade instead of the ranked one; sweep it to compare fee tiers
     capital_share: 0.25
     zone:
       lookbacks: [7d, 30d, 90d]

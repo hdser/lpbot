@@ -145,7 +145,7 @@ The square of this number is proportional to fees paid per day per unit of in-ra
 
 The per-zone version is the one that matches the play, because the position sits in a chosen price range and competes only with the liquidity there.
 
-**Floors before ranking.** A thin pool with a handful of trades shows a huge implied volatility that no real position could collect. Pools must clear a minimum volume and a minimum in-range liquidity first, and the bot caps its own share of the in-range liquidity so its entry does not dilute the number it ranked on. Volume is taken over 7 days as well as 24 hours, so one unusual day does not reorder the list.
+**Floors before ranking.** A thin pool with a handful of trades shows a huge implied volatility that no real position could collect. Pools must clear a minimum volume and a minimum in-range liquidity first, and the bot caps its own share of the in-range liquidity so its entry does not dilute the number it ranked on. Volume is taken over 7 days as well as 24 hours, so one unusual day does not reorder the list. Daily volume is the average over the days actually stored in the window, with a warning when that is fewer than the window has; a pool with no stored day there is not ranked.
 
 **How it feeds the rest.** The ranking picks the pools. Inside the top pools, the zone map picks the ranges, using passes per day and the per-zone implied volatility together. The ranking table, with fee, volume, in-range liquidity and implied volatility side by side for every qualifying pool, is refreshed on a schedule and shown in `lpbot status`.
 
@@ -237,6 +237,7 @@ Rules the pool enforces:
 - No decision is made on tier-2 data alone. Public endpoints rate-limit hard, cap `eth_getLogs` block ranges and often disable trace methods ([Chainstack](https://chainstack.com/learn/how-to/how-to-get-ethereum-rpc-endpoint-ai-agents-2026/)). One provider's keyless endpoint allows 2 requests per second per IP ([NodeFlare](https://nodeflare.app/chains)).
 - If the local head lags a public head by more than a set number of blocks, the bot enters exit-only mode.
 - If tier 0 is down, tier 2 may be used only to withdraw liquidity, with two endpoints agreeing on state.
+- A rate limit (HTTP 429 or 5xx, or an error that says so) is retried with a doubling wait up to 30 seconds, honouring `Retry-After`. Only an answer that says the block range is too wide halves an `eth_getLogs` chunk.
 
 **Sending transactions.** On Ethereum, submit through a private RPC. Flashbots Protect is permissionless and needs no API key ([benchmark study](https://arxiv.org/html/2505.19708v1)). On L2s, the local node forwards to the sequencer.
 
@@ -258,7 +259,9 @@ Three free streams feed everything: pool events from your node, reference prices
 
 - A snapshot to disk every few thousand blocks, so restart does not replay from genesis.
 - A periodic checksum against on-chain `slot0`, `liquidity` and `ticks()`. A mismatch halts trading on that pool.
-- An undo log for recent blocks, driven by the node's reorg notifications. On L2s, track unsafe, safe and finalized heads separately.
+- An undo log for recent blocks, driven by the node's reorg notifications. On L2s, track unsafe, safe and finalized heads separately. Not built yet: until it is, everything stored is read at or behind the finalized block, where no reorg reaches.
+
+Every change to the replica is all-or-nothing: a mint, burn, flash or swap that fails leaves the state as it was, and the step observer sees a swap's steps only once it has succeeded. A virtual position's bounds are *watched* ticks: swap steps split there so the position's share of each step is exact, but the contract has no such tick. Watched ticks keep their own fee growth outside, apart from the contract's, and every swap ends at the tick the contract would hold, in both directions.
 
 Read the protocol-fee setting per pool. Uniswap's fee switch now applies to v2 and select v3 pools, which lowers the LP share there ([The Defiant](https://thedefiant.io/news/defi/uniswap-protocol-revenue-nearly-triples-after-v4-fee-switch-as-uni-tops-usd4)).
 
@@ -278,7 +281,9 @@ Read the protocol-fee setting per pool. Uniswap's fee switch now applies to v2 a
 <data>/snapshots/chain=<chain>/pool=<address>/day=<YYYY-MM-DD>.json
 ```
 
-A day is a UTC day. A finished day is written once and never touched again; the day in progress is kept as `events.partial.parquet` and rewritten by the next backfill, so a re-run fetches only what is new. The snapshot for a day is the pool's full state right before that day's first block, the point every replay starts from. Reading a range of days fails on a missing day, so a gap is never mistaken for a quiet day.
+A day is a UTC day. A finished day is written once and never touched again; the day in progress is kept as `events.partial.parquet` and rewritten by the next backfill, so a re-run fetches only what is new. A day counts as finished only once its last block is at or behind the node's finalized block (a few blocks behind the head, with a warning, on a node that does not serve the `finalized` tag). One backfill run reads one head and stores every pool up to it. The snapshot for a day is the pool's full state right before that day's first block, the point every replay starts from; a re-run reuses the newest stored snapshot when every day from it on is stored, instead of taking a new one each day. A pool created after the start asked for is stored from its first whole day. Reading a range of days fails on a missing day, so a gap is never mistaken for a quiet day.
+
+Writes survive a power cut: each file goes to a temporary name of its own, is synced, renamed into place, and its folder synced. A file found empty or cut short (no Parquet footer, or JSON that does not parse) counts as missing, so the next backfill fetches it again; it is renamed to `<name>.damaged` and named on the error output.
 
 **The table that matters most: the zone map.** For each pool it holds a grid of candidate ranges by lookback, with full passes per day, share of time in range, and the spread of return times after price leaves. It is updated incrementally from pool prices and drives zone choice and the patience policy. Markouts and arbitrage-loss figures can be added later as diagnostics; nothing depends on them.
 
@@ -291,19 +296,19 @@ How a run works:
 1. Load the pool snapshot at the start block and the event stream for the window.
 2. Apply each block's events in log order. After each block, pass the state to the strategy.
 3. Execute any action the strategy returns at a later block (latency parameter, at least one block), at the state then. This prevents look-ahead.
-4. Accrue fees to the virtual position from the change in fee growth inside its range, times its liquidity. In practice the position takes its pro-rata share of each swap step's fee, which is the same quantity.
+4. Accrue fees to the virtual position from the change in fee growth inside its range, times its liquidity. In practice the position takes its pro-rata share of each swap step's fee, which is the same quantity, with its own liquidity counted in the step's active liquidity: `fee × L_pos / (L_pool + L_pos)`, so it can never earn more than the pool paid. A flash loan paid while the price is inside the range pays the position its share the same way, after the protocol's cut.
 5. Charge costs: gas for each action (plus the L1 data fee on L2s), swap fee and price impact for rebalance swaps, and the pool's protocol fee. Swaps are run against a copy of the pool, so fee and impact are exact. Gas is charged at the price in the `costs` block for now; historical gas prices follow once block headers are stored.
 6. Mark the position each block and write the P&L breakdown. The mark is the pool's own price after its swap fee for now; the exchange mid-price replaces it when the exchange feeds exist.
 
-**Two fill models.** *Passive* assumes your liquidity is small against active liquidity, so historical swaps are unchanged and you take a pro-rata fee share. *Impact* re-runs swaps with your liquidity added and regenerates arbitrage flow from the exchange price path. Use passive first. Switch to impact once your size exceeds a few percent of active liquidity in the range.
+**Two fill models.** *Passive* assumes your liquidity is small against active liquidity, so historical swaps are unchanged and you take a pro-rata fee share. *Impact* re-runs swaps with your liquidity added and regenerates arbitrage flow from the exchange price path. Use passive first. Switch to impact once your size exceeds a few percent of active liquidity in the range. Until the impact model exists, an entry is shrunk to `universe.max_share_of_in_range_liquidity` of the thinnest active liquidity anywhere in its range, read from the replica's tick map; the rest stays as cash, and the run's summary counts the capped entries. The cap applies to entries, not to flip legs, and a range with a gap in liquidity gets no entry.
 
 **What the first version trades.** The zone round trip, with the adaptive patience decision or one of the three fixed rules, on one pool per run:
 
-- *Pool.* The stored pool holding the value token that ranks highest by implied volatility over the week before the window, unless the strategy names a `pool`.
+- *Pool.* The stored pool holding the value token that ranks highest by implied volatility over the week before the window, unless the strategy names a `pool`. The floors are enforced: when no stored pool clears them, the run is refused with each pool's reason and what to do. A named pool is traded even below the floors, with a warning. Sweeping `pool` compares fee tiers; each run trades the pool it names.
 - *Entry.* One-sided in the value token, in a range of the run's width within `entry.max_gap_ticks` of the price (one width by default). Among those ranges it takes the one crossed most on the longest lookback, provided it was also crossed on the shortest. Without a day of history it takes the nearest.
 - *Staying.* A position that is back in the value token stays for the next pass. It moves only when price has drifted further than the gap allows, or when another range is crossed `entry.move_margin` times as often (1.5 by default).
-- *Beyond the range.* Every `patience.decide_every` the policy answers: wait, flip into the range next to the price, or close. A flipped position that price leaves behind by a full width gets the same question again.
-- *Loss limit.* Checked on every block against the run's starting capital, position marked at the pool price. When hit, everything is closed and the run stops.
+- *Beyond the range.* Every `patience.decide_every` the policy answers: wait, flip into the range next to the price, or close. A price exactly on the far bound counts as beyond, as the position's holdings do. A flipped position that price leaves behind by a full width gets the same question again. The decision row records the range the flip actually went to. A flip whose new leg cannot open ends the campaign as `flip_failed`. What the new range cannot take stays in the other token and goes back with the campaign's closing swap, which is charged.
+- *Loss limit.* Checked on every block against the run's starting capital, position marked at the pool price, net of any gas still owed. When hit, everything is closed and the run stops. `risk.loss_window` in the config is not read yet.
 
 All of these are the fixed starting point the calibrator has to beat, not tuned choices.
 
@@ -313,9 +318,9 @@ All of these are the fixed starting point the calibrator has to beat, not tuned 
 
 **Validation, in order of importance.**
 
-- Reproduce the fees actually collected by at least 20 real historical positions in the pool, to within 0.1%. `lpbot verify-fees` does this from the stored logs: it follows every position that starts empty inside the history, adds up what the replica's fee growth says the pool owed it, and compares that with its `Collect` events.
-- Differential-test the math port against the deployed pool on a local fork (revm or anvil) with randomized swaps and mints.
-- Compare one stored day of a pool, log for log, with a public endpoint. Replaying the stored events to the pool's state on the chain cannot see a missing event that changes no state, such as a `Collect`; this can. It is the one use of a public endpoint in the research pipeline, and nothing is decided on its data: it only confirms or contradicts what the local node gave.
+- Reproduce the fees actually collected by at least 20 real historical positions in the pool, to within 0.1%. `lpbot verify-fees` does this from the stored logs and the node: it follows every position that the pool's `positions()` shows empty and owing nothing at the start of the history, adds up what the replica's fee growth says the pool owed it, and checks that what it collected plus what the pool still owes it at the end equals that. Without a node the agreements it finds are counted as unverified, never as confirmations.
+- Differential-test the math port against the deployed pool on a local fork (revm or anvil) with randomized swaps and mints. Not built yet: the reference vectors and `lpbot verify-pool` against the node are the independent checks so far.
+- Compare one stored day of a pool, log for log, with a public endpoint: the newest complete day that has logs, so the check cannot pass on an empty day. Replaying the stored events to the pool's state on the chain cannot see a missing event that changes no state, such as a `Collect`; this can. It is the one use of a public endpoint in the research pipeline, and nothing is decided on its data: it only confirms or contradicts what the local node gave.
 - Walk-forward only: fit parameters on one window, score on the next. Never report in-sample results.
 - Choose pools by a rule fixed in advance, not by looking at which pools did well.
 
@@ -698,6 +703,8 @@ sweep:
   entry.width_ticks: [10, 20, 40, 80]
   patience.mode: [adaptive, wait, flip, close]
 ```
+
+A sweep may only set a setting the strategy already has in the base config; a misspelt or new path is refused with the nearest names, so a sweep can never label identical runs differently. To sweep a setting that has no value yet, such as `pool`, give it one in the base (`pool: null` means "ranked"). The `run` block is the one part of the config not read tolerantly: an unknown key there is refused, since a misspelt `autonomy` would otherwise fall back to its default.
 
 `lpbot run experiments/width-and-patience-eth.yml` executes it. Each run stores its fully resolved config, a hash of it, and the code version. The same file, data and code version give the same result.
 

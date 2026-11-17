@@ -42,7 +42,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 | Job | When | To carry on after an interruption |
 | --- | --- | --- |
 | `make snapshot` | Once, before the first `make up` | `LPBOT_SNAPSHOT_RESUME=1 make snapshot`. It carries on with the snapshot it began with, written down in `DATA_DIR/reth-snapshot-manifest`, and Reth keeps the files it has already verified. Before downloading, Reth checks what is on disk and prints nothing until `Startup integrity summary`: tens of minutes after an interruption, about 90 for 2 TB on disk. It is not stuck; see "Is the snapshot download working?" below before pressing Ctrl-C. If it is stopped before it finishes, the script says so and gives the resume command |
-| `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again |
+| `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again. A day file a power cut left empty or cut short is renamed to `<name>.damaged`, named in the output, and fetched again; the `.damaged` files can be deleted |
 | `make history`, `make backtest`, `make calibrate`, `make load` | The steps of `make gates`, one by one | The same command again |
 
 ### Is the snapshot download working?
