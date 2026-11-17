@@ -38,7 +38,11 @@ pub struct Window {
 }
 
 /// Inputs given per run. Capital and the loss limit have no default.
+///
+/// Unlike the rest of the config, an unknown key here is refused: a
+/// misspelt `autonomy` would otherwise leave the run on its default.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunInputs {
     #[serde(default)]
     pub capital_usd: Option<f64>,
@@ -47,6 +51,11 @@ pub struct RunInputs {
     pub loss_limit_pct: Option<f64>,
     #[serde(default)]
     pub autonomy: Autonomy,
+}
+
+impl RunInputs {
+    /// The keys a `run` block accepts.
+    pub const KEYS: [&'static str; 3] = ["capital_usd", "loss_limit_pct", "autonomy"];
 }
 
 /// Minimums a pool must clear before it is ranked, in dollars.
@@ -247,6 +256,7 @@ impl Config {
     }
 }
 
+/// A `YYYY-MM-DD` date that exists in the Gregorian calendar.
 fn is_iso_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
@@ -256,9 +266,18 @@ fn is_iso_date(s: &str) -> bool {
     if !(digits(0..4) && digits(5..7) && digits(8..10)) {
         return false;
     }
+    let year: u32 = s[0..4].parse().unwrap_or(0);
     let month: u32 = s[5..7].parse().unwrap_or(0);
     let day: u32 = s[8..10].parse().unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days_in_month).contains(&day)
 }
 
 #[cfg(test)]
@@ -356,6 +375,67 @@ ethereum:
                 token: "WBTC".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_misspelt_run_input_is_refused_with_the_accepted_ones() {
+        let text = r#"
+mode: backtest
+window: { from: 2026-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 5, autonmy: auto }
+universe: { tokens: [WETH] }
+strategies: []
+"#;
+        let error = serde_yaml::from_str::<Config>(text)
+            .unwrap_err()
+            .to_string();
+        for wanted in ["autonmy", "capital_usd", "loss_limit_pct", "autonomy"] {
+            assert!(error.contains(wanted), "{wanted}: {error}");
+        }
+        // The names the check accepts are the fields there are.
+        let fields = serde_yaml::to_value(RunInputs::default()).unwrap();
+        let fields: Vec<&str> = fields
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(fields, RunInputs::KEYS);
+    }
+
+    #[test]
+    fn window_dates_must_exist_in_the_calendar() {
+        for good in [
+            "2026-02-28",
+            "2024-02-29",
+            "2000-02-29",
+            "2026-04-30",
+            "2026-12-31",
+        ] {
+            assert!(is_iso_date(good), "{good}");
+        }
+        for bad in [
+            "2026-02-31",
+            "2026-02-29",
+            "2100-02-29",
+            "2026-04-31",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-01-00",
+            "2026-1-01",
+            "20260101",
+        ] {
+            assert!(!is_iso_date(bad), "{bad}");
+        }
+        let mut c = base();
+        c.window = Some(Window {
+            from: "2026-02-01".into(),
+            to: "2026-02-31".into(),
+        });
+        assert!(matches!(
+            c.validate().unwrap_err()[0],
+            ConfigError::BadWindow { .. }
+        ));
     }
 
     #[test]

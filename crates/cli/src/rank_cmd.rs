@@ -11,16 +11,18 @@ use lpbot_chain::uniswap_v3::{discover_pools, fetch_snapshot, fetch_swaps};
 use lpbot_core::ranking::{rank, usd_prices, Floors, PoolStats, PriceEdge, RankedPool};
 use lpbot_core::Config;
 
+use lpbot_data::backfill::{first_block_at_or_after, ChainSource, NodeSource};
 use lpbot_data::day::Day;
-use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
-use lpbot_data::snapshot::SnapshotStore;
+use lpbot_data::lake::{read_events, stored_pools, TimedEvent};
+use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_data::zone_map::DAY;
-use lpbot_venues::uniswap_v3::pool::PoolSnapshot;
+use lpbot_venues::uniswap_v3::events::PoolEvent;
 
 use crate::chain_cmd::{Chain, Tokens};
 
-/// Ethereum produces a block every 12 seconds.
+/// Ethereum produces a block every 12 seconds. Only an estimate: the
+/// ranking finds its window from block times.
 pub const BLOCKS_PER_DAY: u64 = 7_200;
 const HEAD_MARGIN: u64 = 5;
 
@@ -40,6 +42,9 @@ pub struct PoolReading {
     pub volume1_raw_24h: U256,
     /// Token1 traded over the whole window, in the token's smallest unit.
     pub volume1_raw_window: U256,
+    /// Days of history the window volume was read from: the window's
+    /// length, or less when less of it is stored. Zero when none is.
+    pub window_days: f64,
 }
 
 fn to_f64(value: U256) -> f64 {
@@ -66,11 +71,11 @@ impl PoolReading {
     }
 }
 
-/// Dollar prices of the tokens and dollar-denominated stats per pool.
+/// Dollar prices of the tokens and dollar-denominated stats per pool. The
+/// daily volume of each pool is averaged over the days it was read from.
 pub fn build_stats(
     readings: &[PoolReading],
     stables: &[String],
-    window_days: f64,
 ) -> (BTreeMap<String, f64>, Vec<PoolStats>) {
     let edges: Vec<PriceEdge> = readings
         .iter()
@@ -88,16 +93,46 @@ pub fn build_stats(
         .map(|r| {
             // A token without a price values the pool at zero, which excludes it.
             let usd1 = prices.get(&r.symbol1).copied().unwrap_or(0.0);
+            let volume_per_day_long = if r.window_days > 0.0 {
+                r.volume1(r.volume1_raw_window) * usd1 / r.window_days
+            } else {
+                0.0
+            };
             PoolStats {
                 id: r.id.clone(),
                 fee: f64::from(r.fee_pips) / 1_000_000.0,
                 volume_24h: r.volume1(r.volume1_raw_24h) * usd1,
-                volume_per_day_long: r.volume1(r.volume1_raw_window) * usd1 / window_days,
+                volume_per_day_long,
                 l_sqrt_p: r.l_sqrt_p_token1() * usd1,
             }
         })
         .collect();
     (prices, stats)
+}
+
+/// Why a pool with no history in the window is not ranked.
+pub const NO_HISTORY: &str = "no history stored in the ranking window";
+
+/// Ranks the readings. A pool with no stored history in the window is not
+/// ranked, whatever the floors: it is listed last with `NO_HISTORY`.
+pub fn rank_readings(
+    readings: &[PoolReading],
+    stables: &[String],
+    floors: &Floors,
+) -> (BTreeMap<String, f64>, Vec<RankedPool>) {
+    let (prices, stats) = build_stats(readings, stables);
+    let (read, unread): (Vec<_>, Vec<_>) = readings
+        .iter()
+        .zip(stats)
+        .partition(|(reading, _)| reading.window_days > 0.0);
+    let mut ranked = rank(read.into_iter().map(|(_, stats)| stats).collect(), floors);
+    ranked.extend(unread.into_iter().map(|(_, stats)| RankedPool {
+        stats,
+        iv_24h: None,
+        iv_long: None,
+        excluded: Some(NO_HISTORY.to_string()),
+    }));
+    (prices, ranked)
 }
 
 fn money(value: f64) -> String {
@@ -175,18 +210,50 @@ pub(crate) fn token_of(tokens: &Tokens, address: Address) -> Result<(String, u8)
 
 fn print(readings: &[PoolReading], config: &Config, days: u64) -> Result<()> {
     let floors = floors(config)?;
-    let (prices, stats) = build_stats(readings, &config.universe.usd_stables, days as f64);
+    let (prices, ranked) = rank_readings(readings, &config.universe.usd_stables, &floors);
     println!();
     for (symbol, price) in &prices {
         println!("{symbol}: {price:.2} USD");
     }
     println!();
-    for line in render(&rank(stats, &floors), days) {
+    for line in render(&ranked, days) {
         println!("{line}");
     }
     println!();
     println!("Volume is valued at current prices. Depth 1% is the value within 1% of the price.");
     Ok(())
+}
+
+/// Where a window of whole days ending at the head lies, in blocks, found
+/// from block times rather than an assumed block rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBlocks {
+    /// The first block after the window's start.
+    pub first: u64,
+    /// The first block after the window's first day.
+    pub second_day: u64,
+    /// The first block of the window's last day.
+    pub last_day: u64,
+}
+
+/// The blocks of the `days` days that end at `head`, whose time is
+/// `head_time`.
+pub fn window_blocks(
+    source: &impl ChainSource,
+    head: u64,
+    head_time: u64,
+    days: u64,
+) -> Result<WindowBlocks> {
+    // Blocks strictly after a moment: the window holds (start, head_time].
+    let after =
+        |moment: u64, lo: u64| first_block_at_or_after(source, moment.saturating_add(1), lo, head);
+    let start = head_time.saturating_sub(days * DAY);
+    let first = after(start, 0)?;
+    Ok(WindowBlocks {
+        first,
+        second_day: after(start + DAY, first)?,
+        last_day: after(head_time.saturating_sub(DAY), first)?,
+    })
 }
 
 /// Reads every universe pool from the node and prints the ranking.
@@ -197,8 +264,14 @@ pub fn run(chain: &Chain, config: &Config, days: u64, log_chunk: u64) -> Result<
     floors(config)?;
 
     let head = chain.client.block_number()?.saturating_sub(HEAD_MARGIN);
-    let from = head.saturating_sub(days * BLOCKS_PER_DAY);
-    let day_start = head.saturating_sub(BLOCKS_PER_DAY);
+    let (head_time, _) = chain.client.block_header(head)?;
+    let source = NodeSource {
+        client: &chain.client,
+        head_margin: HEAD_MARGIN,
+        log_chunk,
+    };
+    let blocks = window_blocks(&source, head, head_time, days)?;
+    let from = blocks.first;
 
     let addresses: Vec<_> = chain.tokens.values().map(|(a, _)| *a).collect();
     let found = discover_pools(&chain.client, chain.factory, &addresses, head)?;
@@ -219,7 +292,7 @@ pub fn run(chain: &Chain, config: &Config, days: u64, log_chunk: u64) -> Result<
         let swaps = fetch_swaps(
             &chain.client,
             pool.address,
-            from + 1,
+            from,
             head,
             log_chunk,
             |_, _| {},
@@ -230,11 +303,11 @@ pub fn run(chain: &Chain, config: &Config, days: u64, log_chunk: u64) -> Result<
         for (block, swap) in &swaps {
             let amount = swap.amount1.unsigned_abs();
             window += amount;
-            if *block > day_start {
+            if *block >= blocks.last_day {
                 last_day += amount;
                 swaps_in_last_day += 1;
             }
-            if *block <= from + BLOCKS_PER_DAY {
+            if *block < blocks.second_day {
                 swaps_in_first_day += 1;
             }
         }
@@ -251,6 +324,7 @@ pub fn run(chain: &Chain, config: &Config, days: u64, log_chunk: u64) -> Result<
             liquidity: snapshot.liquidity,
             volume1_raw_24h: last_day,
             volume1_raw_window: window,
+            window_days: days as f64,
         });
     }
 
@@ -266,42 +340,64 @@ pub fn run(chain: &Chain, config: &Config, days: u64, log_chunk: u64) -> Result<
     Ok(())
 }
 
-/// One stored pool as a ranking input: price and in-range liquidity from
-/// its last swap, volume from the swaps of the window ending at `now`.
+/// One stored pool as a ranking input, as it stood at `now`: price and
+/// in-range liquidity from its last swap at or before `now` (or the
+/// snapshot, when that is newer), volume from the swaps of the `days` days
+/// ending at `now`. `covered_days` is how much of that window is stored;
+/// the daily volume is averaged over it. Nothing after `now` is looked at.
 pub fn reading_from_events(
     id: String,
     tokens: ((String, u8), (String, u8)),
-    snapshot: &PoolSnapshot,
+    snapshot: &StoredSnapshot,
     events: &[TimedEvent],
-    now: u64,
-    days: u64,
+    (now, days): (u64, u64),
+    covered_days: f64,
 ) -> PoolReading {
     let ((symbol0, decimals0), (symbol1, decimals1)) = tokens;
+    let state = &snapshot.state;
     let mut reading = PoolReading {
         id,
         symbol0,
         symbol1,
         decimals0,
         decimals1,
-        fee_pips: snapshot.fee_pips,
-        sqrt_price_x96: snapshot.sqrt_price_x96,
-        liquidity: snapshot.liquidity,
+        fee_pips: state.fee_pips,
+        sqrt_price_x96: state.sqrt_price_x96,
+        liquidity: state.liquidity,
         volume1_raw_24h: U256::ZERO,
         volume1_raw_window: U256::ZERO,
+        window_days: covered_days,
     };
-    for (time, swap) in swaps(events) {
-        reading.sqrt_price_x96 = swap.sqrt_price_x96;
-        reading.liquidity = swap.liquidity;
-        if time > now || time + days * DAY <= now {
+    for event in events {
+        let PoolEvent::Swap(swap) = &event.event else {
+            continue;
+        };
+        if event.time > now {
+            continue;
+        }
+        // A swap older than the snapshot does not tell the price after it.
+        if event.block > snapshot.block {
+            reading.sqrt_price_x96 = swap.sqrt_price_x96;
+            reading.liquidity = swap.liquidity;
+        }
+        if event.time + days * DAY <= now {
             continue;
         }
         let amount = swap.amount1.unsigned_abs();
         reading.volume1_raw_window += amount;
-        if time + DAY > now {
+        if event.time + DAY > now {
             reading.volume1_raw_24h += amount;
         }
     }
     reading
+}
+
+/// How many days of the `days` days ending at `now` a history stored from
+/// the start of `first` to the end of `last` covers.
+pub fn covered_days(first: Day, last: Day, now: u64, days: u64) -> f64 {
+    let start = now.saturating_sub(days * DAY).max(first.start());
+    let end = now.min(last.end());
+    end.saturating_sub(start) as f64 / DAY as f64
 }
 
 /// Ranks the pools stored in the data folder, without touching a node.
@@ -352,6 +448,7 @@ pub fn run_local(
         Day::of_time(now)
     );
     let mut readings = Vec::new();
+    let mut warnings = Vec::new();
     for (snapshot, events, from, last) in &loaded {
         let token0 = token_of(tokens, snapshot.token0)?;
         let token1 = token_of(tokens, snapshot.token1)?;
@@ -362,21 +459,51 @@ pub fn run_local(
             snapshot.state.fee_pips as f64 / 10_000.0
         );
         println!("  {id}: {} events from {from} to {last}", events.len());
+        let covered = covered_days(*from, *last, now, days);
+        if let Some(warning) = short_history(&id, *from, *last, covered, days) {
+            warnings.push(warning);
+        }
         readings.push(reading_from_events(
             id,
             (token0, token1),
-            &snapshot.state,
+            snapshot,
             events,
-            now,
-            days,
+            (now, days),
+            covered,
         ));
     }
-    print(&readings, config, days)
+    print(&readings, config, days)?;
+    for warning in warnings {
+        println!();
+        println!("{warning}");
+    }
+    Ok(())
+}
+
+/// A warning for a pool whose stored history covers less than the window,
+/// or `None` when it covers all of it.
+pub fn short_history(id: &str, first: Day, last: Day, covered: f64, days: u64) -> Option<String> {
+    if covered + 1e-9 >= days as f64 {
+        return None;
+    }
+    Some(if covered <= 0.0 {
+        format!(
+            "warning: {id} has no history in the {days} days ranked (what was read runs from \
+             {first} to {last}), so it is not ranked. Run `lpbot backfill` to bring it up to date."
+        )
+    } else {
+        format!(
+            "warning: the history read for {id} runs from {first} to {last} and covers \
+             {covered:.1} of the {days} days ranked; its daily volume is the average over those \
+             {covered:.1} days. Run `lpbot backfill` to store the rest, or pass a shorter --days."
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lpbot_venues::uniswap_v3::pool::PoolSnapshot;
     use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
     fn usdc_weth(fee_pips: u32, liquidity: u128, volume_weth_per_day: u64) -> PoolReading {
@@ -395,7 +522,130 @@ mod tests {
                 * U256::from(10u64).pow(U256::from(18u8)),
             volume1_raw_window: U256::from(volume_weth_per_day * 7)
                 * U256::from(10u64).pow(U256::from(18u8)),
+            window_days: 7.0,
         }
+    }
+
+    #[test]
+    fn the_daily_volume_is_averaged_over_the_days_each_pool_was_read_from() {
+        let liquidity = (2.5e23 / 5e8f64.sqrt()) as u128;
+        let week = usdc_weth(500, liquidity, 50_000);
+        // The same volume read from two days only is a busier pool.
+        let mut two_days = week.clone();
+        two_days.window_days = 2.0;
+        let mut unread = week.clone();
+        unread.window_days = 0.0;
+        let (_, stats) = build_stats(&[week, two_days, unread], &["USDC".to_string()]);
+        assert!((stats[0].volume_per_day_long / 100e6 - 1.0).abs() < 0.001);
+        assert!((stats[1].volume_per_day_long / 350e6 - 1.0).abs() < 0.001);
+        assert_eq!(stats[2].volume_per_day_long, 0.0);
+    }
+
+    #[test]
+    fn a_pool_without_history_in_the_window_is_never_ranked() {
+        let liquidity = (2.5e23 / 5e8f64.sqrt()) as u128;
+        let mut unread = usdc_weth(500, liquidity, 50_000);
+        unread.window_days = 0.0;
+        unread.id = "unread".into();
+        let read = usdc_weth(3000, liquidity, 50_000);
+        // Floors of zero let anything through, but not a pool never read.
+        let none = Floors {
+            volume_per_day: 0.0,
+            depth_1pct: 0.0,
+        };
+        let (_, ranked) = rank_readings(&[unread, read], &["USDC".to_string()], &none);
+        assert_eq!(ranked[0].stats.id, "USDC/WETH 0.3");
+        assert!(ranked[0].excluded.is_none());
+        assert_eq!(ranked[1].stats.id, "unread");
+        assert_eq!(ranked[1].excluded.as_deref(), Some(NO_HISTORY));
+    }
+
+    #[test]
+    fn a_history_shorter_than_the_window_covers_part_of_it() {
+        let day = |text: &str| text.parse::<Day>().unwrap();
+        let now = day("2026-01-30").start() + 3_600;
+        // Stored for the whole window and beyond.
+        assert_eq!(
+            covered_days(day("2026-01-01"), day("2026-01-30"), now, 7),
+            7.0
+        );
+        // Stored from two days before `now`.
+        let recent = covered_days(day("2026-01-28"), day("2026-01-30"), now, 7);
+        assert!((recent - (2.0 + 1.0 / 24.0)).abs() < 1e-9, "{recent}");
+        // Ending 25 hours before `now`, like a pool not brought up to date.
+        let stale = covered_days(day("2026-01-01"), day("2026-01-28"), now, 7);
+        assert!((stale - (6.0 - 1.0 / 24.0)).abs() < 1e-9, "{stale}");
+        // Entirely before the window.
+        assert_eq!(
+            covered_days(day("2026-01-01"), day("2026-01-10"), now, 7),
+            0.0
+        );
+
+        assert_eq!(
+            short_history("p", day("2026-01-01"), day("2026-01-30"), 7.0, 7),
+            None
+        );
+        let warning = short_history("p", day("2026-01-28"), day("2026-01-30"), 2.04, 7).unwrap();
+        assert!(
+            warning.contains("2.0 of the 7 days") && warning.contains("lpbot backfill"),
+            "{warning}"
+        );
+        let warning = short_history("p", day("2026-01-01"), day("2026-01-10"), 0.0, 7).unwrap();
+        assert!(warning.contains("not ranked"), "{warning}");
+    }
+
+    /// A chain whose blocks come every 12 seconds, except that every tenth
+    /// slot is missed, so a day holds fewer than 7,200 blocks.
+    struct Slots;
+
+    impl ChainSource for Slots {
+        fn head(&self) -> Result<(u64, u64), lpbot_chain::uniswap_v3::ChainError> {
+            unreachable!()
+        }
+        fn block_time(&self, block: u64) -> Result<u64, lpbot_chain::uniswap_v3::ChainError> {
+            Ok(1_700_000_000 + block * 12 + block / 9 * 12)
+        }
+        fn block_times(
+            &self,
+            blocks: &[u64],
+        ) -> Result<Vec<u64>, lpbot_chain::uniswap_v3::ChainError> {
+            blocks.iter().map(|b| self.block_time(*b)).collect()
+        }
+        fn logs(
+            &self,
+            _: Address,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<lpbot_chain::eth::Log>, lpbot_chain::uniswap_v3::ChainError> {
+            unreachable!()
+        }
+        fn snapshot(
+            &self,
+            _: Address,
+            _: u64,
+        ) -> Result<PoolSnapshot, lpbot_chain::uniswap_v3::ChainError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn the_node_window_is_found_by_block_time() {
+        let head = 1_000_000;
+        let time = |block| Slots.block_time(block).unwrap();
+        let head_time = time(head);
+        let blocks = window_blocks(&Slots, head, head_time, 7).unwrap();
+        // Each boundary is the first block after its moment.
+        for (block, moment) in [
+            (blocks.first, head_time - 7 * DAY),
+            (blocks.second_day, head_time - 6 * DAY),
+            (blocks.last_day, head_time - DAY),
+        ] {
+            assert!(time(block) > moment && time(block - 1) <= moment, "{block}");
+        }
+        // Fewer blocks than 7,200 a day: counting blocks would reach back
+        // further than seven days.
+        assert!(head - blocks.first < 7 * BLOCKS_PER_DAY);
+        assert!(blocks.first < blocks.second_day && blocks.second_day < blocks.last_day);
     }
 
     #[test]
@@ -417,7 +667,7 @@ mod tests {
         let liquidity = (2.5e23 / 5e8f64.sqrt()) as u128;
         // 100 million dollars a day is 50,000 WETH.
         let readings = vec![usdc_weth(500, liquidity, 50_000)];
-        let (prices, stats) = build_stats(&readings, &["USDC".to_string()], 7.0);
+        let (prices, stats) = build_stats(&readings, &["USDC".to_string()]);
 
         assert!((prices["WETH"] - 2_000.0).abs() < 0.5);
         let s = &stats[0];
@@ -445,7 +695,7 @@ mod tests {
         let mut pool = usdc_weth(500, 1_000_000_000_000_000_000, 50_000);
         pool.symbol0 = "AAA".into();
         pool.symbol1 = "BBB".into();
-        let (prices, stats) = build_stats(&[pool], &["USDC".to_string()], 7.0);
+        let (prices, stats) = build_stats(&[pool], &["USDC".to_string()]);
         assert!(!prices.contains_key("BBB"));
         let ranked = rank(
             stats,
@@ -464,7 +714,7 @@ mod tests {
             usdc_weth(500, liquidity, 50_000),
             usdc_weth(3000, liquidity / 10_000, 10),
         ];
-        let (_, stats) = build_stats(&readings, &["USDC".to_string()], 7.0);
+        let (_, stats) = build_stats(&readings, &["USDC".to_string()]);
         let lines = render(
             &rank(
                 stats,
@@ -487,22 +737,29 @@ mod tests {
     #[test]
     fn a_stored_pool_is_read_from_its_last_swap_and_the_swaps_of_the_window() {
         use alloy_primitives::I256;
-        use lpbot_venues::uniswap_v3::events::PoolEvent;
         use lpbot_venues::uniswap_v3::pool::SwapEvent;
 
-        let snapshot = PoolSnapshot {
-            fee_pips: 500,
-            tick_spacing: 10,
-            sqrt_price_x96: U256::from(1u8),
-            tick: 0,
-            liquidity: 1,
-            fee_growth_global0: U256::ZERO,
-            fee_growth_global1: U256::ZERO,
-            fee_protocol0: 0,
-            fee_protocol1: 0,
-            ticks: vec![],
-        };
         let now = 100 * DAY;
+        let snapshot = StoredSnapshot {
+            pool: Address::ZERO,
+            token0: Address::ZERO,
+            token1: Address::ZERO,
+            // Taken a little before the window.
+            block: (now - 9 * DAY) / 12,
+            day: Day::of_time(now - 9 * DAY),
+            state: PoolSnapshot {
+                fee_pips: 500,
+                tick_spacing: 10,
+                sqrt_price_x96: U256::from(1u8),
+                tick: 0,
+                liquidity: 1,
+                fee_growth_global0: U256::ZERO,
+                fee_growth_global1: U256::ZERO,
+                fee_protocol0: 0,
+                fee_protocol1: 0,
+                ticks: vec![],
+            },
+        };
         let swap = |time: u64, amount1: i64, liquidity: u128| TimedEvent {
             block: time / 12,
             time,
@@ -523,7 +780,10 @@ mod tests {
             swap(now, 1, 9),                  // the newest event
         ];
         let tokens = (("USDC".to_string(), 6), ("WETH".to_string(), 18));
-        let reading = reading_from_events("x".into(), tokens.clone(), &snapshot, &events, now, 7);
+        let read = |events: &[TimedEvent], now: u64| {
+            reading_from_events("x".into(), tokens.clone(), &snapshot, events, (now, 7), 7.0)
+        };
+        let reading = read(&events, now);
         assert_eq!(reading.volume1_raw_window, U256::from(235u64));
         assert_eq!(reading.volume1_raw_24h, U256::from(5u64));
         assert_eq!(
@@ -531,9 +791,21 @@ mod tests {
             (9, U256::from(9u8))
         );
         assert_eq!((reading.decimals0, reading.decimals1), (6, 18));
+        assert_eq!(reading.window_days, 7.0);
 
-        // Without swaps the snapshot's price and liquidity stand.
-        let quiet = reading_from_events("x".into(), tokens, &snapshot, &[], now, 7);
+        // A swap after `now` tells nothing about the pool at `now`.
+        let mut later = events.clone();
+        later.push(swap(now + 1, 1_000_000, 10));
+        assert_eq!(read(&later, now).volume1_raw_window, U256::from(235u64));
+        assert_eq!(read(&later, now).liquidity, 9);
+        // Measured a second before the newest swap, the one before it stands.
+        assert_eq!(read(&events, now - 1).liquidity, 8);
+
+        // Without swaps the snapshot's price and liquidity stand, and a
+        // swap from before the snapshot does not replace them.
+        assert_eq!(read(&[], now).liquidity, 1);
+        let old = [swap(now - 10 * DAY, 3, 4)];
+        let quiet = read(&old, now);
         assert_eq!((quiet.liquidity, quiet.volume1_raw_window), (1, U256::ZERO));
     }
 

@@ -17,11 +17,11 @@ use lpbot_chain::RpcClient;
 use lpbot_core::config::Mode;
 use lpbot_core::experiment::ResolvedRun;
 use lpbot_data::backfill::NodeSource;
-use lpbot_data::cross_check::{day_blocks, differences, last_complete_day};
+use lpbot_data::cross_check::{day_blocks, differences};
 use lpbot_data::day::Day;
 use lpbot_data::fee_check::FeeCheckSummary;
 use lpbot_data::snapshot::SnapshotStore;
-use lpbot_data::store::EventStore;
+use lpbot_data::store::{DayState, EventStore, StoredLog};
 use lpbot_sim::engine::Policy;
 
 use crate::chain_cmd::{self, chain_addresses, Chain, HEAD_MARGIN};
@@ -388,6 +388,25 @@ pub fn shown(error: &anyhow::Error, url: &str) -> String {
     format!("{error:#}").replace(url, host_of(url))
 }
 
+/// The newest day stored complete for a pool that holds at least one log,
+/// with its logs.
+pub fn newest_day_with_logs(
+    store: &EventStore,
+    chain: &str,
+    pool: Address,
+) -> Result<Option<(Day, Vec<StoredLog>)>> {
+    for (day, state) in store.days(chain, pool)?.into_iter().rev() {
+        if state != DayState::Complete {
+            continue;
+        }
+        let logs = store.read_day(chain, pool, day)?.unwrap_or_default();
+        if !logs.is_empty() {
+            return Ok(Some((day, logs)));
+        }
+    }
+    Ok(None)
+}
+
 /// A pool's logs in a block range from another endpoint, after checking
 /// that it is on the same chain and has the same block at the range's end.
 fn read_elsewhere(
@@ -488,9 +507,10 @@ impl Gates {
     }
 
     /// The pools the runs trade, each once, with the name the runs use.
+    /// Runs choose their pool as `lpbot run` does: by the same key.
     fn traded_pools(&self) -> Result<Vec<(Address, String)>> {
         let snapshots = SnapshotStore::new(&self.options.root);
-        let mut asked: Vec<(String, Day)> = Vec::new();
+        let mut asked: Vec<run_cmd::PoolKey> = Vec::new();
         let mut pools: Vec<(Address, String)> = Vec::new();
         for run in &self.runs {
             let config = &run.config;
@@ -499,7 +519,7 @@ impl Gates {
                 .first()
                 .ok_or_else(|| anyhow!("the run has no strategy"))?;
             let (from, _) = run_cmd::window(config)?;
-            let key = (strategy.value_token.clone(), from);
+            let key = run_cmd::pool_key(strategy, from)?;
             if asked.contains(&key) {
                 continue;
             }
@@ -650,15 +670,14 @@ impl Gates {
             return Ok(Outcome::Open("no pool is stored to compare".into()));
         };
         let store = EventStore::new(&self.options.root);
-        let days = store.days(&self.options.chain_name, pool)?;
-        let Some(day) = last_complete_day(&days) else {
+        // Two empty answers agree and prove nothing: compare a day with logs.
+        let Some((day, stored)) = newest_day_with_logs(&store, &self.options.chain_name, pool)?
+        else {
             return Ok(Outcome::Open(format!(
-                "{name} has no complete day stored yet to compare"
+                "{name} has no complete day with a log stored yet to compare; \
+                 two empty days would agree without showing anything"
             )));
         };
-        let stored = store
-            .read_day(&self.options.chain_name, pool, day)?
-            .unwrap_or_default();
         let endpoints =
             chain_cmd::public_endpoints(&self.runs[0].config, &self.options.chain_name)?;
         let log_chunk = self.options.log_chunk;
