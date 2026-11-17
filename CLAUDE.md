@@ -61,7 +61,7 @@ Write code so the data-dependent parts take their input from files or traits, an
 The owner runs the stack on a NUC (Ubuntu Server 26.04, 4 TB NVMe, 32 GB of memory), set up with `deploy/REMOTE.md`. Cloud sessions cannot reach it: the owner runs the commands and pastes the output. `deploy/RUNBOOK.md` is what he types there: long jobs run in `tmux`, services come back after a restart and jobs do not. Give him commands from it, and keep it in step when a job or its resume command changes.
 
 - Done there, November 2026: `scripts/host-setup.sh`, a 3.4 TB data volume at `/data`, `make env`.
-- Under way: `make snapshot` (archive, 1.72 TB to download, 2.88 TB unpacked). An orderly power-off on 17 November 2026 interrupted it; what asked for the power-off was not established when this was written. It resumes with `LPBOT_SNAPSHOT_RESUME=1 make snapshot`.
+- Under way: `make snapshot` (archive, 1.72 TB to download, 2.88 TB unpacked). A press of the power button on 17 November 2026 switched the machine off in the middle of it (`Power key pressed short` in the journal: not heat, not a crash). It resumes with `LPBOT_SNAPSHOT_RESUME=1 make snapshot`; whether the resume reused what was already downloaded has not been reported back yet.
 - Running there: Postgres, Prometheus and Grafana (`make viewer`), reached from the laptop with `make tunnel` on port 3001.
 - Not yet run there: `make up` with the node, and `make gates` (every check against real chain data).
 - The start-up script creates the six result tables empty (`deploy/postgres/schema.sql`, generated from `lpbot_sim::tables` and kept in step by a test), so dashboards on a database without runs show no data instead of an error.

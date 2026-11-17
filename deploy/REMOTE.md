@@ -34,7 +34,15 @@ Everything is done over SSH. No service on the node machine is open to the netwo
 - **Heat:** look at `sensors` (package `lm-sensors`) on the idle machine. A small box with a quiet fan profile can idle above 60 °C and push the NVMe past its warning temperature under load; the drive then slows itself down. Set the BIOS fan profile to its coolest setting and check that the drive's thermal pad makes contact.
 - **Memory:** 32 GB is comfortable. 16 GB is the floor.
 - **Network:** a wired connection. The first download is about 2 TB.
-- **Power:** set the BIOS to power on after a power loss, so the machine comes back by itself.
+- **Power:** set the BIOS to power on after a power loss, so the machine comes back by itself. A short press of the power button switches Ubuntu off in an orderly way, which on a box within reach can happen by accident and ends every job that was running. To make a short press do nothing:
+
+  ```sh
+  sudo mkdir -p /etc/systemd/logind.conf.d
+  printf '[Login]\nHandlePowerKey=ignore\n' | sudo tee /etc/systemd/logind.conf.d/power-key.conf
+  sudo systemctl restart systemd-logind      # or leave it to the next boot
+  ```
+
+  `sudo poweroff` still switches the machine off, and holding the button still cuts the power.
 
 ## Standalone, or under a hypervisor
 

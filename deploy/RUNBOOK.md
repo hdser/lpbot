@@ -74,10 +74,12 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
    sudo journalctl -b -1 --no-pager | grep -iE "power key|powering (off|down)|critical temp|hardware protection|COMMAND=.*(poweroff|shutdown|halt|reboot)" | tail -n 20
    ```
 
+   The times in the log are the machine's, which `date` shows. Ubuntu Server runs on UTC unless it was told otherwise.
+
    | The log shows | It was |
    | --- | --- |
    | It ends with `Reached target poweroff.target` and `System Power Off` | An orderly shutdown: something asked for it, and the disks were closed properly. The second command says what |
-   | `Power key pressed short` | The power button |
+   | `Power key pressed short` | The power button. "Power" under "The machine" in [REMOTE.md](REMOTE.md) says how to make a short press do nothing |
    | `critical temperature reached` or `HARDWARE PROTECTION shutdown` | The kernel switching the machine off to protect it from heat. Deal with the heat before starting the job again: see "Heat" under "The machine" in [REMOTE.md](REMOTE.md) |
    | A `sudo` line with `COMMAND=` and `poweroff` or `shutdown` | Someone typed it |
    | It stops in the middle of ordinary lines, with none of the above | A power cut, a held power button, or the firmware cutting the power. Nothing was closed properly; Reth's database is built to survive that and may re-sync a little |
