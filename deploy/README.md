@@ -1,6 +1,6 @@
 # Running the stack at home
 
-Setting up a fresh machine for it, reaching it from a laptop, and what to do when that does not work are in [REMOTE.md](REMOTE.md).
+Setting up a fresh machine for it, reaching it from a laptop, and what to do when that does not work are in [REMOTE.md](REMOTE.md). What to type on that machine day to day, how to run long jobs in `tmux`, and what to do after it was off are in [RUNBOOK.md](RUNBOOK.md).
 
 One command starts everything the bot needs on the home machine:
 

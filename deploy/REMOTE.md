@@ -1,6 +1,6 @@
 # Setting up the node machine
 
-How to take a fresh machine to a running stack, and how to reach it from a laptop. `deploy/README.md` covers day-to-day use once it runs.
+How to take a fresh machine to a running stack, and how to reach it from a laptop. `deploy/README.md` covers day-to-day use once it runs, and [RUNBOOK.md](RUNBOOK.md) is what to type on the machine: long jobs in `tmux`, and getting going again after it was off.
 
 ## At a glance
 
@@ -83,7 +83,9 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    make snapshot
    ```
 
-   If it is interrupted, `LPBOT_SNAPSHOT_RESUME=1 make snapshot` carries on. Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
+   Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
+
+   If it is interrupted, or the machine restarts, the download does not come back by itself: start a new `tmux` session and run `LPBOT_SNAPSHOT_RESUME=1 make snapshot`, which carries on. [RUNBOOK.md](RUNBOOK.md) has the details.
 
    Postgres, Prometheus and Grafana do not have to wait for it: `make viewer` in a second session starts them now.
 
@@ -154,6 +156,8 @@ The node finds peers without any router setup. Forwarding 30303 and 9000 (both T
 ## After a reboot or a power cut
 
 Docker starts on boot and brings every container back. Check with `make status`. Reth shuts down cleanly given up to five minutes; a power cut can cost it a short re-sync, not the database.
+
+Jobs that were running in `tmux`, such as the snapshot download or `make gates`, do not come back: `tmux` sessions end with the machine. [RUNBOOK.md](RUNBOOK.md), "After the machine was off", says how to carry on with each and how to find out why the machine went off.
 
 ## Watching the node
 

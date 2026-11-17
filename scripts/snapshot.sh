@@ -60,6 +60,9 @@ avail_gb="$(df -Pk "$RETH_DIR" | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
 say "Downloading the ${profile#--} snapshot into $RETH_DIR (${avail_gb} GB free)."
 echo "Reth prints the size and an estimate of the time. The estimate settles after a few minutes."
 echo "Leave it running in tmux: Ctrl-b then d detaches, 'tmux attach' comes back."
+echo "If the machine restarts meanwhile, the download does not: start tmux again and run"
+echo "  LPBOT_SNAPSHOT_RESUME=1 make snapshot"
+echo "deploy/RUNBOOK.md has the rest."
 
 # A terminal lets Reth draw its progress display; without one it logs lines.
 tty_flags=()

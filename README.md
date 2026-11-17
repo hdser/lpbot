@@ -71,7 +71,7 @@ make load               # result tables into Postgres
 
 Then open Grafana on http://127.0.0.1:3000, folder `lpbot`, dashboard `lpbot: runs`. Click a run id to open that run in detail with the time range set to its window.
 
-The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it. From a laptop, `make tunnel HOST=<user>@<machine>` brings its Grafana to http://127.0.0.1:3001; the same file has a table of what goes wrong and why.
+The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it. From a laptop, `make tunnel HOST=<user>@<machine>` brings its Grafana to http://127.0.0.1:3001; the same file has a table of what goes wrong and why. `deploy/RUNBOOK.md` is what to type on the machine: long jobs in `tmux`, and what to do after it was switched off.
 
 Once the node is synced, one command runs every check against real chain data in order, then the backtest, the load into Grafana's database and the calibration:
 
@@ -123,7 +123,7 @@ crates/
   risk/       limits and exit paths
   exec/       planner, custody, signer client, submitter, journal
   cli/        the lpbot binary
-deploy/       Docker Compose stack and runbook
+deploy/       Docker Compose stack, machine setup (REMOTE.md) and runbook (RUNBOOK.md)
 scripts/      setup and status scripts
 config/       shared base configs (YAML)
 experiments/  one YAML file per experiment or sweep
