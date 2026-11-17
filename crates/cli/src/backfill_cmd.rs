@@ -4,15 +4,14 @@ use std::path::{Path, PathBuf};
 
 use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
-use lpbot_chain::uniswap_v3::{discover_pools, fetch_snapshot};
-use lpbot_data::backfill::{backfill_pool, ChainSource, NodeSource, PoolRef};
+use lpbot_chain::uniswap_v3::discover_pools;
+use lpbot_data::backfill::{
+    backfill_pool, verify_backfill, AtHead, BackfillError, NodeSource, PoolRef, Verified,
+};
 use lpbot_data::day::Day;
-use lpbot_data::lake::replay_from_snapshot;
-use lpbot_data::snapshot::SnapshotStore;
 use lpbot_data::store::DayState;
-use lpbot_venues::uniswap_v3::pool::Pool;
 
-use crate::chain_cmd::{Chain, HEAD_MARGIN};
+use crate::chain_cmd::{safe_head, Chain, HEAD_MARGIN};
 
 /// Where the stored history lives: `--data-dir`, then `LPBOT_DATA_DIR`,
 /// then `data/lake` under the current folder.
@@ -53,13 +52,55 @@ pub struct Stored {
     pub logs_written: usize,
 }
 
+/// The line `--verify` prints for a pool, and whether the pool passed.
+/// A pool with nothing stored yet has nothing to contradict the chain.
+pub fn verify_line(outcome: &Result<Option<Verified>, BackfillError>) -> (String, bool) {
+    match outcome {
+        Ok(None) => ("verify: nothing stored yet to replay".into(), true),
+        Ok(Some(verified)) if verified.differences.is_empty() => (
+            format!(
+                "verify: PASS, {} events since {} replay to the pool's state at block {}",
+                verified.events, verified.since, verified.block
+            ),
+            true,
+        ),
+        Ok(Some(verified)) => {
+            let mut text = format!(
+                "verify: FAIL at block {}, {} difference(s)",
+                verified.block,
+                verified.differences.len()
+            );
+            for difference in verified.differences.iter().take(10) {
+                text.push_str(&format!("\n    {difference}"));
+            }
+            (text, false)
+        }
+        Err(error) => (format!("verify: could not finish: {error}"), false),
+    }
+}
+
 pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
-    let source = NodeSource {
+    let node = NodeSource {
         client: &chain.client,
         head_margin: HEAD_MARGIN,
         log_chunk: args.log_chunk,
     };
-    let (head, head_time) = source.head()?;
+    // One head for the whole run: every pool is stored up to it and
+    // checked at it, however long the run takes.
+    let head = safe_head(&chain.client)?;
+    let kind = match &head.warning {
+        Some(warning) => {
+            println!("warning: {warning}");
+            format!("{HEAD_MARGIN} behind the head")
+        }
+        None => "finalized".to_string(),
+    };
+    let source = AtHead {
+        source: &node,
+        block: head.block,
+        time: head.time,
+    };
+    let (head, head_time) = (head.block, head.time);
     let from = first_day(args.from, args.days, head_time);
 
     let addresses: Vec<_> = chain.tokens.values().map(|(a, _)| *a).collect();
@@ -77,7 +118,7 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
             .collect::<Result<_>>()?
     };
     println!(
-        "backfilling {} pool(s) on {} from {from} to block {head}, into {}",
+        "backfilling {} pool(s) on {} from {from} to block {head} ({kind}), into {}",
         chosen.len(),
         chain.name,
         args.root.display()
@@ -117,6 +158,9 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
                 continue;
             }
         };
+        for note in report.notes() {
+            println!("  {note}");
+        }
         println!(
             "  {} day(s) written with {} logs, {} already stored",
             report.written.len(),
@@ -127,28 +171,10 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
         stored.logs_written += report.rows_written();
 
         if args.verify {
-            let snapshot = SnapshotStore::new(args.root)
-                .latest_on_or_before(&chain.name, pool.address, from)?
-                .ok_or_else(|| anyhow!("no stored snapshot for {:#x}", pool.address))?;
-            let since = snapshot.day;
-            let (replica, events) =
-                replay_from_snapshot(args.root, &chain.name, snapshot, Day::of_time(head_time))?;
-            let on_chain = Pool::from_snapshot(fetch_snapshot(
-                &chain.client,
-                pool.address,
-                report.head_block,
-            )?);
-            let differences = replica.differences(&on_chain);
-            if differences.is_empty() {
-                println!(
-                    "  verify: PASS, {events} events since {since} replay to the pool's state at block {}",
-                    report.head_block
-                );
-            } else {
-                println!("  verify: FAIL, {} difference(s)", differences.len());
-                for difference in differences.iter().take(10) {
-                    println!("    {difference}");
-                }
+            let outcome = verify_backfill(&source, args.root, &chain.name, pool.address, &report);
+            let (line, passed) = verify_line(&outcome);
+            println!("  {line}");
+            if !passed {
                 failed.push(pool.address);
             }
         }
@@ -179,6 +205,36 @@ mod tests {
         assert_eq!(first_day(None, 0, head_time).to_string(), "2026-11-12");
         let explicit: Day = "2026-01-01".parse().unwrap();
         assert_eq!(first_day(Some(explicit), 90, head_time), explicit);
+    }
+
+    #[test]
+    fn the_verify_line_says_where_it_compared_and_only_a_difference_or_an_error_fails() {
+        let day: Day = "2026-11-01".parse().unwrap();
+        let verified = |differences: Vec<String>| {
+            Ok(Some(Verified {
+                since: day,
+                events: 42,
+                block: 1_234,
+                differences,
+            }))
+        };
+        let (line, passed) = verify_line(&verified(vec![]));
+        assert!(passed);
+        assert!(
+            line.contains("PASS")
+                && line.contains("42 events since 2026-11-01")
+                && line.contains("block 1234"),
+            "{line}"
+        );
+        let (line, passed) = verify_line(&verified(vec!["liquidity: 1 vs 2".into()]));
+        assert!(!passed);
+        assert!(
+            line.contains("FAIL at block 1234") && line.contains("liquidity"),
+            "{line}"
+        );
+        assert!(verify_line(&Ok(None)).1);
+        let error = BackfillError::Inconsistent("no".into());
+        assert!(!verify_line(&Err(error)).1);
     }
 
     #[test]

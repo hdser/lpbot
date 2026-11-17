@@ -11,7 +11,43 @@ use lpbot_core::{ChainConfig, Config};
 use lpbot_venues::uniswap_v3::pool::Pool;
 
 /// Blocks to stay behind the head, so a reorg cannot change what was read.
+/// What is stored for good is closed at the finalized block instead, when
+/// the node reports one (`safe_head`).
 pub(crate) const HEAD_MARGIN: u64 = 5;
+
+/// The newest block that is safe to store for good, as number and time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeHead {
+    pub block: u64,
+    pub time: u64,
+    /// Set when the node reports no finalized block and the margin was
+    /// used instead; says what that means.
+    pub warning: Option<String>,
+}
+
+/// The node's finalized block, which no reorg can change. A node that
+/// does not serve the `finalized` tag gets `HEAD_MARGIN` blocks behind its
+/// head instead, with a warning.
+pub fn safe_head(client: &RpcClient) -> Result<SafeHead> {
+    if let Some((block, time)) = client.finalized_block()? {
+        return Ok(SafeHead {
+            block,
+            time,
+            warning: None,
+        });
+    }
+    let block = client.block_number()?.saturating_sub(HEAD_MARGIN);
+    let (time, _) = client.block_header(block)?;
+    Ok(SafeHead {
+        block,
+        time,
+        warning: Some(format!(
+            "the node reports no finalized block, so days are closed {HEAD_MARGIN} blocks behind \
+             its head, where a deep reorg could still change them. Check that its consensus \
+             client is running and synced (`make status`)"
+        )),
+    })
+}
 
 /// Universe tokens of a chain: symbol to address and decimals.
 pub type Tokens = BTreeMap<String, (Address, u8)>;
@@ -257,6 +293,53 @@ mod tests {
         assert!(checked_address("token", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc3").is_err());
         assert!(checked_address("token", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").is_ok());
         assert!(checked_address("token", "not an address").is_err());
+    }
+
+    #[test]
+    fn days_close_at_the_finalized_block_or_behind_the_head_with_a_warning() {
+        use lpbot_chain::testing::MockNode;
+        use serde_json::{json, Value};
+
+        let node = |finalized: Option<u64>| {
+            MockNode::start(move |method, params| match method {
+                "eth_blockNumber" => Ok(json!("0x3e8")),
+                "eth_getBlockByNumber" => {
+                    let number = match params[0].as_str().unwrap() {
+                        "finalized" => match finalized {
+                            Some(block) => block,
+                            None => return Err((-32602, "unknown block tag".into())),
+                        },
+                        hex => u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap(),
+                    };
+                    Ok(json!({
+                        "number": format!("0x{number:x}"),
+                        "timestamp": format!("0x{:x}", number * 12),
+                        "hash": format!("0x{number:064x}"),
+                    }))
+                }
+                _ => Ok(Value::Null),
+            })
+        };
+
+        let serving = node(Some(936));
+        let head = safe_head(&RpcClient::new(serving.url())).unwrap();
+        assert_eq!(
+            head,
+            SafeHead {
+                block: 936,
+                time: 936 * 12,
+                warning: None
+            }
+        );
+
+        let refusing = node(None);
+        let head = safe_head(&RpcClient::new(refusing.url())).unwrap();
+        assert_eq!((head.block, head.time), (995, 995 * 12));
+        let warning = head.warning.unwrap();
+        assert!(
+            warning.contains("no finalized block") && warning.contains("5 blocks"),
+            "{warning}"
+        );
     }
 
     #[test]
