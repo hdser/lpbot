@@ -19,7 +19,7 @@ use lpbot_core::experiment::ResolvedRun;
 use lpbot_data::backfill::NodeSource;
 use lpbot_data::cross_check::{day_blocks, differences};
 use lpbot_data::day::Day;
-use lpbot_data::fee_check::FeeCheckSummary;
+use lpbot_data::fee_check::{FeeCheckSummary, PositionReader};
 use lpbot_data::snapshot::SnapshotStore;
 use lpbot_data::store::{DayState, EventStore, StoredLog};
 use lpbot_sim::engine::Policy;
@@ -743,14 +743,22 @@ impl Gates {
 
     fn fees(&mut self) -> Result<Outcome> {
         let mut outcomes = Vec::new();
+        let root = self.options.root.clone();
+        let chain_name = self.options.chain_name.clone();
+        let positions = self.options.positions;
         for (pool, name) in self.traded_pools()? {
             println!("  {name}");
-            let summary = fees_cmd::run(
-                &self.options.root,
-                &self.options.chain_name,
-                pool,
-                self.options.positions,
-            )?;
+            // The node says which positions started empty and what the
+            // pool still owes them. Without one the check still runs, but
+            // confirms nothing, so the step stays open and cannot pass.
+            let reader: Option<&dyn PositionReader> = match self.chain() {
+                Ok(chain) => Some(&chain.client),
+                Err(error) => {
+                    println!("  no node ({error:#}): nothing the check finds is confirmed");
+                    None
+                }
+            };
+            let summary = fees_cmd::run_with(&root, &chain_name, pool, positions, reader)?;
             outcomes.push(fee_outcome(&name, &summary, self.options.positions));
         }
         Ok(combine(outcomes))

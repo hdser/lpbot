@@ -36,7 +36,9 @@ fn describe(check: &PositionCheck) -> String {
 /// Prints the check without the pool's own records of its positions and
 /// returns its counts. Every agreement it finds is unverified, so it
 /// passes only when nothing is asked for; `run_with` with a node is the
-/// check that can pass.
+/// check that can pass. The commands always pass a reader when they have a
+/// node; only the tests check without one.
+#[cfg(test)]
 pub fn run(root: &Path, chain: &str, pool: Address, needed: usize) -> Result<FeeCheckSummary> {
     run_with(root, chain, pool, needed, None)
 }
