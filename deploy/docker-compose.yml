@@ -78,7 +78,8 @@ services:
       retries: 10
 
   prometheus:
-    image: prom/prometheus
+    # Pinned, like the node: the versions the dashboards were checked with.
+    image: prom/prometheus:v3.16.0
     restart: unless-stopped
     depends_on:
       - reth
@@ -94,7 +95,7 @@ services:
     user: "${HOST_UID}:${HOST_GID}"
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:13.3.1
     restart: unless-stopped
     depends_on:
       - prometheus

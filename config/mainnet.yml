@@ -90,5 +90,5 @@ risk:                                # placeholders
   max_actions_per_day: 12
   max_swap_slippage_bps: 8
   max_pool_vs_reference_bps: 15
-  loss_window: 30d                   # window over which run.loss_limit_pct is measured
+  loss_window: 30d                   # not read yet: run.loss_limit_pct is measured from starting capital over the whole run
   heartbeat_timeout: 90s

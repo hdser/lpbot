@@ -64,7 +64,9 @@ fi
 echo
 echo "Disk"
 if [[ -f "$DEPLOY/.env" ]]; then
-  data_dir="$(sed -n 's/^DATA_DIR=//p' "$DEPLOY/.env" | head -n 1)"
+  # shellcheck source=scripts/env.sh
+  . "$ROOT/scripts/env.sh"
+  data_dir="$(env_setting "$DEPLOY/.env" DATA_DIR)"
   case "$data_dir" in
     /*) ;;
     *) data_dir="$ROOT/${data_dir#./}" ;;
