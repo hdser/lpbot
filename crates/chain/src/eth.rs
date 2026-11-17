@@ -16,6 +16,15 @@ pub struct Log {
     pub transaction_hash: B256,
 }
 
+/// How far a node that is still syncing has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncProgress {
+    /// The newest block the node has processed.
+    pub current: u64,
+    /// The newest block the node knows of.
+    pub highest: u64,
+}
+
 fn bad(method: &str, reason: impl Into<String>) -> RpcError {
     RpcError::BadResponse {
         method: method.to_string(),
@@ -95,6 +104,25 @@ impl RpcClient {
     /// Chain id of the endpoint (1 for Ethereum mainnet).
     pub fn chain_id(&self) -> RpcResult<u64> {
         parse_quantity("eth_chainId", &self.call("eth_chainId", json!([]))?)
+    }
+
+    /// `None` when the node says it has caught up with the chain, else how
+    /// far it has got. A node that reports no block numbers counts as
+    /// syncing from zero.
+    pub fn syncing(&self) -> RpcResult<Option<SyncProgress>> {
+        const M: &str = "eth_syncing";
+        let reply = self.call(M, json!([]))?;
+        if reply == Value::Bool(false) {
+            return Ok(None);
+        }
+        let block = |name: &str| match reply.get(name) {
+            Some(value) => parse_quantity(M, value),
+            None => Ok(0),
+        };
+        Ok(Some(SyncProgress {
+            current: block("currentBlock")?,
+            highest: block("highestBlock")?,
+        }))
     }
 
     /// Timestamp and hash of a block.
@@ -269,6 +297,44 @@ mod tests {
         );
         assert_eq!(parse_bytes("m", &json!("0x")), Ok(vec![]));
         assert!(parse_bytes("m", &json!("0xzz")).is_err());
+    }
+
+    #[test]
+    fn a_node_says_whether_it_is_still_syncing_and_how_far_it_is() {
+        let synced = MockNode::start(|method, _| {
+            assert_eq!(method, "eth_syncing");
+            Ok(json!(false))
+        });
+        assert_eq!(RpcClient::new(synced.url()).syncing(), Ok(None));
+
+        // Reth answers with more fields than the two that matter.
+        let behind = MockNode::start(|_, _| {
+            Ok(json!({
+                "startingBlock": "0x0",
+                "currentBlock": "0x64",
+                "highestBlock": "0xc8",
+                "stages": [{"name": "Headers", "block": "0xc8"}]
+            }))
+        });
+        assert_eq!(
+            RpcClient::new(behind.url()).syncing(),
+            Ok(Some(SyncProgress {
+                current: 100,
+                highest: 200
+            }))
+        );
+
+        // Anything but `false` means syncing, even without block numbers.
+        let vague = MockNode::start(|_, _| Ok(json!(true)));
+        assert_eq!(
+            RpcClient::new(vague.url()).syncing(),
+            Ok(Some(SyncProgress {
+                current: 0,
+                highest: 0
+            }))
+        );
+        let broken = MockNode::start(|_, _| Ok(json!({"currentBlock": 12})));
+        assert!(RpcClient::new(broken.url()).syncing().is_err());
     }
 
     #[test]

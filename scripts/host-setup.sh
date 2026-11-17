@@ -111,6 +111,9 @@ Next, from the repository folder:
   make up                           # start everything
   make status                       # watch it catch up
 
+deploy/RUNBOOK.md says how to come back to a job in tmux and what to do
+after the machine was off.
+
 RPC, database and dashboards listen on this machine only. From your laptop,
 \`make tunnel HOST=<user>@<this machine>\` brings Grafana and the RPC to it.
 EOF

@@ -12,9 +12,7 @@ use lpbot_data::snapshot::SnapshotStore;
 use lpbot_data::store::DayState;
 use lpbot_venues::uniswap_v3::pool::Pool;
 
-use crate::chain_cmd::Chain;
-
-const HEAD_MARGIN: u64 = 5;
+use crate::chain_cmd::{Chain, HEAD_MARGIN};
 
 /// Where the stored history lives: `--data-dir`, then `LPBOT_DATA_DIR`,
 /// then `data/lake` under the current folder.
@@ -44,7 +42,18 @@ pub struct BackfillArgs<'a> {
     pub verify: bool,
 }
 
-pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<()> {
+/// What a backfill run did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stored {
+    /// The first day that is stored.
+    pub from: Day,
+    pub pools: usize,
+    /// Days and logs written by this run; days stored before are not counted.
+    pub days_written: usize,
+    pub logs_written: usize,
+}
+
+pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
     let source = NodeSource {
         client: &chain.client,
         head_margin: HEAD_MARGIN,
@@ -74,6 +83,12 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<()> {
         args.root.display()
     );
 
+    let mut stored = Stored {
+        from,
+        pools: chosen.len(),
+        days_written: 0,
+        logs_written: 0,
+    };
     let mut failed = Vec::new();
     for pool in chosen {
         println!("pool {:#x}", pool.address);
@@ -108,6 +123,8 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<()> {
             report.rows_written(),
             report.skipped
         );
+        stored.days_written += report.written.len();
+        stored.logs_written += report.rows_written();
 
         if args.verify {
             let snapshot = SnapshotStore::new(args.root)
@@ -148,7 +165,7 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<()> {
                 .join(", ")
         );
     }
-    Ok(())
+    Ok(stored)
 }
 
 #[cfg(test)]

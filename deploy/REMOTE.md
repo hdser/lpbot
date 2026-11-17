@@ -1,6 +1,6 @@
 # Setting up the node machine
 
-How to take a fresh machine to a running stack, and how to reach it from a laptop. `deploy/README.md` covers day-to-day use once it runs.
+How to take a fresh machine to a running stack, and how to reach it from a laptop. `deploy/README.md` covers day-to-day use once it runs, and [RUNBOOK.md](RUNBOOK.md) is what to type on the machine: long jobs in `tmux`, and getting going again after it was off.
 
 ## At a glance
 
@@ -34,7 +34,15 @@ Everything is done over SSH. No service on the node machine is open to the netwo
 - **Heat:** look at `sensors` (package `lm-sensors`) on the idle machine. A small box with a quiet fan profile can idle above 60 °C and push the NVMe past its warning temperature under load; the drive then slows itself down. Set the BIOS fan profile to its coolest setting and check that the drive's thermal pad makes contact.
 - **Memory:** 32 GB is comfortable. 16 GB is the floor.
 - **Network:** a wired connection. The first download is about 2 TB.
-- **Power:** set the BIOS to power on after a power loss, so the machine comes back by itself.
+- **Power:** set the BIOS to power on after a power loss, so the machine comes back by itself. A short press of the power button switches Ubuntu off in an orderly way, which on a box within reach can happen by accident and ends every job that was running. To make a short press do nothing:
+
+  ```sh
+  sudo mkdir -p /etc/systemd/logind.conf.d
+  printf '[Login]\nHandlePowerKey=ignore\n' | sudo tee /etc/systemd/logind.conf.d/power-key.conf
+  sudo systemctl restart systemd-logind      # or leave it to the next boot
+  ```
+
+  `sudo poweroff` still switches the machine off, and holding the button still cuts the power.
 
 ## Standalone, or under a hypervisor
 
@@ -83,7 +91,9 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    make snapshot
    ```
 
-   If it is interrupted, `LPBOT_SNAPSHOT_RESUME=1 make snapshot` carries on. Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
+   Run it inside `tmux` (`tmux new -s node`; Ctrl-b then d detaches; `tmux attach -t node` comes back), so a dropped SSH session does not stop it. Reth prints the size and an estimate of the time, which settles after a few minutes.
+
+   If it is interrupted, or the machine restarts, the download does not come back by itself: start a new `tmux` session and run `LPBOT_SNAPSHOT_RESUME=1 make snapshot`, which carries on with the same snapshot. Reth publishes a new one every day; the first run writes down which one it took in `DATA_DIR/reth-snapshot-manifest`, so a resume does not switch to a newer one and download parts of it again. [RUNBOOK.md](RUNBOOK.md) has the details.
 
    Postgres, Prometheus and Grafana do not have to wait for it: `make viewer` in a second session starts them now.
 
@@ -94,7 +104,13 @@ Under Proxmox it works too, as a VM with the NVMe drive passed through to it. Do
    make status      # repeat until both clients say they are synced
    ```
 
-7. **Build the bot and run the checks** in `deploy/README.md`, "First check after the sync": `lpbot pools`, `lpbot verify-pool`, `make history`, `lpbot verify-fees`, `make backtest`, `make calibrate`, `make load`.
+7. **Run the checks.** Once both clients are synced, inside `tmux`:
+
+   ```sh
+   make gates
+   ```
+
+   It builds the bot, checks it against real chain data step by step, runs the example backtest, loads the results into Grafana's database and calibrates the adaptive decision. It stops at the first step that fails and ends with a summary; the whole output is kept under `logs/`. `deploy/README.md`, "First check after the sync", describes each step and how to carry on from one.
 
 ## Reaching it from your laptop
 
@@ -148,6 +164,8 @@ The node finds peers without any router setup. Forwarding 30303 and 9000 (both T
 ## After a reboot or a power cut
 
 Docker starts on boot and brings every container back. Check with `make status`. Reth shuts down cleanly given up to five minutes; a power cut can cost it a short re-sync, not the database.
+
+Jobs that were running in `tmux`, such as the snapshot download or `make gates`, do not come back: `tmux` sessions end with the machine. [RUNBOOK.md](RUNBOOK.md), "After the machine was off", says how to carry on with each and how to find out why the machine went off.
 
 ## Watching the node
 

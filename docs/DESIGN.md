@@ -315,6 +315,7 @@ All of these are the fixed starting point the calibrator has to beat, not tuned 
 
 - Reproduce the fees actually collected by at least 20 real historical positions in the pool, to within 0.1%. `lpbot verify-fees` does this from the stored logs: it follows every position that starts empty inside the history, adds up what the replica's fee growth says the pool owed it, and compares that with its `Collect` events.
 - Differential-test the math port against the deployed pool on a local fork (revm or anvil) with randomized swaps and mints.
+- Compare one stored day of a pool, log for log, with a public endpoint. Replaying the stored events to the pool's state on the chain cannot see a missing event that changes no state, such as a `Collect`; this can. It is the one use of a public endpoint in the research pipeline, and nothing is decided on its data: it only confirms or contradicts what the local node gave.
 - Walk-forward only: fit parameters on one window, score on the next. Never report in-sample results.
 - Choose pools by a rule fixed in advance, not by looking at which pools did well.
 
@@ -640,6 +641,7 @@ risk:
 | --- | --- |
 | `lpbot backfill --pool <address> --from <date>` | Pulls history into the Parquet lake: one file per pool and day, plus a snapshot of the pool before the first day. `--verify` replays what is stored and compares it with the pool on the chain |
 | `lpbot verify-fees <address>` | Compares the replica's fees with what real positions in the stored history collected |
+| `lpbot gates <experiment.yml>` | Once the node is synced, runs every check against real chain data in order: node synced, pool discovery, the replica against every pool over recent blocks, the backfill with its replay, one stored day against a public endpoint, the fee check. Then the backtest, the load into Postgres and the calibration. Stops at the first step that fails and ends with a summary |
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |

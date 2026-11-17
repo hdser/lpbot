@@ -58,11 +58,12 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 ## The node machine
 
-The owner runs the stack on a NUC (Ubuntu Server 26.04, 4 TB NVMe, 32 GB of memory), set up with `deploy/REMOTE.md`. Cloud sessions cannot reach it: the owner runs the commands and pastes the output.
+The owner runs the stack on a NUC (Ubuntu Server 26.04, 4 TB NVMe, 32 GB of memory), set up with `deploy/REMOTE.md`. Cloud sessions cannot reach it: the owner runs the commands and pastes the output. `deploy/RUNBOOK.md` is what he types there: long jobs run in `tmux`, services come back after a restart and jobs do not. Give him commands from it, and keep it in step when a job or its resume command changes.
 
-- Done there, November 2026: `scripts/host-setup.sh`, a 3.4 TB data volume at `/data`, `make env`, `make snapshot` (archive, 1.72 TB to download, 2.88 TB unpacked).
+- Done there, November 2026: `scripts/host-setup.sh`, a 3.4 TB data volume at `/data`, `make env`.
+- Under way: `make snapshot` (archive, 1.72 TB to download, 2.88 TB unpacked). A press of the power button on 17 November 2026 switched the machine off in the middle of it (`Power key pressed short` in the journal: not heat, not a crash). The first resume, with a script that did not name a snapshot, started on a newer one (26428655 instead of 26414278); the owner stopped it and resumed 26414278 by hand with `--manifest-url`. `make snapshot` now writes the manifest URL it began with to `DATA_DIR/reth-snapshot-manifest` and resumes that one. How much the resume reused has not been reported back yet.
 - Running there: Postgres, Prometheus and Grafana (`make viewer`), reached from the laptop with `make tunnel` on port 3001.
-- Not yet run there: `make up` with the node, and every check against real chain data.
+- Not yet run there: `make up` with the node, and `make gates` (every check against real chain data).
 - The start-up script creates the six result tables empty (`deploy/postgres/schema.sql`, generated from `lpbot_sim::tables` and kept in step by a test), so dashboards on a database without runs show no data instead of an error.
 - The owner chose to keep the full archive for now and prune later. Do not reopen that; do keep an eye on disk space, which is tighter than first estimated.
 - Known hardware limits: the drive is a Kingston NV2 (no memory cache; it measured 45k read and 15k write IOPS, falling to about half within ten minutes), and the box runs hot (NVMe near its critical temperature when idle). If the node falls behind, suspect these before the software.
@@ -73,10 +74,10 @@ On the owner's laptop, `make demo`, `make viewer` and `make load` are tested, an
 
 In this order. Each item lists the gate it must pass.
 
-Status: all seven items are written and unit tested, and `experiments/demo-patience.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine:
+Status: all seven items are written and unit tested, and `experiments/demo-patience.yml` runs end to end on a simulated pool history (`lpbot demo-data`, `lpbot_data::synth`). None of it has run against a real node yet, so these gates are still open on the owner's machine. `make gates` (`lpbot gates`, in `crates/cli/src/gates_cmd.rs`) runs them all in order once the node is synced, then the backtest, the load and the calibration; it stops at the first step that fails and keeps its output under `logs/`. Its steps against a node are tested with a mock node only; ask the owner for the summary it prints.
 
-- Items 1 and 2: `lpbot verify-pool`.
-- Item 3: `lpbot backfill --verify`; the row-count check against an independent source is still to do by hand.
+- Items 1 and 2: `lpbot verify-pool`; the `replica` step runs it on every pool of the universe.
+- Item 3: `lpbot backfill --verify`, and the `row-count` step, which compares the newest complete stored day of the traded pool log for log with a public endpoint (`lpbot_data::cross_check`). It stays open when no endpoint answers.
 - Item 6: `lpbot verify-fees <pool>` on a busy pool with a few months stored. It follows every position that starts inside the stored history and compares what it collected with the replica's fee growth inside its range (`lpbot_data::fee_check`). This checks the replica's fee accounting, which the engine's fee share is built on.
 - Item 7: `lpbot run experiments/width-and-patience-eth.yml` on real history.
 
