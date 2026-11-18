@@ -83,9 +83,10 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
 
    Not sure whether the download had finished? Run it: Reth passes over what it already has. If it refuses because `reth-snapshot-manifest` is missing, it says how to name the snapshot you began with. Reth lists the snapshots of the last two weeks or so, so a download should not be left paused longer than that. Once the node has been started with `make up`, the command refuses to run: the database is the node's own by then, and a download would overwrite it. `make up` writes `DATA_DIR/reth-node-started` the first time it starts the node, and that file is what tells. The other way round, `make up` refuses to start the node while a download is running or unfinished.
 
-4. **Find out why it went off**, if you do not know. The log of the previous start says how it ended, and what asked for it:
+4. **Find out why it went off**, if you do not know. The log of the start that went off says how it ended, and what asked for it. `-b -1` is the start before the current one. If the machine was switched on more than once since, it is an earlier one: the first command lists the starts with their times, and `-b -2`, `-b -3` pick them.
 
    ```sh
+   journalctl --list-boots --no-pager | tail -n 5
    sudo journalctl -b -1 -n 40 --no-pager
    sudo journalctl -b -1 --no-pager | grep -iE "power key|powering (off|down)|critical temp|hardware protection|COMMAND=.*(poweroff|shutdown|halt|reboot)" | tail -n 20
    ```
@@ -95,10 +96,10 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
    | The log shows | It was |
    | --- | --- |
    | It ends with `Reached target poweroff.target` and `System Power Off` | An orderly shutdown: something asked for it, and the disks were closed properly. The second command says what |
-   | `Power key pressed short` | The power button. "Power" under "The machine" in [REMOTE.md](REMOTE.md) says how to make a short press do nothing |
+   | `Power key pressed short` | The power button. "Power" under "The machine" in [REMOTE.md](REMOTE.md) says how to make a short press do nothing, and how to check that the setting is in force: a file that was written but never read leaves the button working |
    | `critical temperature reached` or `HARDWARE PROTECTION shutdown` | The kernel switching the machine off to protect it from heat. Deal with the heat before starting the job again: see "Heat" under "The machine" in [REMOTE.md](REMOTE.md) |
    | A `sudo` line with `COMMAND=` and `poweroff` or `shutdown` | Someone typed it |
-   | It stops in the middle of ordinary lines, with none of the above | A power cut, a held power button, or the firmware cutting the power. Nothing was closed properly; Reth's database is built to survive that and may re-sync a little |
+   | It stops in the middle of ordinary lines, with none of the above | A power cut, a held power button, or the firmware cutting the power. Nothing was closed properly; Reth's database is built to survive that and may re-sync a little. The log reaches the disk every few minutes, so the cut can be up to five minutes after the last line |
 
 ## Switch it off on purpose
 

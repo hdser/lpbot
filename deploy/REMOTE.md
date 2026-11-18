@@ -39,8 +39,11 @@ Everything is done over SSH. No service on the node machine is open to the netwo
   ```sh
   sudo mkdir -p /etc/systemd/logind.conf.d
   printf '[Login]\nHandlePowerKey=ignore\n' | sudo tee /etc/systemd/logind.conf.d/power-key.conf
-  sudo systemctl restart systemd-logind      # or leave it to the next boot
+  sudo systemctl reload systemd-logind
+  busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager HandlePowerKey
   ```
+
+  The last line must print `s "ignore"`. The file alone changes nothing until the login service reads it, at the next boot or on `reload`; while the check prints `s "poweroff"`, a press still switches the machine off. `reload` only re-reads the setting and leaves every session and job alone, so it is safe while a download runs. (A systemd older than Ubuntu 26.04's that answers "not applicable" needs `restart` instead.)
 
   `sudo poweroff` still switches the machine off, and holding the button still cuts the power.
 
