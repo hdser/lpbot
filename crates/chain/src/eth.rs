@@ -199,8 +199,30 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
     ) -> RpcResult<Vec<Log>> {
+        self.get_logs_many(&[address], topic0s, from_block, to_block)
+    }
+
+    /// Logs of several contracts in a block range, in one request and in
+    /// chain order. The node reads each block's receipts once however many
+    /// contracts are asked about, so this costs about what one contract
+    /// does; asking contract by contract reads every block again for each.
+    /// No contracts means no logs: the node would read an empty list as
+    /// "every contract". A log of a contract that was not asked for is an
+    /// error.
+    pub fn get_logs_many(
+        &self,
+        addresses: &[Address],
+        topic0s: &[B256],
+        from_block: u64,
+        to_block: u64,
+    ) -> RpcResult<Vec<Log>> {
+        let address = match addresses {
+            [] => return Ok(Vec::new()),
+            [one] => json!(format!("{one:#x}")),
+            many => json!(many.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
+        };
         let mut filter = json!({
-            "address": format!("{address:#x}"),
+            "address": address,
             "fromBlock": quantity(from_block),
             "toBlock": quantity(to_block),
         });
@@ -215,6 +237,15 @@ impl RpcClient {
             .iter()
             .map(parse_log)
             .collect::<RpcResult<Vec<_>>>()?;
+        if let Some(stray) = logs.iter().find(|l| !addresses.contains(&l.address)) {
+            return Err(bad(
+                "eth_getLogs",
+                format!(
+                    "a log of {:#x} in block {}, which was not asked for",
+                    stray.address, stray.block_number
+                ),
+            ));
+        }
         logs.sort_by_key(|l| (l.block_number, l.log_index));
         Ok(logs)
     }
@@ -230,14 +261,37 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
         initial_chunk: u64,
+        on_progress: impl FnMut(u64, usize),
+    ) -> RpcResult<Vec<Log>> {
+        self.get_logs_chunked_many(
+            &[address],
+            topic0s,
+            from_block,
+            to_block,
+            initial_chunk,
+            on_progress,
+        )
+    }
+
+    /// `get_logs_many` for a long range, in chunks as `get_logs_chunked`.
+    pub fn get_logs_chunked_many(
+        &self,
+        addresses: &[Address],
+        topic0s: &[B256],
+        from_block: u64,
+        to_block: u64,
+        initial_chunk: u64,
         mut on_progress: impl FnMut(u64, usize),
     ) -> RpcResult<Vec<Log>> {
         let mut logs = Vec::new();
+        if addresses.is_empty() {
+            return Ok(logs);
+        }
         let mut chunk = initial_chunk.max(1);
         let mut start = from_block;
         while start <= to_block {
             let end = to_block.min(start.saturating_add(chunk - 1));
-            match self.get_logs(address, topic0s, start, end) {
+            match self.get_logs_many(addresses, topic0s, start, end) {
                 Ok(mut batch) => {
                     logs.append(&mut batch);
                     on_progress(end, logs.len());
@@ -426,6 +480,79 @@ mod tests {
         });
         let client = RpcClient::new(node.url());
         assert!(client.get_logs(pool(), &[], 1, 1).is_err());
+    }
+
+    fn other() -> Address {
+        "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"
+            .parse()
+            .unwrap()
+    }
+
+    fn log_of(address: Address, block: u64, index: u64) -> Value {
+        let mut log = log_json(block, index);
+        log["address"] = json!(format!("{address:#x}"));
+        log
+    }
+
+    #[test]
+    fn logs_of_several_contracts_come_from_one_request_in_chain_order() {
+        let requests = Arc::new(Mutex::new(0usize));
+        let seen = requests.clone();
+        let node = MockNode::start(move |method, params| {
+            assert_eq!(method, "eth_getLogs");
+            *seen.lock().unwrap() += 1;
+            assert_eq!(
+                params[0]["address"],
+                json!([
+                    "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+                    "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"
+                ])
+            );
+            Ok(json!([
+                log_of(other(), 150, 1),
+                log_of(pool(), 120, 3),
+                log_of(pool(), 150, 0)
+            ]))
+        });
+        let client = RpcClient::new(node.url());
+        let logs = client
+            .get_logs_many(&[pool(), other()], &[], 100, 200)
+            .unwrap();
+        let order: Vec<(Address, u64, u64)> = logs
+            .iter()
+            .map(|l| (l.address, l.block_number, l.log_index))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(pool(), 120, 3), (pool(), 150, 0), (other(), 150, 1)]
+        );
+        assert_eq!(*requests.lock().unwrap(), 1);
+
+        // In chunks, still one request per chunk for both contracts.
+        *requests.lock().unwrap() = 0;
+        client
+            .get_logs_chunked_many(&[pool(), other()], &[], 100, 299, 100, |_, _| {})
+            .unwrap();
+        assert_eq!(*requests.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_log_of_a_contract_not_asked_for_is_an_error() {
+        let node = MockNode::start(|_, _| Ok(json!([log_of(pool(), 5, 0), log_of(other(), 6, 0)])));
+        let client = RpcClient::new(node.url());
+        let error = client.get_logs(pool(), &[], 1, 10).unwrap_err();
+        assert!(error.to_string().contains("not asked for"), "{error}");
+    }
+
+    #[test]
+    fn no_contracts_means_no_logs_and_no_request() {
+        let node = MockNode::start(|_, _| panic!("no request should be sent"));
+        let client = RpcClient::new(node.url());
+        assert_eq!(client.get_logs_many(&[], &[], 1, 10), Ok(vec![]));
+        assert_eq!(
+            client.get_logs_chunked_many(&[], &[], 1, 10, 5, |_, _| {}),
+            Ok(vec![])
+        );
     }
 
     #[test]

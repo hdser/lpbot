@@ -6,7 +6,7 @@ use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
 use lpbot_chain::uniswap_v3::discover_pools;
 use lpbot_data::backfill::{
-    backfill_pool, verify_backfill, AtHead, BackfillError, NodeSource, PoolRef, Verified,
+    backfill_pools, verify_backfill, AtHead, BackfillError, NodeSource, PoolDay, PoolRef, Verified,
 };
 use lpbot_data::day::Day;
 use lpbot_data::store::DayState;
@@ -50,6 +50,25 @@ pub struct Stored {
     /// Days and logs written by this run; days stored before are not counted.
     pub days_written: usize,
     pub logs_written: usize,
+}
+
+/// The line printed for a day: how many pools this run fetched it for and
+/// their logs. Nothing for a day every pool had stored already.
+pub fn day_line(day: Day, seen: &[PoolDay]) -> Option<String> {
+    let fetched: Vec<&PoolDay> = seen.iter().filter(|p| p.fetched).collect();
+    if fetched.is_empty() {
+        return None;
+    }
+    let rows: usize = fetched.iter().map(|p| p.rows).sum();
+    let open = if fetched.iter().any(|p| p.state == DayState::Partial) {
+        " (day in progress)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "  {day}  {:>3} pool(s)  {rows:>8} logs{open}",
+        fetched.len()
+    ))
 }
 
 /// The line `--verify` prints for a pool, and whether the pool passed.
@@ -131,25 +150,32 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
         logs_written: 0,
     };
     let mut failed = Vec::new();
-    for pool in chosen {
-        println!("pool {:#x}", pool.address);
-        let reference = PoolRef {
+    let references: Vec<PoolRef> = chosen
+        .iter()
+        .map(|pool| PoolRef {
             address: pool.address,
             token0: pool.token0,
             token1: pool.token1,
-        };
-        let outcome = backfill_pool(
-            &source,
-            args.root,
-            &chain.name,
-            reference,
-            from,
-            |day, rows, state| match state {
-                DayState::Partial => println!("  {day}  {rows:>7} logs (day in progress)"),
-                _ if rows > 0 => println!("  {day}  {rows:>7} logs"),
-                _ => {}
-            },
-        );
+        })
+        .collect();
+    // Day by day, every pool that needs the day at once.
+    let outcomes = backfill_pools(
+        &source,
+        args.root,
+        &chain.name,
+        &references,
+        from,
+        |day, seen| {
+            if let Some(line) = day_line(day, seen) {
+                println!("{line}");
+            }
+        },
+    )
+    .map_err(|error| {
+        anyhow!("the backfill stopped: {error}. Run it again: it carries on from what is stored")
+    })?;
+    for (pool, outcome) in chosen.iter().zip(outcomes) {
+        println!("pool {:#x}", pool.address);
         let report = match outcome {
             Ok(report) => report,
             Err(error) => {
@@ -235,6 +261,40 @@ mod tests {
         assert!(verify_line(&Ok(None)).1);
         let error = BackfillError::Inconsistent("no".into());
         assert!(!verify_line(&Err(error)).1);
+    }
+
+    #[test]
+    fn a_day_line_counts_the_pools_fetched_and_says_when_the_day_is_open() {
+        let day: Day = "2026-11-01".parse().unwrap();
+        let entry = |byte, rows, state, fetched| PoolDay {
+            pool: Address::repeat_byte(byte),
+            rows,
+            state,
+            fetched,
+        };
+        assert_eq!(day_line(day, &[]), None);
+        assert_eq!(
+            day_line(day, &[entry(1, 0, DayState::Complete, false)]),
+            None
+        );
+        let line = day_line(
+            day,
+            &[
+                entry(1, 0, DayState::Complete, false),
+                entry(2, 120, DayState::Complete, true),
+                entry(3, 30, DayState::Complete, true),
+            ],
+        )
+        .unwrap();
+        assert!(
+            line.contains("2026-11-01")
+                && line.contains("2 pool(s)")
+                && line.contains("150 logs")
+                && !line.contains("in progress"),
+            "{line}"
+        );
+        let open = day_line(day, &[entry(2, 5, DayState::Partial, true)]).unwrap();
+        assert!(open.ends_with("(day in progress)"), "{open}");
     }
 
     #[test]
