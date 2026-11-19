@@ -8,6 +8,7 @@ pub mod day;
 pub mod fee_check;
 pub mod lake;
 pub mod odds;
+pub mod pool_stats;
 pub mod snapshot;
 pub mod store;
 pub mod synth;

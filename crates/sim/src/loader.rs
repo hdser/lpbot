@@ -11,8 +11,10 @@ use std::path::Path;
 use postgres::Client;
 
 use crate::engine::Output;
-use crate::tables::{read_table, result_tables, Column, RunInfo, Table, TableError};
-use crate::RESULT_TABLES;
+use crate::tables::{
+    pool_tables, read_table, result_tables, Column, PoolInfo, RunInfo, Table, TableError,
+};
+use crate::{POOL_TABLES, RESULT_TABLES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -57,11 +59,22 @@ fn sql_type(column: &Column) -> &'static str {
     }
 }
 
+/// The column a table's rows are replaced by: the run for a result table,
+/// the pool for a pool table.
+pub fn key_column(table: &str) -> &'static str {
+    if POOL_TABLES.contains(&table) {
+        "pool"
+    } else {
+        "run_id"
+    }
+}
+
 /// Statements that make sure the table exists with every column of `table`.
 pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     let name = identifier(&table.name)?;
+    let key = key_column(name);
     let mut statements = vec![format!(
-        "CREATE TABLE IF NOT EXISTS {name} (run_id text NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS {name} ({key} text NOT NULL)"
     )];
     for (column, values) in &table.columns {
         let column = identifier(column)?;
@@ -71,21 +84,24 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
         ));
     }
     statements.push(format!(
-        "CREATE INDEX IF NOT EXISTS {name}_run_id ON {name} (run_id)"
+        "CREATE INDEX IF NOT EXISTS {name}_{key} ON {name} ({key})"
     ));
     Ok(statements)
 }
 
-/// The six result tables as SQL, for a database that has no runs yet.
+/// The six result tables and the two pool tables as SQL, for a database
+/// that has no runs yet.
 ///
 /// The viewer's dashboards query these tables. Creating them empty lets a
 /// fresh database show "no data" instead of an error. The same text is
 /// checked in as `deploy/postgres/schema.sql`, which the start-up script
 /// applies; a test keeps the two in step.
 pub fn full_schema_sql() -> String {
-    let tables = result_tables(&RunInfo::default(), &Output::default(), &[]);
+    let mut tables = result_tables(&RunInfo::default(), &Output::default(), &[]);
+    tables.extend(pool_tables(&PoolInfo::default(), &[], &[]));
     let mut sql = String::from(
-        "-- The six result tables, empty. Generated from the table definitions in\n\
+        "-- The six result tables and the two pool tables, empty. Generated from the\n\
+         -- table definitions in\n\
          -- crates/sim/src/tables.rs; do not edit by hand. To regenerate:\n\
          --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file\n",
     );
@@ -147,9 +163,11 @@ pub fn copy_text(table: &Table) -> String {
     out
 }
 
-/// Replaces a run's rows of one table. Returns the rows written.
-pub fn load_table(client: &mut Client, run_id: &str, table: &Table) -> Result<usize, LoadError> {
+/// Replaces the rows of one run, or of one pool for a pool table. Returns
+/// the rows written.
+pub fn load_table(client: &mut Client, key: &str, table: &Table) -> Result<usize, LoadError> {
     let name = identifier(&table.name)?;
+    let key_name = key_column(name);
     let database = |what: &str| {
         let what = what.to_string();
         move |source| LoadError::Database { what, source }
@@ -160,9 +178,9 @@ pub fn load_table(client: &mut Client, run_id: &str, table: &Table) -> Result<us
             .batch_execute(&statement)
             .map_err(database(&statement))?;
     }
-    let delete = format!("DELETE FROM {name} WHERE run_id = $1");
+    let delete = format!("DELETE FROM {name} WHERE {key_name} = $1");
     transaction
-        .execute(&delete, &[&run_id])
+        .execute(&delete, &[&key])
         .map_err(database(&delete))?;
 
     let columns = table
@@ -188,13 +206,16 @@ pub fn load_table(client: &mut Client, run_id: &str, table: &Table) -> Result<us
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadReport {
     pub runs: usize,
+    /// Pools whose tables were loaded.
+    pub pools: usize,
     pub rows: usize,
 }
 
-/// Loads every run found under `results` into the database.
+/// Loads every run, and every pool's tables, found under `results` into
+/// the database.
 pub fn load_results(client: &mut Client, results: &Path) -> Result<LoadReport, LoadError> {
     let mut report = LoadReport::default();
-    for table in RESULT_TABLES {
+    for table in RESULT_TABLES.into_iter().chain(POOL_TABLES) {
         let dir = results.join(table);
         if !dir.is_dir() {
             continue;
@@ -210,12 +231,14 @@ pub fn load_results(client: &mut Client, results: &Path) -> Result<LoadReport, L
             .collect();
         files.sort();
         for path in files {
-            let Some(run_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(key) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            report.rows += load_table(client, run_id, &read_table(&path)?)?;
-            if table == "runs" {
-                report.runs += 1;
+            report.rows += load_table(client, key, &read_table(&path)?)?;
+            match table {
+                "runs" => report.runs += 1,
+                "pool_series" => report.pools += 1,
+                _ => {}
             }
         }
     }
@@ -298,6 +321,13 @@ mod tests {
         for table in crate::RESULT_TABLES {
             assert!(current.contains(&format!("CREATE TABLE IF NOT EXISTS {table} ")));
             assert!(current.contains(&format!("CREATE INDEX IF NOT EXISTS {table}_run_id")));
+        }
+        // And the pool tables, keyed by pool.
+        for table in crate::POOL_TABLES {
+            assert!(current.contains(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (pool text NOT NULL)"
+            )));
+            assert!(current.contains(&format!("CREATE INDEX IF NOT EXISTS {table}_pool")));
         }
         assert!(current
             .contains("ALTER TABLE series ADD COLUMN IF NOT EXISTS price_lower double precision;"));

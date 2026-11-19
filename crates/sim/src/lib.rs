@@ -22,3 +22,7 @@ pub const RESULT_TABLES: [&str; 6] = [
     "pool_rank",
     "zone_map",
 ];
+
+/// The pool tables, keyed by pool instead of by run: what a pool looked
+/// like over its stored history, written by `lpbot pool-stats`.
+pub const POOL_TABLES: [&str; 2] = ["pool_series", "pool_liquidity"];
