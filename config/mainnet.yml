@@ -60,6 +60,9 @@ strategies:
     entry:
       shapes: [one_sided, around_price]
       width_ticks: { min: 10, max: 80 }   # search space, not a choice
+      max_gap_ticks: null            # how far from the price an entry may sit; null is one width
+      move_margin: 1.5               # a resting range moves to one crossed this many times as often
+      min_passes_per_day: 0          # passes per day a range needs on the longest lookback; 0 takes any crossed lately
     patience:
       mode: adaptive                 # or a fixed rule: wait | flip | close
       decide_every: 1h

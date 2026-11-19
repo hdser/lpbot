@@ -15,7 +15,7 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, GasModel, Policy, Settings, Token};
+use lpbot_sim::engine::{self, Dollar, GasModel, Policy, Settings, Token};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
@@ -442,6 +442,11 @@ fn settings(
 
     let settings = Settings {
         value,
+        dollar: if stables.contains(value_symbol) {
+            Dollar::Value
+        } else {
+            Dollar::Other
+        },
         decimals0,
         decimals1,
         width,
@@ -459,6 +464,8 @@ fn settings(
         latency_blocks: number(&config.extra, &["sim", "latency_blocks"]).map_or(1, |v| v as u64),
         lookbacks_days: lookbacks(strategy)?,
         move_margin: number(&strategy.extra, &["entry", "move_margin"]).unwrap_or(1.5),
+        min_passes_per_day: number(&strategy.extra, &["entry", "min_passes_per_day"])
+            .unwrap_or(0.0),
         gas,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
@@ -490,8 +497,18 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
     let mut done = 0;
 
     println!(
-        "{:<44} {:<16} {:>8} {:>9} {:>9} {:>9} {:>6} {:>7} {:>7}",
-        "run", "pool", "rule", "result %", "fees", "gas", "camps", "passes", "max dd"
+        "{:<44} {:<16} {:>8} {:>9} {:>8} {:>10} {:>9} {:>9} {:>6} {:>7} {:>7}",
+        "run",
+        "pool",
+        "rule",
+        "result %",
+        "USD %",
+        "hold USD %",
+        "fees",
+        "gas",
+        "camps",
+        "passes",
+        "max dd"
     );
     for run in runs {
         let config = &run.config;
@@ -561,11 +578,13 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
 
         let s = &out.summary;
         println!(
-            "{:<44} {:<16} {:>8} {:>9.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
+            "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
             run.run_id,
             pool_name,
             info.patience,
             s.result_pct,
+            s.result_pct_usd,
+            s.hold_value_pct_usd,
             s.fees,
             s.gas,
             s.campaigns,
@@ -582,7 +601,9 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
 
     println!();
     println!(
-        "{done} run(s) written to {} ({} tables each); results, fees and gas are in the value token",
+        "{done} run(s) written to {} ({} tables each). Results, fees and gas are in the value token; \
+         USD % is the result in dollars, the capital valued at the pool price at the start and \
+         at the end; hold USD % is what simply holding the value token did in dollars",
         results.display(),
         lpbot_sim::RESULT_TABLES.len()
     );

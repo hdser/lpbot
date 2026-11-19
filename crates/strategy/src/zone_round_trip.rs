@@ -81,11 +81,14 @@ pub fn entry_candidates(
 ///
 /// Without a day of history there is nothing to rank on, and the nearest
 /// range is taken. With history, a range must have been crossed on the
-/// short lookback to qualify, and the one crossed most on the long
-/// lookback wins; the nearer one wins a tie. `None` means no range
+/// short lookback to qualify, and at least `min_passes_per_day` times a day
+/// on the long one: a range that only a sudden move crossed, where price
+/// has not been trading, is not a zone. Of those, the one crossed most on
+/// the long lookback wins; the nearer one wins a tie. `None` means no range
 /// qualifies and the bot stays out.
 pub fn choose_zone(
     candidates: &[(Tick, Tick)],
+    min_passes_per_day: f64,
     mut score: impl FnMut(Tick, Tick) -> ZoneScore,
 ) -> Option<(Tick, Tick)> {
     let scored: Vec<((Tick, Tick), ZoneScore)> = candidates
@@ -97,7 +100,7 @@ pub fn choose_zone(
     }
     let mut best: Option<((Tick, Tick), f64)> = None;
     for (range, s) in scored {
-        if s.passes_per_day_short <= 0.0 {
+        if s.passes_per_day_short <= 0.0 || s.passes_per_day_long < min_passes_per_day {
             continue;
         }
         if best.is_none_or(|(_, top)| s.passes_per_day_long > top) {
@@ -182,23 +185,46 @@ mod tests {
             10 => score(9.0, 0.0, 30.0), // crossed most, but not lately
             _ => score(5.0, 0.5, 30.0),
         };
-        assert_eq!(choose_zone(&candidates, by_lower), Some((20, 30)));
+        assert_eq!(choose_zone(&candidates, 0.0, by_lower), Some((20, 30)));
         // A tie goes to the nearer range.
         assert_eq!(
-            choose_zone(&candidates, |_, _| score(3.0, 1.0, 30.0)),
+            choose_zone(&candidates, 0.0, |_, _| score(3.0, 1.0, 30.0)),
             Some((0, 10))
         );
         // Nothing crossed lately: stay out.
-        assert_eq!(choose_zone(&candidates, |_, _| score(3.0, 0.0, 30.0)), None);
+        assert_eq!(
+            choose_zone(&candidates, 0.0, |_, _| score(3.0, 0.0, 30.0)),
+            None
+        );
     }
 
     #[test]
     fn without_history_the_nearest_range_is_taken() {
         let candidates = [(0, 10), (10, 20)];
         assert_eq!(
-            choose_zone(&candidates, |_, _| score(0.0, 0.0, 0.2)),
+            choose_zone(&candidates, 0.0, |_, _| score(0.0, 0.0, 0.2)),
             Some((0, 10))
         );
-        assert_eq!(choose_zone(&[], |_, _| score(1.0, 1.0, 9.0)), None);
+        assert_eq!(choose_zone(&[], 0.0, |_, _| score(1.0, 1.0, 9.0)), None);
+    }
+
+    #[test]
+    fn a_range_must_have_been_crossed_often_enough_on_the_long_lookback() {
+        let candidates = [(0, 10), (10, 20), (20, 30)];
+        // The nearest range was crossed only by a recent sudden move.
+        let by_lower = |lower: Tick, _: Tick| match lower {
+            0 => score(0.05, 2.0, 90.0),
+            10 => score(0.8, 0.5, 90.0),
+            _ => score(0.3, 0.2, 90.0),
+        };
+        assert_eq!(choose_zone(&candidates, 0.0, by_lower), Some((10, 20)));
+        assert_eq!(choose_zone(&candidates, 0.5, by_lower), Some((10, 20)));
+        // Only ranges that are zones on the long lookback qualify.
+        let wick = |lower: Tick, _: Tick| match lower {
+            0 => score(0.05, 2.0, 90.0),
+            _ => score(0.0, 0.0, 90.0),
+        };
+        assert_eq!(choose_zone(&candidates, 0.0, wick), Some((0, 10)));
+        assert_eq!(choose_zone(&candidates, 0.1, wick), None);
     }
 }

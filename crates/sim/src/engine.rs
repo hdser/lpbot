@@ -144,11 +144,23 @@ pub enum Policy {
 /// Seconds per step of the price history the adaptive decision counts on.
 const ODDS_STEP: u64 = 600;
 
+/// Which token of the pool is a dollar stable, for results in USD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dollar {
+    /// The value token is: a USD figure is the value-token figure.
+    Value,
+    /// The other token is: a USD figure is the value-token figure times
+    /// the price of the value token in the other token.
+    Other,
+}
+
 /// Everything that defines one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The token results are counted in.
     pub value: Token,
+    /// Which token counts as the dollar, for the results in USD.
+    pub dollar: Dollar,
     pub decimals0: u8,
     pub decimals1: u8,
     /// Width of the ranges, in ticks. A multiple of the tick spacing.
@@ -177,6 +189,9 @@ pub struct Settings {
     /// A resting position moves only to a range crossed this many times
     /// as often as its own.
     pub move_margin: f64,
+    /// Full passes per day a range needs on the longest lookback to be
+    /// entered. 0 lets any range in that price crossed lately qualify.
+    pub min_passes_per_day: f64,
     pub gas: GasModel,
     /// Seconds between rows of the series.
     pub series_every: u64,
@@ -267,6 +282,10 @@ pub struct SeriesRow {
     pub equity: f64,
     /// What simply holding the value token would be worth: the capital.
     pub hold: f64,
+    /// `equity` in dollars at the pool price.
+    pub equity_usd: f64,
+    /// `hold` in dollars at the pool price: holding the value token.
+    pub hold_usd: f64,
     pub fees: f64,
     /// `flat`, `resting`, `in_range`, `beyond` or `flipped`.
     pub state: String,
@@ -293,9 +312,21 @@ pub struct ZoneLook {
 /// Headline results of a run, in whole value tokens.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Summary {
+    /// In the value token.
     pub start_capital: f64,
     pub end_capital: f64,
     pub result_pct: f64,
+    /// Price of the value token in the other token when trading starts and
+    /// when the run ends.
+    pub start_price: f64,
+    pub end_price: f64,
+    /// The capital in dollars at those prices, and the result in dollars.
+    pub start_usd: f64,
+    pub end_usd: f64,
+    pub result_pct_usd: f64,
+    /// What simply holding the value token returned in dollars over the
+    /// same time: the price change for ETH, nothing for a dollar stable.
+    pub hold_value_pct_usd: f64,
     pub fees: f64,
     pub gas: f64,
     pub campaigns: u32,
@@ -507,9 +538,21 @@ struct Engine<'a> {
     loose_other: U256,
     peak: f64,
     value_unit: f64,
+    /// Price of the value token in the other token on the first block of
+    /// trading.
+    start_price: Option<f64>,
 }
 
 impl<'a> Engine<'a> {
+    /// Dollars one whole value token is worth when it trades at `price` in
+    /// the other token.
+    fn usd_per_value(&self, price: f64) -> f64 {
+        match self.s.dollar {
+            Dollar::Value => 1.0,
+            Dollar::Other => price,
+        }
+    }
+
     fn side(&self) -> EntrySide {
         // Token0 alone sits above the price, token1 alone below it.
         match self.s.value {
@@ -955,7 +998,9 @@ impl<'a> Engine<'a> {
             .map(|&(lower, upper)| self.score(lower, upper, now))
             .collect();
         let mut next = scores.into_iter();
-        choose_zone(&candidates, |_, _| next.next().expect("one score each"))
+        choose_zone(&candidates, self.s.min_passes_per_day, |_, _| {
+            next.next().expect("one score each")
+        })
     }
 
     /// The adaptive patience decision for a leg that is wholly in the
@@ -1079,6 +1124,9 @@ impl<'a> Engine<'a> {
             return Ok(());
         }
         let tick = self.pool.tick();
+        if self.start_price.is_none() {
+            self.start_price = Some(self.price());
+        }
 
         // Where the position stands, and the passes it has completed.
         let mut state = "flat";
@@ -1139,13 +1187,17 @@ impl<'a> Engine<'a> {
                 let (a, b) = (self.price_at(leg.lower), self.price_at(leg.upper));
                 (a.min(b), a.max(b))
             });
+            let price = self.price();
+            let usd = self.usd_per_value(price);
             self.out.series.push(SeriesRow {
                 time,
                 block,
                 tick,
-                price: self.price(),
+                price,
                 equity: equity / unit,
                 hold: to_f64(self.s.capital) / unit,
+                equity_usd: equity / unit * usd,
+                hold_usd: to_f64(self.s.capital) / unit * usd,
                 fees: (self.fees_total
                     + self.leg.as_ref().map_or(0.0, |leg| {
                         let (fee_value, fee_other) = self.leg_fees(leg);
@@ -1351,6 +1403,7 @@ pub fn run(
         loose_other: U256::ZERO,
         peak: to_f64(settings.capital),
         value_unit: 10f64.powi(i32::from(value_decimals)),
+        start_price: None,
     };
 
     let mut last = (settings.trade_from, 0u64);
@@ -1459,10 +1512,23 @@ pub fn run(
     let start = to_f64(settings.capital);
     let end = to_f64(engine.cash);
     let passes = engine.out.campaigns.iter().map(|c| c.passes).sum();
+    // A run that never reached its window starts and ends at the same price.
+    let end_price = engine.price();
+    let start_price = engine.start_price.unwrap_or(end_price);
+    let start_usd = start / unit * engine.usd_per_value(start_price);
+    let end_usd = end / unit * engine.usd_per_value(end_price);
     engine.out.summary = Summary {
         start_capital: start / unit,
         end_capital: end / unit,
         result_pct: (end - start) / start * 100.0,
+        start_price,
+        end_price,
+        start_usd,
+        end_usd,
+        result_pct_usd: (end_usd - start_usd) / start_usd * 100.0,
+        hold_value_pct_usd: (engine.usd_per_value(end_price) / engine.usd_per_value(start_price)
+            - 1.0)
+            * 100.0,
         fees: engine.fees_total / unit,
         gas: to_f64(engine.gas_total) / unit,
         campaigns: engine.out.campaigns.len() as u32,
