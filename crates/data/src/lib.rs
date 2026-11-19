@@ -4,7 +4,6 @@
 //! results".
 
 pub mod backfill;
-pub mod cross_check;
 pub mod day;
 pub mod fee_check;
 pub mod lake;

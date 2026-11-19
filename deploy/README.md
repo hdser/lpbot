@@ -57,22 +57,21 @@ Run it inside `tmux`: the first run stores months of history for every pool of t
 | `pools` | Lists the universe's pools from the Uniswap v3 factory | There is at least one |
 | `replica` | For every pool: reads its state 2,000 blocks back, replays every event since and compares with its state now | Every pool matches, down to every tick |
 | `history` | Stores every pool's events from the longest zone lookback before the experiment's window, and replays them from the first day's state | Every pool replays to its state on the chain |
-| `row-count` | Compares the newest complete day of the traded pool, log for log, with a public endpoint from the config | An endpoint returns exactly the stored logs |
 | `fees` | Follows every position opened inside the stored history of the traded pool and compares what it collected with what the replica says it was owed | At least 20 emptied positions agree within 0.1% and none contradicts the replica |
 | `backtest` | Runs the experiment file | Every run writes its six tables |
 | `load` | Loads the tables into Postgres | The runs are in the database; open the `lpbot: runs` dashboard |
 | `calibrate` | Fits the adaptive patience decision walk-forward and scores it against the fixed rules | It finishes; the output says which one ships |
 
-It stops at the first step that fails, so nothing is built on a check that did not hold, and ends with a summary: one line per step with `pass`, `open`, `FAIL`, `left out` or `not run`. `open` means nothing wrong was found but the check could not be decided, for example when no public endpoint answered or too few positions were emptied; the steps after it still run. The whole output is kept under `logs/`.
+It stops at the first step that fails, so nothing is built on a check that did not hold, and ends with a summary: one line per step with `pass`, `open`, `FAIL`, `left out` or `not run`. `open` means nothing wrong was found but the check could not be decided, for example when too few positions were emptied; the steps after it still run. The whole output is kept under `logs/`.
 
 ```sh
 make gates STEP=fees                    # carry on from a step
-make gates SKIP=row-count,calibrate     # leave steps out
+make gates SKIP=fees,calibrate          # leave steps out
 make gates EXPERIMENT=<file>            # another experiment file
 make gates ARGS="--blocks 7200"         # other options; `lpbot gates --help` lists them
 ```
 
-The `row-count` step is the only one that talks to anything but your own node: it asks a public endpoint listed under `rpc.public` in the config for one day of one pool's logs. Leave it out with `SKIP=row-count` if you prefer.
+Every step talks only to your own node and the results database.
 
 The rest of this section is the same steps by hand. Check that the bot's pool replica agrees with the chain:
 

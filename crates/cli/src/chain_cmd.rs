@@ -141,11 +141,6 @@ pub fn connect_to(config: &Config, chain_name: &str, rpc_override: Option<&str>)
     })
 }
 
-/// The public endpoints the config lists for a chain, for cross-checks.
-pub fn public_endpoints(config: &Config, chain_name: &str) -> Result<Vec<String>> {
-    Ok(chain_config(config, chain_name)?.rpc.public.clone())
-}
-
 pub(crate) fn symbol_of(chain: &Chain, address: Address) -> String {
     chain
         .tokens

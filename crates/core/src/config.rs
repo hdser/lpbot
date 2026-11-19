@@ -130,9 +130,8 @@ pub struct StrategyConfig {
 pub struct RpcConfig {
     /// Your own node. Every read that feeds a decision goes here.
     pub local: String,
-    /// Public endpoints, for cross-checks, exit-only fallback and backfill.
-    #[serde(default)]
-    pub public: Vec<String>,
+    /// Anything else, such as the public endpoints live mode will
+    /// cross-check against; nothing reads them yet.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -368,6 +367,8 @@ ethereum:
         .unwrap();
         assert_eq!(c.chains["ethereum"].chain_id, Some(1));
         assert_eq!(c.chains["ethereum"].tokens["USDC"].decimals, 6);
+        // A setting the code does not read yet is carried along.
+        assert!(c.chains["ethereum"].rpc.extra.contains_key("public"));
         assert_eq!(
             c.validate().unwrap_err(),
             vec![ConfigError::TokenWithoutAddress {

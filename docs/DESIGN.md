@@ -646,7 +646,7 @@ risk:
 | --- | --- |
 | `lpbot backfill --pool <address> --from <date>` | Pulls history into the Parquet lake: one file per pool and day, plus a snapshot of the pool before the first day. `--verify` replays what is stored and compares it with the pool on the chain |
 | `lpbot verify-fees <address>` | Compares the replica's fees with what real positions in the stored history collected |
-| `lpbot gates <experiment.yml>` | Once the node is synced, runs every check against real chain data in order: node synced, pool discovery, the replica against every pool over recent blocks, the backfill with its replay, one stored day against a public endpoint, the fee check. Then the backtest, the load into Postgres and the calibration. Stops at the first step that fails and ends with a summary |
+| `lpbot gates <experiment.yml>` | Once the node is synced, runs every check against real chain data in order: node synced, pool discovery, the replica against every pool over recent blocks, the backfill with its replay, the fee check. Then the backtest, the load into Postgres and the calibration. Stops at the first step that fails and ends with a summary |
 | `lpbot rank` | Ranks the stored pools by implied volatility (`--node` reads the node instead) |
 | `lpbot zones <address>` | Shows a pool's zone map from the stored history (`--node` reads the node instead) |
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |

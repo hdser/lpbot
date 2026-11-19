@@ -85,10 +85,9 @@ demo:
 ## only fetches what is new. The targets below are its steps one by one.
 ##   make gates                            everything
 ##   make gates STEP=fees                  carry on from a step
-##   make gates SKIP=row-count,calibrate   leave steps out
+##   make gates SKIP=fees,calibrate        leave steps out
 ##   make gates ARGS="--blocks 7200"       other options of `lpbot gates`
-## Steps: node, pools, replica, history, row-count, fees, backtest, load,
-## calibrate.
+## Steps: node, pools, replica, history, fees, backtest, load, calibrate.
 STEP ?=
 SKIP ?=
 ARGS ?=

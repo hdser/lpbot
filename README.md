@@ -29,7 +29,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Viewer: `lpbot load-results` puts the tables in Postgres; three Grafana dashboards read them (runs, run detail, pools and zones) | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
-The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. They have not yet been run against a real pool. `make gates` is that check and every other one that needs real chain data, and it is the first thing to run once the node is synced.
+The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. `make gates` is that check and every other one that needs real chain data, and it is the first thing to run once the node is synced. Its first run against a real node, on 19 November 2026, passed: the replica matched all 24 pools of the universe exactly, their stored history since 31 January replays to their state on the chain, and 6,135 real positions collected exactly the fees the replica computed. The backtest on that history lost money (every run stopped at its 5% loss limit), which is the next thing to understand.
 
 ## Try it
 

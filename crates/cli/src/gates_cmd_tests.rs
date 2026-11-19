@@ -108,13 +108,13 @@ fn a_step_name_that_does_not_exist_is_refused_before_anything_runs() {
     let mut ran = Vec::new();
     let plan = Plan {
         start_at: None,
-        skip: vec!["rowcount".into()],
+        skip: vec!["histroy".into()],
     };
-    let error = run_steps(vec![step("row-count", pass())], &mut ran, &plan)
+    let error = run_steps(vec![step("history", pass())], &mut ran, &plan)
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("rowcount") && error.contains("row-count"),
+        error.contains("histroy") && error.contains("history"),
         "{error}"
     );
     assert!(ran.is_empty());
@@ -137,8 +137,8 @@ fn the_summary_lists_every_step_and_says_how_to_carry_on() {
             seconds: 2.0,
         },
         StepResult {
-            name: "row-count",
-            outcome: Some(Outcome::Open("no endpoint answered".into())),
+            name: "replica",
+            outcome: Some(Outcome::Open("nothing to replay yet".into())),
             seconds: 75.0,
         },
         StepResult {
@@ -326,203 +326,10 @@ fn only_the_host_of_an_endpoint_is_shown() {
     assert_eq!(host_of("localhost:8545"), "localhost:8545");
 }
 
-#[test]
-fn an_endpoints_error_is_shown_without_its_key() {
-    let url = "https://rpc.example.org/v2/SECRETKEY";
-    let error = anyhow::Error::from(lpbot_chain::RpcError::Transport {
-        url: url.into(),
-        reason: "timed out".into(),
-    });
-    assert_eq!(
-        shown(&error, url),
-        "cannot reach rpc.example.org: timed out"
-    );
-}
-
 // --- against a mock node ------------------------------------------------
-
-/// The simulated history numbers its blocks from here, twelve seconds
-/// apart, starting on 1 January 2026.
-const DEMO_FIRST_BLOCK: u64 = 20_000_000;
-
-fn demo_time(block: u64) -> u64 {
-    let start = day("2026-01-01").start() as i128;
-    (start + (block as i128 - DEMO_FIRST_BLOCK as i128) * 12) as u64
-}
 
 fn quantity(n: u64) -> String {
     format!("0x{n:x}")
-}
-
-fn number(value: &Value) -> u64 {
-    u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
-}
-
-/// A node that has the demo chain's blocks up to `head` and, when
-/// given, a pool's logs. `salt` changes its block hashes, as on a fork.
-fn demo_node(head: u64, chain_id: u64, salt: u64, logs: Vec<Value>) -> MockNode {
-    MockNode::start(move |method, params| match method {
-        "eth_chainId" => Ok(json!(quantity(chain_id))),
-        "eth_syncing" => Ok(json!(false)),
-        "eth_blockNumber" => Ok(json!(quantity(head))),
-        "eth_getBlockByNumber" => {
-            let block = number(&params[0]);
-            if block > head {
-                return Ok(Value::Null);
-            }
-            Ok(json!({
-                "timestamp": quantity(demo_time(block)),
-                "hash": format!("0x{:064x}", block + salt),
-            }))
-        }
-        "eth_getLogs" => {
-            let from = number(&params[0]["fromBlock"]);
-            let to = number(&params[0]["toBlock"]);
-            Ok(Value::Array(
-                logs.iter()
-                    .filter(|log| (from..=to).contains(&number(&log["blockNumber"])))
-                    .cloned()
-                    .collect(),
-            ))
-        }
-        other => Err((-32601, format!("{other} is not served"))),
-    })
-}
-
-fn log_json(pool: Address, log: &lpbot_data::store::StoredLog) -> Value {
-    json!({
-        "address": format!("{pool:#x}"),
-        "topics": log.topics.iter().map(|t| format!("{t:#x}")).collect::<Vec<_>>(),
-        "data": format!("0x{}", alloy_primitives::hex::encode(&log.data)),
-        "blockNumber": quantity(log.block_number),
-        "logIndex": quantity(u64::from(log.log_index)),
-        "transactionHash": format!("{:#x}", log.tx_hash),
-        "removed": false
-    })
-}
-
-fn set_public(gates: &mut Gates, endpoints: &[&str]) {
-    for run in &mut gates.runs {
-        run.config.chains.get_mut("ethereum").unwrap().rpc.public =
-            endpoints.iter().map(|url| url.to_string()).collect();
-    }
-}
-
-#[test]
-fn a_stored_day_is_compared_log_for_log_with_another_endpoint() {
-    let (mut gates, root) = demo_gates("rows", None);
-    let last = day("2026-01-11");
-    let stored = EventStore::new(root.join("lake"))
-        .read_day("ethereum", crate::demo_cmd::DEMO_POOL, last)
-        .unwrap()
-        .unwrap();
-    assert!(stored.len() > 100);
-    let logs: Vec<Value> = stored
-        .iter()
-        .map(|log| log_json(crate::demo_cmd::DEMO_POOL, log))
-        .collect();
-
-    // The node is two days past the last stored day.
-    let head = DEMO_FIRST_BLOCK + 13 * 7_200;
-    let node = demo_node(head, 1, 0, Vec::new());
-    gates.options.rpc = Some(node.url().to_string());
-    let same = demo_node(head, 1, 0, logs.clone());
-    let other_chain = demo_node(head, 5, 0, logs.clone());
-    let forked = demo_node(head, 1, 99, logs.clone());
-    let short = demo_node(head, 1, 0, logs[1..].to_vec());
-
-    set_public(&mut gates, &[same.url()]);
-    let outcome = gates.row_count().unwrap();
-    let expected = format!(
-        "USDC/WETH 0.05 on 2026-01-11: {} logs here and at {}, identical",
-        stored.len(),
-        host_of(same.url())
-    );
-    assert_eq!(outcome, Outcome::Pass(expected.clone()));
-
-    // An endpoint that is down, on another chain or on another fork is
-    // passed over for the next one.
-    set_public(
-        &mut gates,
-        &[
-            "http://127.0.0.1:9/KEY",
-            other_chain.url(),
-            forked.url(),
-            same.url(),
-        ],
-    );
-    assert_eq!(gates.row_count().unwrap(), Outcome::Pass(expected));
-
-    // With nothing to compare with, the check stays open and says what to compare.
-    set_public(&mut gates, &[other_chain.url(), forked.url()]);
-    let Outcome::Open(note) = gates.row_count().unwrap() else {
-        panic!("no usable endpoint leaves the check open");
-    };
-    assert!(
-        note.contains(&format!("{} logs on 2026-01-11", stored.len())),
-        "{note}"
-    );
-    set_public(&mut gates, &[]);
-    assert!(matches!(gates.row_count().unwrap(), Outcome::Open(_)));
-
-    // One log less at the other endpoint is a failure.
-    set_public(&mut gates, &[short.url()]);
-    let Outcome::Fail(note) = gates.row_count().unwrap() else {
-        panic!("a missing log must fail");
-    };
-    assert!(note.contains(host_of(short.url())), "{note}");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn the_row_count_compares_the_newest_day_that_has_logs() {
-    let (mut gates, root) = demo_gates("rowsempty", None);
-    let store = EventStore::new(root.join("lake"));
-    let pool = crate::demo_cmd::DEMO_POOL;
-    let last = day("2026-01-11");
-    let stored = store.read_day("ethereum", pool, last).unwrap().unwrap();
-    // A complete day without a single log, after the last day with some:
-    // two empty answers agree and prove nothing.
-    store
-        .write_day("ethereum", pool, day("2026-01-12"), &[], true)
-        .unwrap();
-    let logs: Vec<Value> = stored.iter().map(|log| log_json(pool, log)).collect();
-    let head = DEMO_FIRST_BLOCK + 14 * 7_200;
-    let node = demo_node(head, 1, 0, Vec::new());
-    gates.options.rpc = Some(node.url().to_string());
-    let same = demo_node(head, 1, 0, logs);
-    set_public(&mut gates, &[same.url()]);
-    assert_eq!(
-        gates.row_count().unwrap(),
-        Outcome::Pass(format!(
-            "USDC/WETH 0.05 on 2026-01-11: {} logs here and at {}, identical",
-            stored.len(),
-            host_of(same.url())
-        ))
-    );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn a_pool_without_a_complete_day_that_has_logs_has_nothing_to_compare() {
-    let root = std::env::temp_dir().join(format!("lpbot-gates-quiet-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let store = EventStore::new(&root);
-    let pool = crate::demo_cmd::DEMO_POOL;
-    assert_eq!(
-        newest_day_with_logs(&store, "ethereum", pool).unwrap(),
-        None
-    );
-    for text in ["2026-01-01", "2026-01-02"] {
-        store
-            .write_day("ethereum", pool, day(text), &[], true)
-            .unwrap();
-    }
-    assert_eq!(
-        newest_day_with_logs(&store, "ethereum", pool).unwrap(),
-        None
-    );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -543,20 +350,6 @@ fn every_pool_the_runs_name_is_checked() {
         gates.traded_pools().unwrap(),
         [(demo, name.clone()), (other, name)]
     );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn a_day_the_node_has_not_finished_leaves_the_row_count_open() {
-    let (mut gates, root) = demo_gates("rowsearly", None);
-    // The node's head lies inside the last stored day.
-    let node = demo_node(DEMO_FIRST_BLOCK + 10 * 7_200 + 100, 1, 0, Vec::new());
-    gates.options.rpc = Some(node.url().to_string());
-    set_public(&mut gates, &[node.url()]);
-    let Outcome::Open(note) = gates.row_count().unwrap() else {
-        panic!("an unfinished day cannot be compared");
-    };
-    assert!(note.contains("2026-01-11"), "{note}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -720,7 +513,6 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
             "pools",
             "replica",
             "history",
-            "row-count",
             "fees",
             "backtest",
             "load",
@@ -729,17 +521,14 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
     );
     assert_eq!(
         statuses(&results),
-        [
-            "left out", "left out", "left out", "left out", "left out", "open", "pass", "left out",
-            "left out"
-        ]
+        ["left out", "left out", "left out", "left out", "open", "pass", "left out", "left out"]
     );
     // The demo pool has no Collect events, so nothing confirms the fees.
     assert!(
-        matches!(&results[5].outcome, Some(Outcome::Open(note)) if note.contains("asks for 20"))
+        matches!(&results[4].outcome, Some(Outcome::Open(note)) if note.contains("asks for 20"))
     );
     assert_eq!(
-        results[6].outcome,
+        results[5].outcome,
         Some(Outcome::Pass(format!(
             "2 runs written to {}",
             root.join("runs").display()
@@ -747,10 +536,10 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
     );
     // Without a database the load says so and does not fail.
     assert!(
-        matches!(&results[7].outcome, Some(Outcome::Skipped(note)) if note.contains("no database"))
+        matches!(&results[6].outcome, Some(Outcome::Skipped(note)) if note.contains("no database"))
     );
     assert_eq!(
-        results[8].outcome,
+        results[7].outcome,
         Some(Outcome::Skipped("left out on request".into()))
     );
     for run in &gates.runs {
@@ -782,10 +571,10 @@ fn a_database_that_is_not_there_fails_the_load_without_showing_its_password() {
         skip: vec![],
     };
     let results = run_steps(Gates::steps(), &mut gates, &plan).unwrap();
-    let Some(Outcome::Fail(note)) = &results[7].outcome else {
+    let Some(Outcome::Fail(note)) = &results[6].outcome else {
         panic!("the load must fail");
     };
-    assert_eq!(results[8].outcome, None);
+    assert_eq!(results[7].outcome, None);
     assert!(
         note.contains("cannot connect to the database") && !note.contains("topsecret"),
         "{note}"
