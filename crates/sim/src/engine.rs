@@ -178,6 +178,15 @@ impl Shape {
     }
 }
 
+/// Which way price must have moved for the entry signal, as the dollar
+/// price of the pool's volatile token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Any,
+    Up,
+    Down,
+}
+
 /// Everything that defines one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -238,6 +247,30 @@ pub struct Settings {
     /// range needs. 0 moves it as soon as price leaves. `None`: never; the
     /// one-sided rules apply instead. Only for `Shape::AroundPrice`.
     pub recenter_after: Option<u64>,
+    /// A campaign open this long is closed, back to the value token.
+    /// `None`: no limit.
+    pub max_hold: Option<u64>,
+    /// A campaign whose value has fallen this many percent below what
+    /// went in, in the value token at the pool price, is closed back to
+    /// the value token. `None`: no stop.
+    pub max_loss_pct: Option<f64>,
+    /// A campaign whose value has fallen by this many percent of what went
+    /// in from its best since entry is closed. `None`: no stop.
+    pub max_drawdown_pct: Option<f64>,
+    /// Once price has been this many ticks past the range on the other
+    /// token's side, the campaign is closed as soon as price is back in
+    /// the range. `None`: never.
+    pub exit_on_return_ticks: Option<Tick>,
+    /// Entry signal: a campaign starts only once price has moved at least
+    /// this many ticks over the last `move_window` seconds, in
+    /// `move_direction`. `None`: no signal.
+    pub after_move_ticks: Option<Tick>,
+    pub move_window: u64,
+    pub move_direction: MoveDirection,
+    /// A new range is this many times the day's volatility wide, in
+    /// ticks, rounded up to the tick spacing; `width` while there is not
+    /// enough history to measure it. `None`: always `width`.
+    pub width_vol_multiple: Option<f64>,
     pub gas: GasModel,
     /// Seconds between rows of the series.
     pub series_every: u64,
@@ -279,7 +312,11 @@ pub struct CampaignRow {
     /// `stepped_aside` (a resting position taken out because the day turned
     /// too volatile for its range), `flip_failed` (a flip whose new range
     /// could not open, closed instead), `recenter_failed` (likewise for a
-    /// move to the range around the price), `loss_limit` or `window_end`.
+    /// move to the range around the price), `max_hold` (open as long as
+    /// allowed), `stop_loss` (fell the most allowed below what went in),
+    /// `trailing_stop` (fell the most allowed from its best),
+    /// `return_exit` (closed as price came back after a deep excursion),
+    /// `loss_limit` or `window_end`.
     pub exit_reason: String,
     /// `one_sided` or `around_price`: how the campaign went in.
     pub shape: String,
@@ -573,6 +610,11 @@ struct OpenCampaign {
     other_since: Option<u64>,
     /// Since when the position has been wholly in one token, either one.
     out_since: Option<u64>,
+    /// The run's highest equity since the campaign opened, in value-token
+    /// units, for the drawdown stop.
+    best: f64,
+    /// Price has been `exit_on_return_ticks` or more past the range.
+    far_beyond: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -655,6 +697,47 @@ impl<'a> Engine<'a> {
         self.buckets.daily_vol_ticks(now, 86_400)
     }
 
+    /// The width of a range opened now: the run's, or the day's
+    /// volatility times `width_vol_multiple`, rounded up to the tick
+    /// spacing, once there is a day's history to measure it on.
+    fn width_now(&self, now: u64) -> Tick {
+        let Some(multiple) = self.s.width_vol_multiple else {
+            return self.s.width;
+        };
+        let spacing = self.pool.tick_spacing().max(1);
+        match self.daily_vol(now) {
+            Some(vol) if vol.is_finite() && vol > 0.0 => {
+                // Ranges wider than half the tick range make no sense.
+                let ticks = (multiple * vol).ceil().clamp(1.0, 400_000.0) as Tick;
+                ((ticks + spacing - 1) / spacing) * spacing
+            }
+            _ => self.s.width,
+        }
+    }
+
+    /// Whether price has moved far enough lately for the entry signal.
+    /// Without a signal, always; without the history to measure, never.
+    fn moved_enough(&self, now: u64) -> bool {
+        let Some(needed) = self.s.after_move_ticks else {
+            return true;
+        };
+        let Some(moved) = self.buckets.move_ticks(now, self.s.move_window) else {
+            return false;
+        };
+        // The volatile token's dollar price rises with the tick when the
+        // dollar is token1, and falls with it when the dollar is token0.
+        let dollar = match self.s.dollar {
+            Dollar::Value => self.s.value,
+            Dollar::Other => self.s.value.other(),
+        };
+        let up = if dollar == Token::One { moved } else { -moved };
+        match self.s.move_direction {
+            MoveDirection::Any => up.abs() >= needed,
+            MoveDirection::Up => up >= needed,
+            MoveDirection::Down => -up >= needed,
+        }
+    }
+
     /// Whether the volatility gates let a campaign start now. A gate with
     /// no history to measure keeps the bot out.
     fn calm_enough(&self, now: u64) -> bool {
@@ -664,7 +747,7 @@ impl<'a> Engine<'a> {
         let Some(vol) = self.daily_vol(now) else {
             return false;
         };
-        let width = f64::from(self.s.width);
+        let width = f64::from(self.width_now(now));
         self.s.max_vol_to_width.is_none_or(|r| vol <= r * width)
             && self.s.max_daily_vol_ticks.is_none_or(|m| vol <= m)
     }
@@ -1130,6 +1213,8 @@ impl<'a> Engine<'a> {
                     },
                     other_since: None,
                     out_since: None,
+                    best: to_f64(cash_before),
+                    far_beyond: false,
                 });
                 let swap_units = if swapped { self.s.gas.swap_units } else { 0 };
                 self.charge_gas(self.s.gas.open_units + swap_units);
@@ -1143,9 +1228,11 @@ impl<'a> Engine<'a> {
                 if !held_value.is_zero() && !held_other.is_zero() {
                     return Ok(());
                 }
-                let Some((lower, upper)) =
-                    around_price(self.pool.tick(), self.pool.tick_spacing(), self.s.width)
-                else {
+                let Some((lower, upper)) = around_price(
+                    self.pool.tick(),
+                    self.pool.tick_spacing(),
+                    self.width_now(time),
+                ) else {
                     return Ok(());
                 };
                 // A price exactly on a bound of the new range has no range
@@ -1183,6 +1270,7 @@ impl<'a> Engine<'a> {
                             campaign.recentres += 1;
                             campaign.extreme = Extreme::Neither;
                             campaign.out_since = None;
+                            campaign.far_beyond = false;
                             if let Some(since) = campaign.other_since.take() {
                                 campaign.seconds_beyond += time.saturating_sub(since);
                             }
@@ -1260,6 +1348,7 @@ impl<'a> Engine<'a> {
                         self.charge_gas(self.s.gas.close_units + self.s.gas.open_units);
                         if let Some(campaign) = &mut self.campaign {
                             campaign.flips += 1;
+                            campaign.far_beyond = false;
                         }
                     }
                     None => {
@@ -1356,7 +1445,8 @@ impl<'a> Engine<'a> {
     /// the zone choice among the ranges on the entry side.
     fn best_entry(&mut self, now: u64) -> Option<(Tick, Tick)> {
         if self.s.shape == Shape::AroundPrice {
-            let range = around_price(self.pool.tick(), self.pool.tick_spacing(), self.s.width)?;
+            let width = self.width_now(now);
+            let range = around_price(self.pool.tick(), self.pool.tick_spacing(), width)?;
             let score = self.score(range.0, range.1, now);
             return (score.observed_days < 1.0
                 || score.passes_per_day_long >= self.s.min_passes_per_day)
@@ -1365,7 +1455,7 @@ impl<'a> Engine<'a> {
         let candidates = entry_candidates(
             self.pool.tick(),
             self.pool.tick_spacing(),
-            self.s.width,
+            self.width_now(now),
             self.side(),
             self.s.max_gap,
         );
@@ -1490,6 +1580,36 @@ impl<'a> Engine<'a> {
         Ok((action, Some(expected)))
     }
 
+    /// The exit rule, if any, that ends the open campaign now, given the
+    /// run's equity and the position's state.
+    fn campaign_exit(&self, time: u64, equity: f64, state: &str) -> Option<&'static str> {
+        let campaign = self.campaign.as_ref()?;
+        if self
+            .s
+            .max_hold
+            .is_some_and(|limit| time.saturating_sub(campaign.opened_time) >= limit)
+        {
+            return Some("max_hold");
+        }
+        // Only the campaign changes the equity while it is open, gas
+        // included, so its value is the equity less what stayed outside.
+        let amount = to_f64(campaign.amount_in);
+        if amount > 0.0 {
+            let loss = (to_f64(campaign.cash_before) - equity) / amount * 100.0;
+            if self.s.max_loss_pct.is_some_and(|limit| loss >= limit) {
+                return Some("stop_loss");
+            }
+            let fall = (campaign.best - equity) / amount * 100.0;
+            if self.s.max_drawdown_pct.is_some_and(|limit| fall >= limit) {
+                return Some("trailing_stop");
+            }
+        }
+        if campaign.far_beyond && (state == "in_range" || state == "resting") {
+            return Some("return_exit");
+        }
+        None
+    }
+
     fn schedule(&mut self, block: u64, action: Action) {
         self.pending = Some((block + self.s.latency_blocks.max(1), action));
     }
@@ -1523,6 +1643,19 @@ impl<'a> Engine<'a> {
                 campaign.extreme = Extreme::Other;
                 campaign.other_since.get_or_insert(time);
                 campaign.out_since.get_or_insert(time);
+                // How far past its nearest bound price is.
+                let past = if tick < leg.lower {
+                    leg.lower - tick
+                } else {
+                    tick - leg.upper
+                };
+                if self
+                    .s
+                    .exit_on_return_ticks
+                    .is_some_and(|limit| past >= limit)
+                {
+                    campaign.far_beyond = true;
+                }
                 stranded_since = campaign.other_since;
                 state = if flip { "flipped" } else { "beyond" };
             } else if other.is_zero() {
@@ -1545,6 +1678,9 @@ impl<'a> Engine<'a> {
 
         // The loss limit is checked on every block, before anything else.
         let equity = self.equity()?;
+        if let Some(campaign) = &mut self.campaign {
+            campaign.best = campaign.best.max(equity);
+        }
         self.peak = self.peak.max(equity);
         if self.peak > 0.0 {
             let drawdown = (self.peak - equity) / self.peak * 100.0;
@@ -1606,7 +1742,7 @@ impl<'a> Engine<'a> {
             // Flat: look for a range to enter.
             if time >= self.next_check {
                 self.next_check = time + self.s.check_every.max(1);
-                if self.calm_enough(time) {
+                if self.calm_enough(time) && self.moved_enough(time) {
                     if let Some((lower, upper)) = self.best_entry(time) {
                         self.schedule(block, Action::Open { lower, upper });
                     }
@@ -1615,12 +1751,19 @@ impl<'a> Engine<'a> {
             return Ok(());
         };
 
+        // The campaign's own exits come first: its time, its stops, and
+        // the return after a deep excursion.
+        if let Some(reason) = self.campaign_exit(time, equity, state) {
+            self.schedule(block, Action::Close { reason });
+            return Ok(());
+        }
+
         // An around-price position price has left for long enough moves
         // to the range around the price, at the pace of the decisions.
         if let (Some(after), Some(since), false) = (self.s.recenter_after, out_since, leg.flip) {
             if time.saturating_sub(since) >= after && time >= self.next_decide {
                 self.next_decide = time + self.s.decide_every.max(1);
-                let target = around_price(tick, self.pool.tick_spacing(), self.s.width);
+                let target = around_price(tick, self.pool.tick_spacing(), self.width_now(time));
                 self.out.decisions.push(DecisionRow {
                     campaign: self.campaign.as_ref().map_or(0, |c| c.id),
                     time,
@@ -1656,7 +1799,7 @@ impl<'a> Engine<'a> {
                 self.next_check = time + self.s.check_every.max(1);
                 // The day turned too volatile for the range: back to cash,
                 // to come back in when the gates allow.
-                let width = f64::from(self.s.width);
+                let width = f64::from(leg.upper - leg.lower);
                 if self
                     .s
                     .exit_vol_to_width
@@ -1690,7 +1833,8 @@ impl<'a> Engine<'a> {
                             && score.passes_per_day_long
                                 > own.passes_per_day_long * self.s.move_margin
                             && score.passes_per_day_long > 0.0;
-                        (own_gap > self.s.max_gap.max(self.s.width) || busier).then_some(range)
+                        (own_gap > self.s.max_gap.max(leg.upper - leg.lower) || busier)
+                            .then_some(range)
                     }
                     _ => None,
                 };
@@ -1724,7 +1868,7 @@ impl<'a> Engine<'a> {
                 EntrySide::Above => EntrySide::Below,
                 EntrySide::Below => EntrySide::Above,
             };
-            if leg.flip && gap(tick, leg.lower, leg.upper, other_side) < self.s.width {
+            if leg.flip && gap(tick, leg.lower, leg.upper, other_side) < leg.upper - leg.lower {
                 return Ok(());
             }
             if self
@@ -1821,6 +1965,33 @@ pub fn run(
     }
     if settings.lookbacks_days.is_empty() {
         return Err(SimError::Settings("the zone lookbacks are empty".into()));
+    }
+    let positive = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v > 0.0);
+    for (value, key) in [
+        (settings.max_loss_pct, "exit.max_loss_pct"),
+        (settings.max_drawdown_pct, "exit.max_drawdown_pct"),
+        (settings.width_vol_multiple, "entry.width_vol_multiple"),
+    ] {
+        if !positive(value) {
+            return Err(SimError::Settings(format!(
+                "{key} is {}; set it to a number above 0, or leave it out",
+                value.unwrap_or_default()
+            )));
+        }
+    }
+    if settings.after_move_ticks.is_some_and(|ticks| ticks <= 0) || settings.move_window == 0 {
+        return Err(SimError::Settings(
+            "entry.after_move_pct needs a move above 0 and entry.move_window a duration above 0"
+                .into(),
+        ));
+    }
+    if settings
+        .exit_on_return_ticks
+        .is_some_and(|ticks| ticks <= 0)
+    {
+        return Err(SimError::Settings(
+            "exit.exit_on_return_pct must be above 0, or left out".into(),
+        ));
     }
     if settings.recenter_after.is_some() && settings.shape != Shape::AroundPrice {
         return Err(SimError::Settings(

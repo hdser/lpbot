@@ -10,7 +10,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
-    GasModel, Output, Policy, Settings, Shape, Token,
+    GasModel, MoveDirection, Output, Policy, Settings, Shape, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -121,6 +121,14 @@ fn settings(rule: FixedRule) -> Settings {
         max_seconds_beyond: None,
         exit_vol_to_width: None,
         recenter_after: None,
+        max_hold: None,
+        max_loss_pct: None,
+        max_drawdown_pct: None,
+        exit_on_return_ticks: None,
+        after_move_ticks: None,
+        move_window: 4 * HOUR,
+        move_direction: MoveDirection::Any,
+        width_vol_multiple: None,
         gas: GasModel::free(),
         series_every: HOUR,
         trade_from: T0,
@@ -1418,4 +1426,234 @@ fn the_share_cap_holds_back_capital_before_the_swap() {
     );
     assert!((small - large).abs() < 1e-5, "{small} {large}");
     assert_conserved(&out);
+}
+
+#[test]
+fn a_campaign_open_as_long_as_allowed_is_closed() {
+    let (snapshot, events) = history(&CHOPPY);
+    let short = Settings {
+        max_hold: Some(2 * HOUR),
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &short).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!(first.exit_reason, "max_hold");
+    // Decided two hours after it opened, closed in the next block.
+    assert_eq!(first.closed_time - first.opened_time, 3 * HOUR);
+    // And the bot goes back in at its next look.
+    assert!(out.campaigns.len() >= 2);
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_stop_closes_a_losing_campaign_back_to_the_value_token() {
+    // Down through [-20, 0) and on to -50: the position is the other token,
+    // marked about 0.4% under what went in, and price comes back later.
+    let wait = there_and_back(FixedRule::Wait);
+    assert_eq!(wait.campaigns[0].exit_reason, "round_trip_complete");
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    for (stop, reason) in [
+        (
+            Settings {
+                max_loss_pct: Some(0.2),
+                ..settings(FixedRule::Wait)
+            },
+            "stop_loss",
+        ),
+        (
+            Settings {
+                max_drawdown_pct: Some(0.2),
+                ..settings(FixedRule::Wait)
+            },
+            "trailing_stop",
+        ),
+    ] {
+        let out = run(snapshot.clone(), &events, &stop).unwrap();
+        let first = &out.campaigns[0];
+        assert_eq!(first.exit_reason, reason);
+        // Seen at -50, closed in the next block at -52: about the loss of
+        // closing there.
+        assert_eq!(first.closed_block, events[3].block);
+        let loss = first.result / first.amount_in;
+        assert!((-0.005..-0.003).contains(&loss), "{loss}");
+        assert_conserved(&out);
+    }
+    // A stop the campaign never reaches changes nothing.
+    let loose = Settings {
+        max_loss_pct: Some(5.0),
+        max_drawdown_pct: Some(5.0),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &loose).unwrap();
+    assert_eq!(out.campaigns, wait.campaigns);
+}
+
+#[test]
+fn after_a_deep_excursion_a_campaign_leaves_as_price_comes_back() {
+    // Down through [-20, 0) to -52, 32 ticks past its lower bound, back
+    // into the range at -10, then up and through it.
+    let path = [5, 6, -50, -52, -10, -9, 30, 31];
+    let (snapshot, events) = history(&path);
+    let plain = run(snapshot.clone(), &events, &settings(FixedRule::Wait)).unwrap();
+    assert_ne!(plain.campaigns[0].exit_reason, "return_exit");
+
+    let leaving = Settings {
+        exit_on_return_ticks: Some(25),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &leaving).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!(first.exit_reason, "return_exit");
+    // Back in range at -10, closed in the next block.
+    assert_eq!(first.closed_block, events[5].block);
+    assert_conserved(&out);
+
+    // An excursion that never went that deep does not count.
+    let deeper = Settings {
+        exit_on_return_ticks: Some(40),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &deeper).unwrap();
+    assert_eq!(out.campaigns, plain.campaigns);
+}
+
+/// Six quiet hours around tick 5, then a jump to 60 and quiet again.
+fn quiet_then_a_jump() -> (PoolSnapshot, Vec<TimedEvent>) {
+    history(&[5, 6, 5, 6, 5, 6, 60, 61, 60, 61, 60, 61])
+}
+
+#[test]
+fn the_entry_signal_waits_for_a_fast_move() {
+    let (snapshot, events) = quiet_then_a_jump();
+    let anytime = run(snapshot.clone(), &events, &around(FixedRule::Wait)).unwrap();
+    assert_eq!(anytime.campaigns[0].opened_block, events[1].block);
+
+    // At least 50 ticks in four hours: the jump at hour 7 shows once its
+    // ten-minute bucket has ended, at the look in hour 8.
+    let signal = Settings {
+        after_move_ticks: Some(50),
+        move_window: 4 * HOUR,
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &signal).unwrap();
+    let first = &out.campaigns[0];
+    assert!(first.opened_time > T0 + 7 * HOUR, "{first:?}");
+    // Around the price after the move.
+    assert_eq!((first.tick_lower, first.tick_upper), (50, 70));
+
+    // Here the volatile token is token1, priced in token0: a rising tick
+    // is its dollar price falling.
+    let down = Settings {
+        move_direction: MoveDirection::Down,
+        ..signal.clone()
+    };
+    assert_eq!(
+        run(snapshot.clone(), &events, &down).unwrap().campaigns[0].opened_time,
+        first.opened_time
+    );
+    let up = Settings {
+        move_direction: MoveDirection::Up,
+        ..signal.clone()
+    };
+    assert!(run(snapshot.clone(), &events, &up)
+        .unwrap()
+        .campaigns
+        .is_empty());
+
+    // A move larger than any seen keeps it out.
+    let big = Settings {
+        after_move_ticks: Some(100),
+        ..signal
+    };
+    assert!(run(snapshot, &events, &big).unwrap().campaigns.is_empty());
+}
+
+#[test]
+fn ranges_can_be_sized_by_the_days_volatility() {
+    // A day and more of hourly swings of 30 ticks, trading from hour 25.
+    let targets: Vec<i32> = (0..40).map(|i| if i % 2 == 0 { 5 } else { -25 }).collect();
+    let (snapshot, events) = history(&targets);
+    let base = Settings {
+        lookbacks_days: vec![1, 2],
+        trade_from: T0 + 25 * HOUR,
+        max_gap: 100_000,
+        ..around(FixedRule::Wait)
+    };
+    let width = |out: &Output| out.campaigns[0].tick_upper - out.campaigns[0].tick_lower;
+    let fixed = run(snapshot.clone(), &events, &base).unwrap();
+    assert_eq!(width(&fixed), 20);
+    // One 30-tick change every six ten-minute buckets: a standard deviation
+    // of about 12 ticks a bucket, about 150 a day.
+    let one = Settings {
+        width_vol_multiple: Some(1.0),
+        ..base.clone()
+    };
+    let half = Settings {
+        width_vol_multiple: Some(0.5),
+        ..base.clone()
+    };
+    let (one, half) = (
+        run(snapshot.clone(), &events, &one).unwrap(),
+        run(snapshot.clone(), &events, &half).unwrap(),
+    );
+    assert!((140..=170).contains(&width(&one)), "{}", width(&one));
+    assert!((70..=90).contains(&width(&half)), "{}", width(&half));
+    assert_eq!(width(&one) % 10, 0);
+    assert_conserved(&one);
+
+    // Before there is enough history the run's width is used.
+    let early = Settings {
+        width_vol_multiple: Some(1.0),
+        trade_from: T0,
+        ..base
+    };
+    assert_eq!(width(&run(snapshot, &events, &early).unwrap()), 20);
+}
+
+#[test]
+fn exit_and_signal_settings_that_are_not_numbers_are_refused() {
+    let (snapshot, events) = history(&[5]);
+    let cases = [
+        (
+            Settings {
+                max_loss_pct: Some(0.0),
+                ..settings(FixedRule::Wait)
+            },
+            "exit.max_loss_pct",
+        ),
+        (
+            Settings {
+                max_drawdown_pct: Some(f64::NAN),
+                ..settings(FixedRule::Wait)
+            },
+            "exit.max_drawdown_pct",
+        ),
+        (
+            Settings {
+                width_vol_multiple: Some(-1.0),
+                ..settings(FixedRule::Wait)
+            },
+            "entry.width_vol_multiple",
+        ),
+        (
+            Settings {
+                after_move_ticks: Some(0),
+                ..settings(FixedRule::Wait)
+            },
+            "entry.after_move_pct",
+        ),
+        (
+            Settings {
+                exit_on_return_ticks: Some(0),
+                ..settings(FixedRule::Wait)
+            },
+            "exit.exit_on_return_pct",
+        ),
+    ];
+    for (odd, key) in cases {
+        let error = run(snapshot.clone(), &events, &odd)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(key), "{error}");
+    }
 }

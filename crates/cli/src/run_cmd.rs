@@ -15,7 +15,7 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, Dollar, GasModel, Policy, Settings, Shape, Token};
+use lpbot_sim::engine::{self, Dollar, GasModel, MoveDirection, Policy, Settings, Shape, Token};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
@@ -92,6 +92,29 @@ fn duration(map: &BTreeMap<String, Value>, path: &[&str], default: u64) -> Resul
                     path.join(".")
                 )
             }),
+    }
+}
+
+/// Ticks a price move of `pct` percent spans, rounded. A move of 0 or
+/// less, or not a number, is 0 ticks, which the engine refuses with the
+/// setting's name.
+pub fn pct_to_ticks(pct: f64) -> Tick {
+    let ticks = (1.0 + pct / 100.0).ln() / 1.0001f64.ln();
+    if ticks.is_finite() && ticks > 0.0 {
+        ticks.round() as Tick
+    } else {
+        0
+    }
+}
+
+/// Which way price must have moved for the entry signal:
+/// `entry.move_direction`, either way unless set.
+pub fn move_direction(strategy: &StrategyConfig) -> Result<MoveDirection> {
+    match text(&strategy.extra, &["entry", "move_direction"]).as_deref() {
+        None | Some("any") => Ok(MoveDirection::Any),
+        Some("up") => Ok(MoveDirection::Up),
+        Some("down") => Ok(MoveDirection::Down),
+        Some(other) => bail!("entry.move_direction `{other}` is not one of any, up or down"),
     }
 }
 
@@ -509,6 +532,15 @@ fn settings(
         max_seconds_beyond: optional_duration(&strategy.patience.extra, &["max_wait"])?,
         exit_vol_to_width: number(&strategy.extra, &["exit", "max_vol_to_width"]),
         recenter_after: optional_wait(&strategy.extra, &["exit", "recenter_after"])?,
+        max_hold: optional_duration(&strategy.extra, &["exit", "max_hold"])?,
+        max_loss_pct: number(&strategy.extra, &["exit", "max_loss_pct"]),
+        max_drawdown_pct: number(&strategy.extra, &["exit", "max_drawdown_pct"]),
+        exit_on_return_ticks: number(&strategy.extra, &["exit", "exit_on_return_pct"])
+            .map(pct_to_ticks),
+        after_move_ticks: number(&strategy.extra, &["entry", "after_move_pct"]).map(pct_to_ticks),
+        move_window: duration(&strategy.extra, &["entry", "move_window"], 4 * 3_600)?,
+        move_direction: move_direction(strategy)?,
+        width_vol_multiple: number(&strategy.extra, &["entry", "width_vol_multiple"]),
         gas,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
@@ -1413,6 +1445,25 @@ pub(crate) mod tests {
         let ladder = strategy(&format!("{BASE}entry: {{ shape: ladder }}\n"));
         let error = entry_shape(&ladder).unwrap_err().to_string();
         assert!(error.contains("one_sided or around_price"), "{error}");
+    }
+
+    #[test]
+    fn a_move_in_percent_becomes_ticks_and_a_direction_is_named() {
+        assert_eq!(pct_to_ticks(1.0), 100);
+        assert_eq!(pct_to_ticks(5.0), 488);
+        assert_eq!(pct_to_ticks(0.0), 0);
+        assert_eq!(pct_to_ticks(-3.0), 0);
+        assert_eq!(pct_to_ticks(f64::NAN), 0);
+        assert_eq!(move_direction(&strategy(BASE)).unwrap(), MoveDirection::Any);
+        let up = strategy(&format!("{BASE}entry: {{ move_direction: up }}\n"));
+        assert_eq!(move_direction(&up).unwrap(), MoveDirection::Up);
+        let down = strategy(&format!("{BASE}entry: {{ move_direction: down }}\n"));
+        assert_eq!(move_direction(&down).unwrap(), MoveDirection::Down);
+        let odd = strategy(&format!("{BASE}entry: {{ move_direction: sideways }}\n"));
+        assert!(move_direction(&odd)
+            .unwrap_err()
+            .to_string()
+            .contains("any, up or down"));
     }
 
     #[test]
