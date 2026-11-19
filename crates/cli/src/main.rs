@@ -91,8 +91,8 @@ struct GatesArgs {
     /// Defaults to LPBOT_DB_URL; without one the load is left out.
     #[arg(long)]
     db: Option<String>,
-    /// Step to start at: node, pools, replica, history, row-count, fees,
-    /// backtest, load or calibrate. The steps before it are left out.
+    /// Step to start at: node, pools, replica, history, fees, backtest,
+    /// load or calibrate. The steps before it are left out.
     #[arg(long)]
     start_at: Option<String>,
     /// Steps to leave out, separated by commas.

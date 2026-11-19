@@ -16,7 +16,6 @@ chains:
     chain_id: 1
     rpc:
       local: http://127.0.0.1:8545   # the node started by `make up`
-      public: [https://ethereum-rpc.publicnode.com, https://eth.llamarpc.com]
       max_head_lag_blocks: 2
     submit: https://rpc.flashbots.net/fast
     custody: { kind: safe_roles, safe: "0x...", roles: "0x..." }

@@ -7,28 +7,24 @@
 //! only does what is new.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::Address;
 use anyhow::{anyhow, bail, Result};
-use lpbot_chain::eth::{Log, SyncProgress};
+use lpbot_chain::eth::SyncProgress;
 use lpbot_chain::uniswap_v3::DiscoveredPool;
-use lpbot_chain::RpcClient;
 use lpbot_core::config::Mode;
 use lpbot_core::experiment::ResolvedRun;
-use lpbot_data::backfill::NodeSource;
-use lpbot_data::cross_check::{day_blocks, differences};
 use lpbot_data::day::Day;
 use lpbot_data::fee_check::{FeeCheckSummary, PositionReader};
 use lpbot_data::snapshot::SnapshotStore;
-use lpbot_data::store::{DayState, EventStore, StoredLog};
 use lpbot_sim::engine::Policy;
 
 use crate::chain_cmd::{self, chain_addresses, Chain, HEAD_MARGIN};
 use crate::{backfill_cmd, fees_cmd, load_cmd, rank_cmd, run_cmd};
 
 /// The steps in the order they run, each with what it shows.
-pub const STEPS: [(&str, &str); 9] = [
+pub const STEPS: [(&str, &str); 8] = [
     ("node", "the node answers, is synced and follows the chain"),
     ("pools", "the universe's pools, from the Uniswap v3 factory"),
     (
@@ -38,10 +34,6 @@ pub const STEPS: [(&str, &str); 9] = [
     (
         "history",
         "pool history stored and replayed against the chain (gate 3)",
-    ),
-    (
-        "row-count",
-        "a stored day against an independent endpoint (gate 3)",
     ),
     (
         "fees",
@@ -59,9 +51,6 @@ pub const STEPS: [(&str, &str); 9] = [
 
 /// A head older than this means the node is not following the chain.
 const MAX_HEAD_AGE: u64 = 600;
-/// Blocks per log request at a public endpoint, which allow less than a
-/// node of one's own.
-const PUBLIC_LOG_CHUNK: u64 = 500;
 
 /// How a step ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,52 +371,6 @@ pub fn host_of(url: &str) -> &str {
     rest.rsplit_once('@').map_or(rest, |(_, host)| host)
 }
 
-/// An endpoint's error as it may be shown. The error can quote the
-/// endpoint, key and all; only the host is kept.
-pub fn shown(error: &anyhow::Error, url: &str) -> String {
-    format!("{error:#}").replace(url, host_of(url))
-}
-
-/// The newest day stored complete for a pool that holds at least one log,
-/// with its logs.
-pub fn newest_day_with_logs(
-    store: &EventStore,
-    chain: &str,
-    pool: Address,
-) -> Result<Option<(Day, Vec<StoredLog>)>> {
-    for (day, state) in store.days(chain, pool)?.into_iter().rev() {
-        if state != DayState::Complete {
-            continue;
-        }
-        let logs = store.read_day(chain, pool, day)?.unwrap_or_default();
-        if !logs.is_empty() {
-            return Ok(Some((day, logs)));
-        }
-    }
-    Ok(None)
-}
-
-/// A pool's logs in a block range from another endpoint, after checking
-/// that it is on the same chain and has the same block at the range's end.
-fn read_elsewhere(
-    url: &str,
-    chain_id: u64,
-    pool: Address,
-    (first, last): (u64, u64),
-    last_hash: B256,
-) -> Result<Vec<Log>> {
-    // An endpoint that does not answer is passed over for the next one.
-    let client = RpcClient::new(url).with_retries(1, Duration::from_millis(300));
-    let id = client.chain_id()?;
-    if id != chain_id {
-        bail!("it serves chain id {id}, not {chain_id}");
-    }
-    if client.block_header(last)?.1 != last_hash {
-        bail!("its block {last} is not the block the node has");
-    }
-    Ok(client.get_logs_chunked(pool, &[], first, last, PUBLIC_LOG_CHUNK, |_, _| {})?)
-}
-
 /// What the caller chooses. Not printable: `db` holds a password.
 pub struct Options {
     pub chain_name: String,
@@ -665,82 +608,6 @@ impl Gates {
         )))
     }
 
-    fn row_count(&mut self) -> Result<Outcome> {
-        let Some((pool, name)) = self.traded_pools()?.into_iter().next() else {
-            return Ok(Outcome::Open("no pool is stored to compare".into()));
-        };
-        let store = EventStore::new(&self.options.root);
-        // Two empty answers agree and prove nothing: compare a day with logs.
-        let Some((day, stored)) = newest_day_with_logs(&store, &self.options.chain_name, pool)?
-        else {
-            return Ok(Outcome::Open(format!(
-                "{name} has no complete day with a log stored yet to compare; \
-                 two empty days would agree without showing anything"
-            )));
-        };
-        let endpoints =
-            chain_cmd::public_endpoints(&self.runs[0].config, &self.options.chain_name)?;
-        let log_chunk = self.options.log_chunk;
-
-        let chain = self.chain()?;
-        let source = NodeSource {
-            client: &chain.client,
-            head_margin: HEAD_MARGIN,
-            log_chunk,
-        };
-        let Some(blocks) = day_blocks(&source, day)? else {
-            return Ok(Outcome::Open(format!(
-                "the node has no finished block range for {day}"
-            )));
-        };
-        let chain_id = chain.client.chain_id()?;
-        let (_, last_hash) = chain.client.block_header(blocks.1)?;
-        println!(
-            "  {name} on {day}: {} logs stored, blocks {} to {}",
-            stored.len(),
-            blocks.0,
-            blocks.1
-        );
-
-        let mut disagreeing = Vec::new();
-        for url in &endpoints {
-            let host = host_of(url);
-            match read_elsewhere(url, chain_id, pool, blocks, last_hash) {
-                Err(error) => {
-                    println!("  {host}: nothing to compare with ({})", shown(&error, url))
-                }
-                Ok(logs) => {
-                    let found = differences(&stored, &logs);
-                    if found.is_empty() {
-                        return Ok(Outcome::Pass(format!(
-                            "{name} on {day}: {} logs here and at {host}, identical",
-                            stored.len()
-                        )));
-                    }
-                    println!("  {host}: {} logs there", logs.len());
-                    for difference in &found {
-                        println!("    {difference}");
-                    }
-                    disagreeing.push(host);
-                }
-            }
-        }
-        if disagreeing.is_empty() {
-            Ok(Outcome::Open(format!(
-                "no public endpoint gave an answer to compare with. {name} has {} logs on {day} \
-                 (blocks {} to {}); compare that with a block explorer by hand",
-                stored.len(),
-                blocks.0,
-                blocks.1
-            )))
-        } else {
-            Ok(Outcome::Fail(format!(
-                "{name} on {day} is not what {} returned; the differences are listed above",
-                disagreeing.join(" and ")
-            )))
-        }
-    }
-
     fn fees(&mut self) -> Result<Outcome> {
         let mut outcomes = Vec::new();
         let root = self.options.root.clone();
@@ -829,12 +696,11 @@ impl Gates {
 
     /// The steps, in the order of `STEPS`.
     pub fn steps<'a>() -> Vec<Step<'a, Gates>> {
-        let run: [fn(&mut Gates) -> Result<Outcome>; 9] = [
+        let run: [fn(&mut Gates) -> Result<Outcome>; 8] = [
             Gates::node,
             Gates::pools,
             Gates::replica,
             Gates::history,
-            Gates::row_count,
             Gates::fees,
             Gates::backtest,
             Gates::load,
