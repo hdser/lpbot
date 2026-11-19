@@ -114,6 +114,11 @@ fn settings(rule: FixedRule) -> Settings {
         lookbacks_days: vec![7, 30],
         move_margin: 1.5,
         min_passes_per_day: 0.0,
+        max_vol_to_width: None,
+        max_daily_vol_ticks: None,
+        min_gas_multiple: None,
+        max_seconds_beyond: None,
+        exit_vol_to_width: None,
         gas: GasModel::free(),
         series_every: HOUR,
         trade_from: T0,
@@ -1065,4 +1070,157 @@ fn results_are_given_in_dollars_as_well_as_in_the_value_token() {
         .series
         .iter()
         .all(|row| (row.equity_usd - row.equity).abs() < 1e-12));
+}
+
+/// Thirty wild hours swinging 800 ticks, then thirty calmer hours
+/// crossing the range next to the price back and forth.
+fn wild_then_calm() -> (PoolSnapshot, Vec<TimedEvent>) {
+    let mut targets = Vec::new();
+    for i in 0..30 {
+        targets.push(if i % 2 == 0 { 400 } else { -400 });
+    }
+    for i in 0..30 {
+        targets.push(if i % 2 == 0 { 25 } else { -25 });
+    }
+    history(&targets)
+}
+
+#[test]
+fn the_volatility_gate_keeps_the_bot_out_of_a_wild_day_and_lets_it_in_on_a_calm_one() {
+    let (snapshot, events) = wild_then_calm();
+    let open = run(snapshot.clone(), &events, &settings(FixedRule::Close)).unwrap();
+    assert!(open.campaigns[0].opened_time < T0 + 5 * HOUR);
+
+    let gated = Settings {
+        // A day's volatility of at most 20 widths: the calm part is about
+        // 12, the wild part about 200.
+        max_vol_to_width: Some(20.0),
+        ..settings(FixedRule::Close)
+    };
+    let out = run(snapshot.clone(), &events, &gated).unwrap();
+    assert!(!out.campaigns.is_empty(), "the calm part lets it in");
+    // Nothing starts until the wild hours have left the day's window.
+    assert!(
+        out.campaigns.iter().all(|c| c.opened_time > T0 + 30 * HOUR),
+        "{:?}",
+        out.campaigns
+            .iter()
+            .map(|c| (c.opened_time - T0) / HOUR)
+            .collect::<Vec<_>>()
+    );
+
+    // An absolute limit in ticks works the same way; one nothing meets
+    // keeps the bot out throughout.
+    let strict = Settings {
+        max_daily_vol_ticks: Some(1.0),
+        ..settings(FixedRule::Close)
+    };
+    assert!(run(snapshot, &events, &strict)
+        .unwrap()
+        .campaigns
+        .is_empty());
+}
+
+#[test]
+fn an_entry_too_small_for_its_gas_is_not_made() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    // A round trip costs 0.01 of the value token here; the capital is 1.
+    let costly = Settings {
+        gas: priced(),
+        min_gas_multiple: Some(200.0),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &costly).unwrap();
+    assert!(out.campaigns.is_empty());
+    assert_eq!(out.summary.end_capital, out.summary.start_capital);
+    let affordable = Settings {
+        min_gas_multiple: Some(50.0),
+        ..costly
+    };
+    assert!(!run(snapshot, &events, &affordable)
+        .unwrap()
+        .campaigns
+        .is_empty());
+}
+
+#[test]
+fn a_position_stranded_longer_than_the_longest_wait_is_closed() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let patient = run(snapshot.clone(), &events, &settings(FixedRule::Wait)).unwrap();
+    assert_eq!(patient.campaigns[0].exit_reason, "round_trip_complete");
+
+    let limited = Settings {
+        max_seconds_beyond: Some(HOUR),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &limited).unwrap();
+    assert_eq!(out.campaigns[0].exit_reason, "patience_timeout");
+    let closing = out
+        .decisions
+        .iter()
+        .find(|d| d.action == "close")
+        .expect("the close is recorded");
+    assert!(closing.seconds_stranded >= HOUR);
+    assert_eq!(closing.expected_wait, None);
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_resting_position_steps_aside_when_the_day_turns_wild() {
+    // A calm day and more crossing the range below the price every hour,
+    // then wild swings far above it, where the range holds only the
+    // value token. Trading starts after the first day, so every range has
+    // a day of crossings behind it.
+    let mut targets = Vec::new();
+    for i in 0..30 {
+        targets.push(if i % 2 == 0 { 5 } else { -25 });
+    }
+    for i in 0..30 {
+        targets.push(if i % 2 == 0 { 300 } else { 1_100 });
+    }
+    let (snapshot, events) = history(&targets);
+    let calm = Settings {
+        // Moving away is not what this is about.
+        max_gap: 100_000,
+        lookbacks_days: vec![1, 2],
+        trade_from: T0 + 25 * HOUR,
+        ..settings(FixedRule::Wait)
+    };
+    let stays = run(snapshot.clone(), &events, &calm).unwrap();
+    assert!(stays
+        .campaigns
+        .iter()
+        .all(|c| c.exit_reason != "stepped_aside"));
+
+    let careful = Settings {
+        exit_vol_to_width: Some(10.0),
+        ..calm.clone()
+    };
+    let out = run(snapshot.clone(), &events, &careful).unwrap();
+    let aside = out
+        .campaigns
+        .iter()
+        .position(|c| c.exit_reason == "stepped_aside")
+        .expect("a resting range steps aside once the day turns wild");
+    assert!(out.campaigns[aside].closed_time > T0 + 30 * HOUR);
+    assert_conserved(&out);
+    // Alone, the exit rule lets the bot straight back in, to step aside
+    // again an hour later.
+    assert!(out.campaigns.len() > aside + 5);
+
+    // With the entry gate at the same level it stays out while the day
+    // is wild.
+    let paired = Settings {
+        max_vol_to_width: Some(10.0),
+        ..careful
+    };
+    let out = run(snapshot, &events, &paired).unwrap();
+    let aside = out
+        .campaigns
+        .iter()
+        .position(|c| c.exit_reason == "stepped_aside")
+        .expect("it steps aside");
+    assert!(out.campaigns[aside].passes >= 2, "after round trips");
+    assert_eq!(out.campaigns.len(), aside + 1, "and does not come back");
+    assert_conserved(&out);
 }

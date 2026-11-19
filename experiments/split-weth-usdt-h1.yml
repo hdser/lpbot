@@ -1,0 +1,30 @@
+# The active-management rules on half of the window alone: May to July 2026, when ETH fell about 18% in dollars.
+# The gates were chosen on the whole of May to October, so these halves are
+# not out of sample; experiments/unseen-weth-usdt.yml is. On the WETH/USDT
+# pools: the plain "wait" rule against an entry gate (the day's volatility
+# at most 4 range widths), stepping aside to cash (above 12 widths), and
+# both. Expands into 32 runs, each counted in ETH and in USD.
+#
+# Research settings: all capital in each campaign, a 50% loss limit so
+# every run sees the whole window.
+#
+#   cargo run --release -p lpbot -- run experiments/split-weth-usdt-h1.yml
+
+experiment: split-weth-usdt-h1
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-05-01, to: 2026-07-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0x11b815efB8f581194ae79006d24E0d814B7697F6"   # WETH/USDT 0.05%
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  entry.width_ticks: [40, 120]
+  entry.min_gas_multiple: [100]
+  entry.max_vol_to_width: [null, 4]
+  exit.max_vol_to_width: [null, 12]
+  patience.mode: [wait]
+  patience.max_wait: [null]
