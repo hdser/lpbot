@@ -14,7 +14,7 @@ use crate::engine::Output;
 use crate::tables::{
     pool_tables, read_table, result_tables, Column, PoolInfo, RunInfo, Table, TableError,
 };
-use crate::{POOL_TABLES, RESULT_TABLES};
+use crate::{LIVE_TABLES, POOL_TABLES, RESULT_TABLES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -36,7 +36,7 @@ pub enum LoadError {
 
 /// Names come from our own files, but they still go into SQL text: only
 /// lower-case letters, digits and underscores pass.
-fn identifier(name: &str) -> Result<&str, LoadError> {
+pub(crate) fn identifier(name: &str) -> Result<&str, LoadError> {
     let ok = !name.is_empty()
         && name.len() <= 63
         && name
@@ -60,9 +60,9 @@ fn sql_type(column: &Column) -> &'static str {
 }
 
 /// The column a table's rows are replaced by: the run for a result table,
-/// the pool for a pool table.
+/// the pool for a pool table or a live table.
 pub fn key_column(table: &str) -> &'static str {
-    if POOL_TABLES.contains(&table) {
+    if POOL_TABLES.contains(&table) || LIVE_TABLES.contains(&table) {
         "pool"
     } else {
         "run_id"
@@ -89,8 +89,8 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     Ok(statements)
 }
 
-/// The six result tables and the two pool tables as SQL, for a database
-/// that has no runs yet.
+/// The six result tables, the two pool tables and the five live tables
+/// as SQL, for a database that has no runs yet.
 ///
 /// The viewer's dashboards query these tables. Creating them empty lets a
 /// fresh database show "no data" instead of an error. The same text is
@@ -100,9 +100,9 @@ pub fn full_schema_sql() -> String {
     let mut tables = result_tables(&RunInfo::default(), &Output::default(), &[]);
     tables.extend(pool_tables(&PoolInfo::default(), &[], &[]));
     let mut sql = String::from(
-        "-- The six result tables and the two pool tables, empty. Generated from the\n\
-         -- table definitions in\n\
-         -- crates/sim/src/tables.rs; do not edit by hand. To regenerate:\n\
+        "-- The six result tables, the two pool tables and the five live tables, empty.\n\
+         -- Generated from the table definitions in crates/sim/src/tables.rs and\n\
+         -- crates/sim/src/live_tables.rs; do not edit by hand. To regenerate:\n\
          --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file\n",
     );
     for table in &tables {
@@ -112,6 +112,7 @@ pub fn full_schema_sql() -> String {
             sql.push_str(";\n");
         }
     }
+    sql.push_str(&crate::live_db::live_schema());
     sql
 }
 
@@ -331,6 +332,13 @@ mod tests {
         }
         assert!(current
             .contains("ALTER TABLE series ADD COLUMN IF NOT EXISTS price_lower double precision;"));
+        // And the live tables, keyed by pool and more.
+        for table in crate::LIVE_TABLES {
+            assert!(current.contains(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (pool text NOT NULL)"
+            )));
+            assert!(current.contains(&format!("CREATE UNIQUE INDEX IF NOT EXISTS {table}_key")));
+        }
     }
 
     #[test]
