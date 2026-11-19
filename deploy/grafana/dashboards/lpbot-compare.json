@@ -1,0 +1,871 @@
+{
+  "uid": "lpbot-compare",
+  "title": "lpbot: compare",
+  "description": "Runs and strategies side by side: value curves in dollars and in the value token against holding ETH and holding dollars, their figures in a table, and every run of the chosen experiments averaged by rule, value token, width, pool or settings.",
+  "tags": [
+    "lpbot"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-2y",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "experiment",
+        "label": "Experiments",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct experiment from runs order by 1",
+        "definition": "select distinct experiment from runs order by 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": false
+      },
+      {
+        "name": "runs",
+        "label": "Runs to compare",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) order by r.experiment, r.run_index",
+        "definition": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) order by r.experiment, r.run_index",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "group_by",
+        "label": "Group by",
+        "type": "custom",
+        "query": "patience,value_token,width_ticks,pool,sweep,experiment",
+        "current": {
+          "text": "patience",
+          "value": "patience"
+        },
+        "options": [
+          {
+            "text": "patience",
+            "value": "patience",
+            "selected": true
+          },
+          {
+            "text": "value_token",
+            "value": "value_token",
+            "selected": false
+          },
+          {
+            "text": "width_ticks",
+            "value": "width_ticks",
+            "selected": false
+          },
+          {
+            "text": "pool",
+            "value": "pool",
+            "selected": false
+          },
+          {
+            "text": "sweep",
+            "value": "sweep",
+            "selected": false
+          },
+          {
+            "text": "experiment",
+            "value": "experiment",
+            "selected": false
+          }
+        ],
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "Runs",
+      "type": "link",
+      "url": "/d/lpbot-runs",
+      "icon": "dashboard"
+    }
+  ],
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Chosen runs",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 101,
+      "title": "Value in dollars, start = 100, against holding ETH and holding dollars",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding the volatile token',\n  avg(case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end * 100)\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding dollars', 100\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding the volatile token"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c0c0c0"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding dollars"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6e7781"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    4,
+                    8
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Each chosen run's value marked at the pool price, the start set to 100. The dashed lines are the benchmarks over the first chosen run's window and pool."
+    },
+    {
+      "id": 102,
+      "title": "Value in the value token, start = 100",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity / r.start_capital * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2 order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "The same in each run's own value token: ETH for ETH runs, dollars for dollar runs. Holding the value token is the line at 100."
+    },
+    {
+      "id": 103,
+      "title": "Side by side",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as run, r.sweep,\n  r.result_pct as result_value_pct, r.result_pct_usd as result_usd_pct, r.hold_value_pct_usd as holding_value_usd_pct,\n  r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as apr_pct, r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as fee_apr_pct,\n  (r.end_capital - r.start_capital) - r.fees + r.gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id) as out_of_range_pct,\n  (select max(seconds_beyond) / 86400.0 from campaigns c where c.run_id = r.run_id) as longest_out_days,\n  r.campaigns, r.passes, r.max_drawdown_pct, r.window_from, r.window_to\nfrom runs r where r.run_id in ($runs) order by r.result_pct_usd desc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_value_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "apr_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding_value_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fee_apr_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "out_of_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_drawdown_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 380
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sweep"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          }
+        ]
+      },
+      "options": {},
+      "description": "Every chosen run, best in dollars first. In and out of range are shares of the run's hours."
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Strategies within experiments, grouped",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 201,
+      "title": "Average value in dollars by group, start = 100",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select date_trunc('day', to_timestamp(s.time)) as time, cast(r.${group_by} as text) as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.experiment in ($experiment) group by 1, 2 order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Every run of the chosen experiments, averaged within each group of the chosen setting: the rule, the value token, the width, the pool or the full set of swept settings. Runs over different windows average only where they overlap in time."
+    },
+    {
+      "id": 202,
+      "title": "Averages by group",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select cast(r.${group_by} as text) as \"group\", count(*) as runs,\n  avg(r.result_pct) as result_value_pct, avg(r.result_pct_usd) as result_usd_pct,\n  min(r.result_pct_usd) as worst_usd_pct, max(r.result_pct_usd) as best_usd_pct,\n  avg(r.hold_value_pct_usd) as holding_value_usd_pct,\n  avg(r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1)) as fee_apr_pct,\n  avg((select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as in_range_pct,\n  avg((select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as out_of_range_pct,\n  avg(r.campaigns) as campaigns, avg(r.max_drawdown_pct) as max_drawdown_pct\nfrom runs r where r.experiment in ($experiment)\ngroup by 1 order by result_usd_pct desc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_value_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "worst_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "best_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding_value_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fee_apr_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "out_of_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_drawdown_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "group"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "campaigns"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "id": 203,
+      "title": "Result by group: value token and dollars",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select cast(r.${group_by} as text) as \"group\", avg(r.result_pct) as \"value token\", avg(r.result_pct_usd) as dollars\nfrom runs r where r.experiment in ($experiment) group by 1 order by dollars desc"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "group",
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "groupWidth": 0.7,
+        "barWidth": 0.9
+      }
+    }
+  ]
+}

@@ -36,7 +36,14 @@
   "annotations": {
     "list": []
   },
-  "links": [],
+  "links": [
+    {
+      "title": "Compare runs and strategies",
+      "type": "link",
+      "url": "/d/lpbot-compare?var-experiment=${experiment}",
+      "icon": "dashboard"
+    }
+  ],
   "panels": [
     {
       "id": 1,
@@ -62,7 +69,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, result_pct_usd, hold_value_pct_usd,\n  result_pct * 365.0 / (window_to::date - window_from::date + 1) as apr_pct,\n  fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1) as fee_apr_pct,\n  (end_capital - start_capital) - fees + gas as divergence, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct,\n  (extract(epoch from window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, result_pct_usd, hold_value_pct_usd,\n  result_pct * 365.0 / (window_to::date - window_from::date + 1) as apr_pct,\n  fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1) as fee_apr_pct,\n  (end_capital - start_capital) - fees + gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = runs.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = runs.run_id) as out_of_range_pct, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct,\n  (extract(epoch from window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
         }
       ],
       "fieldConfig": {
@@ -182,6 +189,38 @@
               {
                 "id": "decimals",
                 "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "out_of_range_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }
