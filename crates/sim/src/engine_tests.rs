@@ -9,8 +9,8 @@ use lpbot_venues::uniswap_v3::pool::{fees_earned, Pool, PoolSnapshot, Replay, Sw
 use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::engine::{
-    after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, GasModel,
-    Output, Policy, Settings, Token,
+    after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
+    GasModel, Output, Policy, Settings, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -98,6 +98,7 @@ fn history(targets: &[i32]) -> (PoolSnapshot, Vec<TimedEvent>) {
 fn settings(rule: FixedRule) -> Settings {
     Settings {
         value: Token::One,
+        dollar: Dollar::Other,
         decimals0: 18,
         decimals1: 18,
         width: 20,
@@ -112,6 +113,7 @@ fn settings(rule: FixedRule) -> Settings {
         latency_blocks: 1,
         lookbacks_days: vec![7, 30],
         move_margin: 1.5,
+        min_passes_per_day: 0.0,
         gas: GasModel::free(),
         series_every: HOUR,
         trade_from: T0,
@@ -1026,4 +1028,41 @@ fn what_a_flips_range_cannot_take_goes_back_with_a_charged_swap() {
         "{first:?}"
     );
     assert_conserved(&out);
+}
+
+#[test]
+fn results_are_given_in_dollars_as_well_as_in_the_value_token() {
+    // The other token is the dollar: dollars are value tokens times price.
+    let out = there_and_back(FixedRule::Wait);
+    let s = &out.summary;
+    let first = &out.series[0];
+    let last = out.series.last().unwrap();
+    assert!((s.start_price - first.price).abs() < 1e-12);
+    assert!(s.end_price > 0.0 && (s.end_price - last.price).abs() / last.price < 0.01);
+    assert!((s.start_usd - s.start_capital * s.start_price).abs() < 1e-9);
+    assert!((s.end_usd - s.end_capital * s.end_price).abs() < 1e-9);
+    let usd = (s.end_usd / s.start_usd - 1.0) * 100.0;
+    assert!((s.result_pct_usd - usd).abs() < 1e-9);
+    let hold = (s.end_price / s.start_price - 1.0) * 100.0;
+    assert!((s.hold_value_pct_usd - hold).abs() < 1e-9);
+    for row in &out.series {
+        assert!((row.equity_usd - row.equity * row.price).abs() < 1e-9);
+        assert!((row.hold_usd - row.hold * row.price).abs() < 1e-9);
+    }
+
+    // The value token is the dollar: both measures are the same, and
+    // holding it does nothing in dollars.
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let dollars = Settings {
+        dollar: Dollar::Value,
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &dollars).unwrap();
+    let s = &out.summary;
+    assert!((s.result_pct_usd - s.result_pct).abs() < 1e-9);
+    assert_eq!(s.hold_value_pct_usd, 0.0);
+    assert!(out
+        .series
+        .iter()
+        .all(|row| (row.equity_usd - row.equity).abs() < 1e-12));
 }

@@ -1,7 +1,7 @@
 {
   "uid": "lpbot-run",
   "title": "lpbot: run detail",
-  "description": "One run: price with the bot's range, value against holding, fees, campaigns and patience decisions. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
+  "description": "One run: its result in the value token and in dollars, the price in dollars with the range the bot is in, value against holding ETH and holding dollars, how its time was spent, fees, campaigns and patience decisions. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
   "tags": [
     "lpbot"
   ],
@@ -39,8 +39,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select run_id from runs where experiment = '$experiment' order by run_index",
-        "definition": "select run_id from runs where experiment = '$experiment' order by run_index",
+        "query": "select run_id as __value, lpad(run_index::text, 3, '0') || '  ' || pool || '  ' || value_token || '  ' || width_ticks || ' ticks  ' || patience as __text\nfrom runs where experiment = '$experiment' order by run_index",
+        "definition": "select run_id as __value, lpad(run_index::text, 3, '0') || '  ' || pool || '  ' || value_token || '  ' || width_ticks || ' ticks  ' || patience as __text\nfrom runs where experiment = '$experiment' order by run_index",
         "refresh": 1,
         "sort": 0,
         "multi": false,
@@ -54,9 +54,9 @@
   "links": [],
   "panels": [
     {
-      "id": 1,
-      "title": "Price of the value token, with the range the bot is in",
-      "type": "timeseries",
+      "id": 7,
+      "title": "Result",
+      "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -64,6 +64,157 @@
       "gridPos": {
         "x": 0,
         "y": 0,
+        "w": 24,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select result_pct as \"result in value token %\", result_pct_usd as \"result in dollars %\",\n  hold_value_pct_usd as \"holding the value token, dollars %\",\n  result_pct * 365.0 / (window_to::date - window_from::date + 1) as \"APR %\",\n  fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1) as \"fee APR %\",\n  (end_capital - start_capital) - fees + gas as \"divergence, value token\",\n  fees as \"fees, value token\", fees / (window_to::date - window_from::date + 1) as \"fees per day\",\n  gas as \"gas, value token\", start_usd as \"start, $\", end_usd as \"end, $\",\n  passes, campaigns, max_drawdown_pct as \"max drawdown %\",\n  (select 100.0 * count(*) filter (where state in ('in_range')) / nullif(count(*), 0)\n     from series s where s.run_id = runs.run_id) as \"time in range %\"\nfrom runs where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "start, $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "end, $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "campaigns"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees, value token"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees per day"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 5
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas, value token"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "divergence, value token"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [],
+          "fields": ""
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "description": "Results as on the runs dashboard. APR and fee APR are annualised over the run's window; fee APR is the fees over the starting capital. Divergence is what price moves cost against simply holding what went in: the result less the fees, plus the gas."
+    },
+    {
+      "id": 1,
+      "title": "Price in dollars, with the range the bot is in",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
         "w": 24,
         "h": 9
       },
@@ -77,14 +228,87 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(time) as time, price, price_lower as range_low, price_upper as range_high\nfrom series\nwhere run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(s.time) as time,\n  case when r.start_usd = r.start_capital then 1 / s.price else s.price end as price,\n  case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end as range_low,\n  case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end as range_high\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3274d9"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "range_low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#37872d"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "range_high"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#37872d"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "range_low"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 25
+              }
+            ]
+          }
+        ]
       },
-      "options": {}
+      "options": {},
+      "description": "The non-dollar token's price in dollars at the pool price, hourly. The shaded band is the range the position is in; none while flat."
     },
     {
       "id": 2,
@@ -96,7 +320,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 14,
         "w": 12,
         "h": 8
       },
@@ -120,8 +344,8 @@
       "options": {}
     },
     {
-      "id": 3,
-      "title": "Fees earned so far, in the value token",
+      "id": 8,
+      "title": "Value in dollars, against holding the volatile token and holding dollars",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -129,7 +353,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 9,
+        "y": 14,
         "w": 12,
         "h": 8
       },
@@ -143,14 +367,18 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(time) as time, fees\nfrom series\nwhere run_id = '$run'\norder by 1"
+          "rawSql": "with r as (select start_usd, start_capital, start_price from runs where run_id = '$run')\nselect to_timestamp(s.time) as time, s.equity_usd as value,\n  r.start_usd * case when r.start_usd = r.start_capital then r.start_price / s.price\n                     else s.price / r.start_price end as \"holding the volatile token\",\n  r.start_usd as \"holding dollars\"\nfrom series s, r\nwhere s.run_id = '$run'\norder by 1"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0
+        },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "The run's value marked at the pool price, against putting the starting capital in the pool's ETH (or BTC) and leaving it, and against keeping it in dollars."
     },
     {
       "id": 4,
@@ -162,8 +390,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 17,
-        "w": 24,
+        "y": 22,
+        "w": 16,
         "h": 5
       },
       "targets": [
@@ -233,6 +461,131 @@
       "description": "flat: no position. resting: all in the value token. in_range: price inside the range. beyond: all in the other token. flipped: the proceeds sit in a range next to the price."
     },
     {
+      "id": 9,
+      "title": "Time in each state",
+      "type": "bargauge",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 22,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select state, round(100.0 * count(*) / sum(count(*)) over (), 1) as share\nfrom series\nwhere run_id = '$run'\ngroup by state\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [],
+          "fields": ""
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "description": "Share of the run's hours flat (no position), resting (back in the value token), in range (earning), beyond (wholly in the other token) or flipped."
+    },
+    {
+      "id": 3,
+      "title": "Where the result comes from, in the value token",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, fees as \"fees earned\",\n  equity - hold - fees as \"price moves and costs\", equity - hold as result\nfrom series\nwhere run_id = '$run'\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Fees earned so far, against what price moves and costs did: the value less what simply holding the capital would be worth, less the fees. The two add up to the result."
+    },
+    {
+      "id": 10,
+      "title": "Fees per day, in the value token",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_char(day, 'YYYY-MM-DD') as day, greatest(f - lag(f, 1, f0) over (order by day), 0) as fees\nfrom (select date_trunc('day', to_timestamp(time)) as day, max(fees) as f, min(fees) as f0\n      from series where run_id = '$run' group by 1) d\norder by day"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 5
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "day",
+        "showValue": "never",
+        "legend": {
+          "showLegend": false
+        },
+        "xTickLabelSpacing": 100
+      },
+      "description": "Fees the run earned each day, from the hourly series."
+    },
+    {
       "id": 5,
       "title": "Campaigns",
       "type": "table",
@@ -242,7 +595,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 34,
         "w": 24,
         "h": 9
       },
@@ -256,14 +609,15 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select campaign, to_timestamp(opened_time) as opened, to_timestamp(closed_time) as closed, tick_lower, tick_upper, exit_reason, amount_in, result, fees, gas, passes, flips, round(seconds_held / 3600.0, 1) as hours_held, round(seconds_beyond / 3600.0, 1) as hours_beyond\nfrom campaigns\nwhere run_id = '$run'\norder by campaign"
+          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  c.exit_reason, c.amount_in, c.result, c.fees, c.gas, c.passes, c.flips,\n  round(c.seconds_held / 3600.0, 1) as hours_held, round(c.seconds_beyond / 3600.0, 1) as hours_beyond,\n  c.tick_lower, c.tick_upper\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
         }
       ],
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Each campaign's range in dollars as entered, how it ended, and its result, fees and gas in the value token."
     },
     {
       "id": 6,
@@ -275,7 +629,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 43,
         "w": 24,
         "h": 9
       },

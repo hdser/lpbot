@@ -1,7 +1,7 @@
 {
   "uid": "lpbot-runs",
   "title": "lpbot: runs",
-  "description": "Every run of an experiment side by side. Results, fees and gas are in the value token.",
+  "description": "Every run of an experiment side by side. Results are in the value token and in dollars; fees and gas are in the value token.",
   "tags": [
     "lpbot"
   ],
@@ -62,7 +62,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct,\n  (extract(epoch from window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+          "rawSql": "select run_id, patience, width_ticks, pool, value_token, result_pct, result_pct_usd, hold_value_pct_usd,\n  result_pct * 365.0 / (window_to::date - window_from::date + 1) as apr_pct,\n  fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1) as fee_apr_pct,\n  (end_capital - start_capital) - fees + gas as divergence, fees, gas, campaigns, passes, max_drawdown_pct, halted_by_loss_limit, mode, window_from, window_to, capital_usd, loss_limit_pct,\n  (extract(epoch from window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
         }
       ],
       "fieldConfig": {
@@ -120,6 +120,70 @@
                 "value": 2
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_pct_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hold_value_pct_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "apr_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fee_apr_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
           }
         ]
       },
@@ -128,7 +192,7 @@
     },
     {
       "id": 2,
-      "title": "Result by run, in percent of the starting capital",
+      "title": "Result by run, in percent of the starting capital: value token and dollars",
       "type": "barchart",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -138,7 +202,7 @@
         "x": 0,
         "y": 10,
         "w": 12,
-        "h": 9
+        "h": 12
       },
       "targets": [
         {
@@ -150,7 +214,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select patience || ' / ' || width_ticks as run, result_pct\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
+          "rawSql": "select pool || ' ' || value_token || ' ' || width_ticks || 't ' || patience as run,\n  result_pct as \"value token\", result_pct_usd as dollars\nfrom runs\nwhere experiment = '$experiment'\norder by run_index"
         }
       ],
       "fieldConfig": {
@@ -164,7 +228,9 @@
         "orientation": "horizontal",
         "showValue": "always",
         "legend": {
-          "showLegend": false
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
         },
         "xField": "run",
         "barWidth": 0.8
@@ -172,7 +238,7 @@
     },
     {
       "id": 3,
-      "title": "Result by range width and patience rule",
+      "title": "Result by pool, value token, width and rule",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -182,7 +248,7 @@
         "x": 12,
         "y": 10,
         "w": 12,
-        "h": 9
+        "h": 12
       },
       "targets": [
         {
@@ -194,13 +260,13 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select width_ticks,\n  max(result_pct) filter (where patience = 'adaptive') as adaptive,\n  max(result_pct) filter (where patience = 'wait') as wait,\n  max(result_pct) filter (where patience = 'flip') as flip,\n  max(result_pct) filter (where patience = 'close') as close\nfrom runs\nwhere experiment = '$experiment'\ngroup by width_ticks\norder by width_ticks"
+          "rawSql": "select pool, value_token, width_ticks, patience,\n  avg(result_pct) as result_pct, avg(result_pct_usd) as result_pct_usd,\n  avg(hold_value_pct_usd) as holding_pct_usd,\n  avg(fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1)) as fee_apr_pct,\n  avg(max_drawdown_pct) as max_drawdown_pct,\n  avg(fees) as fees, avg(passes) as passes\nfrom runs\nwhere experiment = '$experiment'\ngroup by 1, 2, 3, 4\norder by 1, 2, 3, 4"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "decimals": 3
+          "decimals": 2
         },
         "overrides": [
           {
@@ -218,11 +284,43 @@
                 "value": 0
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
           }
         ]
       },
       "options": {},
-      "description": "One row per width, one column per rule. The adaptive decision has to beat the three fixed rules."
+      "description": "Widths below a pool's tick spacing are widened to it, so they repeat; the figures are averaged over such repeats. Holding is what the value token did in dollars."
     },
     {
       "id": 4,
@@ -234,7 +332,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 22,
         "w": 24,
         "h": 8
       },
@@ -248,7 +346,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select r.patience, r.width_ticks, c.exit_reason, count(*) as campaigns, sum(c.result) as result, sum(c.fees) as fees, sum(c.passes) as passes\nfrom campaigns c join runs r using (run_id)\nwhere r.experiment = '$experiment'\ngroup by 1, 2, 3\norder by 2, 1, 3"
+          "rawSql": "select r.pool, r.value_token, r.patience, r.width_ticks, c.exit_reason, count(*) as campaigns,\n  sum(c.result) as result, sum(c.fees) as fees, sum(c.passes) as passes\nfrom campaigns c join runs r using (run_id)\nwhere r.experiment = '$experiment'\ngroup by 1, 2, 3, 4, 5\norder by 1, 2, 4, 3, 5"
         }
       ],
       "fieldConfig": {

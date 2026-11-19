@@ -1,0 +1,27 @@
+# Scan of the USDC/WETH pools: every fee tier, eight range widths, ETH or
+# dollars as the value token, the three fixed patience rules. Expands into
+# 144 backtest runs. Results come in ETH and in USD for each run.
+#
+# Research settings, not trading ones: all the capital goes into each
+# campaign, and the loss limit is wide (50%) so every run lives through the
+# whole window and shows what the strategy does on its own. A width below a
+# pool's tick spacing is widened to it (1 tick at 0.01%, 10 at 0.05%, 60 at
+# 0.3%), so the narrow widths repeat on the coarser pools.
+#
+#   cargo run --release -p lpbot -- run experiments/scan-usdc-weth.yml
+
+experiment: scan-usdc-weth
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0xE0554a476A092703abdB3Ef35c80e0D76d32939F"   # USDC/WETH 0.01%
+    - "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"   # USDC/WETH 0.05%
+    - "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"   # USDC/WETH 0.3%
+  value_token: [WETH, USDC]
+  capital_share: [1.0]
+  entry.width_ticks: [2, 5, 10, 20, 40, 60, 120, 240]
+  patience.mode: [wait, flip, close]

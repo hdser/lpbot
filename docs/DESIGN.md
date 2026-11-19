@@ -305,14 +305,14 @@ How a run works:
 **What the first version trades.** The zone round trip, with the adaptive patience decision or one of the three fixed rules, on one pool per run:
 
 - *Pool.* The stored pool holding the value token that ranks highest by implied volatility over the week before the window, unless the strategy names a `pool`. The floors are enforced: when no stored pool clears them, the run is refused with each pool's reason and what to do. A named pool is traded even below the floors, with a warning. Sweeping `pool` compares fee tiers; each run trades the pool it names.
-- *Entry.* One-sided in the value token, in a range of the run's width within `entry.max_gap_ticks` of the price (one width by default). Among those ranges it takes the one crossed most on the longest lookback, provided it was also crossed on the shortest. Without a day of history it takes the nearest.
+- *Entry.* One-sided in the value token, in a range of the run's width within `entry.max_gap_ticks` of the price (one width by default). Among those ranges it takes the one crossed most on the longest lookback, provided it was also crossed on the shortest and at least `entry.min_passes_per_day` times a day on the longest (0 by default, which lets any range crossed lately qualify). Without a day of history it takes the nearest. The minimum exists because of what the first real backtests showed: on 6 June 2026 ETH wicked to about $1,520 for an hour, the wick itself counted as a crossing on the 7-day lookback, every run that was flat then entered a range just above the wick, and price never came back; one such campaign held its capital in dollars for 148 days and cost more than all the round trips earned.
 - *Staying.* A position that is back in the value token stays for the next pass. It moves only when price has drifted further than the gap allows, or when another range is crossed `entry.move_margin` times as often (1.5 by default).
 - *Beyond the range.* Every `patience.decide_every` the policy answers: wait, flip into the range next to the price, or close. A price exactly on the far bound counts as beyond, as the position's holdings do. A flipped position that price leaves behind by a full width gets the same question again. The decision row records the range the flip actually went to. A flip whose new leg cannot open ends the campaign as `flip_failed`. What the new range cannot take stays in the other token and goes back with the campaign's closing swap, which is charged.
 - *Loss limit.* Checked on every block against the run's starting capital, position marked at the pool price, net of any gas still owed. When hit, everything is closed and the run stops. `risk.loss_window` in the config is not read yet.
 
 All of these are the fixed starting point the calibrator has to beat, not tuned choices.
 
-**Outputs per run.** Per campaign and in total, counted in the value token: amount in, amount out, fees, days held, passes completed, time spent beyond the range, gas and swap cost. Each run is compared with simply holding the value token. An arbitrage-loss figure is available as an optional diagnostic.
+**Outputs per run.** Per campaign and in total, counted in the value token: amount in, amount out, fees, days held, passes completed, time spent beyond the range, gas and swap cost. Each run is compared with simply holding the value token. Every run is also counted in dollars, with the pool's dollar stable at one dollar: its capital at the pool price when trading starts and when it ends, the result in dollars, and what simply holding the value token did in dollars (the price change for ETH, nothing for a stable); the series carries the value and the hold line in dollars hour by hour. An arbitrage-loss figure is available as an optional diagnostic.
 
 **Calibration, not hand-tuning.** A calibrator reruns the simulator on a schedule across the search space of settings: zone ranking weights, width, fee tier, entry shape and patience margins. It fits on one window and scores on the next. A setting is promoted to simulation mode only if it beats both the one currently running and the fixed-rule baselines on the scoring window. The first version calibrates the patience decision only: 18 combinations of horizon, margin and credit per fold, the adaptive decision shipping only if its out-of-sample results, summed over the folds, beat every fixed rule. Width and fee tier are compared by sweeping them in the experiment file. Running it on a schedule and promoting into simulation mode come with paper mode. Simulation mode (`paper` in the config) then runs it on live data before any capital follows.
 
@@ -712,10 +712,10 @@ A sweep may only set a setting the strategy already has in the base config; a mi
 
 | Table | One row per | Holds |
 | --- | --- | --- |
-| `runs` | Run | Config hash, code version, mode, window, run inputs, headline results in the value token |
+| `runs` | Run | Config hash, code version, mode, window, run inputs, headline results in the value token and in dollars, start and end price |
 | `campaigns` | Campaign | Pool, zone, width, fee tier, entry and exit, amount in and out, fees, days held |
 | `decisions` | Patience decision | The three options with their expected results, the choice, and how it turned out |
-| `series` | Run and time step | Price, position value in the value token, value if held, cumulative fees, in or out of range |
+| `series` | Run and time step | Price, the range as prices, position value and value if held in the value token and in dollars, cumulative fees, in or out of range |
 | `pool_rank` | Pool and refresh | Fee, volume, in-range liquidity, implied volatility |
 | `zone_map` | Pool, zone and lookback | Passes per day, time in range, return odds |
 
@@ -725,8 +725,8 @@ Tables are written as Parquet per run, as `<results>/<table>/<run id>.parquet` w
 
 | View | Shows |
 | --- | --- |
-| Runs | Any set of runs side by side on headline results; a sweep as a grid of setting against result |
-| Run detail | Price with the ranges and campaign entries and exits drawn on it; value in the value token against holding; cumulative fees |
+| Runs | Any set of runs side by side on headline results in the value token and in dollars, with APR, fee APR and divergence; a sweep as a grid of pool, value token, width and rule against result |
+| Run detail | The result in the value token and in dollars, APR, fee APR, divergence, gas and time in range; the price in dollars with the bot's range as a band; value against holding in the value token, and in dollars against holding ETH and holding dollars; time in each state; fees against price moves, fees per day; each campaign's range in dollars |
 | Decisions | Each patience decision with its three options, what was chosen and what happened next |
 | Pools and zones | The ranking table through time; the zone map as a heat map |
 | Live | The same views on the running bot, plus node and safety status |
