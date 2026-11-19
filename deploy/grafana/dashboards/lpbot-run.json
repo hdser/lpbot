@@ -1,7 +1,7 @@
 {
   "uid": "lpbot-run",
   "title": "lpbot: run detail",
-  "description": "One run: its result in the value token and in dollars, the price in dollars with the range the bot is in, value against holding ETH and holding dollars, how its time was spent, fees, campaigns and patience decisions. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
+  "description": "One run: its result in the value token and in dollars, how its time split between in range, out of range, resting and flat, the price with its ranges and campaigns, the pool's liquidity, its value against holding, and every campaign. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
   "tags": [
     "lpbot"
   ],
@@ -49,13 +49,61 @@
     ]
   },
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "name": "Campaigns",
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(150, 150, 150, 0.25)",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "filter": {
+          "exclude": false,
+          "ids": [
+            301
+          ]
+        },
+        "target": {
+          "refId": "Anno",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_timestamp(opened_time) as time, to_timestamp(closed_time) as timeend,\n  'Campaign ' || campaign || ': ' || exit_reason || ', ' || passes || ' passes, ' ||\n  round((seconds_beyond / 3600.0)::numeric, 1) || ' h out of range, result ' ||\n  round((result / nullif(amount_in, 0) * 100)::numeric, 2) || '%' as text,\n  exit_reason as tags\nfrom campaigns where run_id = '$run' order by 1"
+        }
+      }
+    ]
   },
-  "links": [],
+  "links": [
+    {
+      "title": "Compare runs",
+      "type": "link",
+      "url": "/d/lpbot-compare",
+      "icon": "dashboard"
+    }
+  ],
   "panels": [
     {
-      "id": 7,
+      "id": 100,
+      "type": "row",
       "title": "Result",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 101,
+      "title": "Result, in the value token",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -63,8 +111,1416 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.result_pct as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#c4162a",
+                "value": null
+              },
+              {
+                "color": "#37872d",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "The run's result in its value token: ETH for an ETH run, dollars for a dollar run."
+    },
+    {
+      "id": 102,
+      "title": "Result, in dollars",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.result_pct_usd as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#c4162a",
+                "value": null
+              },
+              {
+                "color": "#37872d",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "The same result in dollars: the capital valued at the pool price at the start and at the end."
+    },
+    {
+      "id": 103,
+      "title": "Holding the value token, in dollars",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.hold_value_pct_usd as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#c4162a",
+                "value": null
+              },
+              {
+                "color": "#37872d",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "What simply holding the value token did in dollars over the run: the price change for ETH, nothing for dollars."
+    },
+    {
+      "id": 104,
+      "title": "APR",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#c4162a",
+                "value": null
+              },
+              {
+                "color": "#37872d",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "The result in the value token, annualised over the run's window."
+    },
+    {
+      "id": 105,
+      "title": "Fee APR",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Fees over the starting capital, annualised: what the range earned before price moves and costs."
+    },
+    {
+      "id": 106,
+      "title": "Max drawdown",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.max_drawdown_pct as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0752d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "The deepest fall of the value, marked at the pool price, from its highest point so far."
+    },
+    {
+      "id": 107,
+      "title": "Fees, in the value token",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.fees as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Fees the positions earned, collected or not."
+    },
+    {
+      "id": 108,
+      "title": "Divergence, in the value token",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select (r.end_capital - r.start_capital) - r.fees + r.gas as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#c4162a",
+                "value": null
+              },
+              {
+                "color": "#37872d",
+                "value": 0
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "What price moves cost against simply holding what went in: the result less the fees, plus the gas."
+    },
+    {
+      "id": 109,
+      "title": "Gas, in the value token",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.gas as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Gas for every open, close and swap, at the fixed price in the run's costs."
+    },
+    {
+      "id": 110,
+      "title": "Campaigns",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.campaigns as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Positions opened and closed in the run."
+    },
+    {
+      "id": 111,
+      "title": "Round trips",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.passes as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Full passes of price through the range: each pays about the fee tier on the position."
+    },
+    {
+      "id": 112,
+      "title": "End value, $",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select r.end_usd as value from runs r where r.run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Time in and out of range",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
         "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 201,
+      "title": "In range",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select 100.0 * count(*) filter (where state in ('in_range')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#37872d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Share of the run's hours with price inside the range: the only time it earns."
+    },
+    {
+      "id": 202,
+      "title": "Out of range",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 3,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0752d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Share of hours wholly in the other token, price past the range: stranded, waiting for price to come back."
+    },
+    {
+      "id": 203,
+      "title": "Resting",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select 100.0 * count(*) filter (where state in ('resting')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Share of hours back in the value token with the range still in place, waiting for the next pass."
+    },
+    {
+      "id": 204,
+      "title": "Flat",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 9,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select 100.0 * count(*) filter (where state in ('flat')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#6e7781",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Share of hours with no position: before the first entry, between campaigns, or kept out by a gate."
+    },
+    {
+      "id": 205,
+      "title": "In range while in a position",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*) filter (where state <> 'flat'), 0) as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#37872d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Hours in range over the hours a position was open: how well the ranges were placed."
+    },
+    {
+      "id": 206,
+      "title": "Days in range",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) filter (where state = 'in_range') / 24.0 as value from series where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#37872d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "Hours in range, in days."
+    },
+    {
+      "id": 207,
+      "title": "Average campaign, days",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select avg((closed_time - opened_time) / 86400.0) as value from campaigns where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3274d9",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "From entry to exit."
+    },
+    {
+      "id": 208,
+      "title": "Longest out of range, days",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select max(seconds_beyond) / 86400.0 as value from campaigns where run_id = '$run'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e0752d",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 32
+        }
+      },
+      "description": "The longest a campaign spent wholly in the other token."
+    },
+    {
+      "id": 210,
+      "title": "Position state over time",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 16,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, state from series where run_id = '$run' order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "flat": {
+                  "color": "#6e7781",
+                  "index": 0,
+                  "text": "flat"
+                },
+                "resting": {
+                  "color": "#3274d9",
+                  "index": 1,
+                  "text": "resting"
+                },
+                "in_range": {
+                  "color": "#37872d",
+                  "index": 2,
+                  "text": "in range"
+                },
+                "beyond": {
+                  "color": "#e0752d",
+                  "index": 3,
+                  "text": "out of range"
+                },
+                "flipped": {
+                  "color": "#8f3bb8",
+                  "index": 4,
+                  "text": "flipped"
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 211,
+      "title": "Out of range: campaigns by time stranded",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 14,
+        "w": 8,
         "h": 5
       },
       "targets": [
@@ -77,136 +1533,45 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select result_pct as \"result in value token %\", result_pct_usd as \"result in dollars %\",\n  hold_value_pct_usd as \"holding the value token, dollars %\",\n  result_pct * 365.0 / (window_to::date - window_from::date + 1) as \"APR %\",\n  fees / start_capital * 100 * 365.0 / (window_to::date - window_from::date + 1) as \"fee APR %\",\n  (end_capital - start_capital) - fees + gas as \"divergence, value token\",\n  fees as \"fees, value token\", fees / (window_to::date - window_from::date + 1) as \"fees per day\",\n  gas as \"gas, value token\", start_usd as \"start, $\", end_usd as \"end, $\",\n  passes, campaigns, max_drawdown_pct as \"max drawdown %\",\n  (select 100.0 * count(*) filter (where state in ('in_range')) / nullif(count(*), 0)\n     from series s where s.run_id = runs.run_id) as \"time in range %\"\nfrom runs where run_id = '$run'"
+          "rawSql": "select bucket, count(*) as campaigns from (\n  select case when seconds_beyond = 0 then '0 never'\n              when seconds_beyond < 3600 then '1 under an hour'\n              when seconds_beyond < 86400 then '2 under a day'\n              when seconds_beyond < 7 * 86400 then '3 under a week'\n              else '4 a week or more' end as bucket\n  from campaigns where run_id = '$run') b\ngroup by bucket order by bucket"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "start, $"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "end, $"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "passes"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "campaigns"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "fees, value token"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 4
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "fees per day"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 5
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "gas, value token"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 4
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "divergence, value token"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 4
-              }
-            ]
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e0752d"
           }
-        ]
+        },
+        "overrides": []
       },
       "options": {
-        "reduceOptions": {
-          "values": true,
-          "calcs": [],
-          "fields": ""
-        },
-        "textMode": "value_and_name",
-        "colorMode": "none",
-        "graphMode": "none",
-        "justifyMode": "center"
+        "xField": "bucket",
+        "orientation": "horizontal",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
       },
-      "description": "Results as on the runs dashboard. APR and fee APR are annualised over the run's window; fee APR is the fees over the starting capital. Divergence is what price moves cost against simply holding what went in: the result less the fees, plus the gas."
+      "description": "How long each campaign spent wholly in the other token, price past its range."
     },
     {
-      "id": 1,
-      "title": "Price in dollars, with the range the bot is in",
+      "id": 300,
+      "type": "row",
+      "title": "Price and ranges",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 301,
+      "title": "Price in dollars, with the range: green in range, blue resting, orange out of range",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -214,9 +1579,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 20,
         "w": 24,
-        "h": 9
+        "h": 11
       },
       "targets": [
         {
@@ -228,7 +1593,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(s.time) as time,\n  case when r.start_usd = r.start_capital then 1 / s.price else s.price end as price,\n  case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end as range_low,\n  case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end as range_high\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(s.time) as time,\n  case when r.start_usd = r.start_capital then 1 / s.price else s.price end as price,\n  case when s.state = 'in_range' then case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end end as in_range_low,\n  case when s.state = 'in_range' then case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end end as \"in range\",\n  case when s.state = 'resting' then case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end end as resting_low,\n  case when s.state = 'resting' then case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end end as \"resting\",\n  case when s.state in ('beyond', 'flipped') then case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end end as beyond_low,\n  case when s.state in ('beyond', 'flipped') then case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end end as \"out of range\"\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
         }
       ],
       "fieldConfig": {
@@ -236,7 +1601,9 @@
           "unit": "currencyUSD",
           "decimals": 2,
           "custom": {
-            "spanNulls": false
+            "spanNulls": false,
+            "lineWidth": 1,
+            "fillOpacity": 0
           }
         },
         "overrides": [
@@ -250,68 +1617,193 @@
                 "id": "color",
                 "value": {
                   "mode": "fixed",
+                  "fixedColor": "#c0c0c0"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in range"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#37872d"
+                }
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "in_range_low"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 35
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_range_low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#37872d"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "resting"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3274d9"
+                }
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "resting_low"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 35
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "resting_low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
                   "fixedColor": "#3274d9"
                 }
               },
               {
                 "id": "custom.lineWidth",
                 "value": 1
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "range_low"
+              "options": "out of range"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#37872d"
+                  "fixedColor": "#e0752d"
                 }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "range_high"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#37872d"
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
               },
               {
                 "id": "custom.fillBelowTo",
-                "value": "range_low"
+                "value": "beyond_low"
               },
               {
                 "id": "custom.fillOpacity",
-                "value": 25
+                "value": 35
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "beyond_low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e0752d"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
               }
             ]
           }
         ]
       },
-      "options": {},
-      "description": "The non-dollar token's price in dollars at the pool price, hourly. The shaded band is the range the position is in; none while flat."
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "The non-dollar token's price at the pool price, hourly, with the range the position holds shaded by its state. The grey regions behind are the campaigns, entry to exit; hover one for how it ended."
     },
     {
-      "id": 11,
+      "id": 302,
       "title": "The run's pool: liquidity around the price, in dollars",
       "type": "heatmap",
       "datasource": {
@@ -320,7 +1812,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 31,
         "w": 24,
         "h": 10
       },
@@ -369,16 +1861,26 @@
         },
         "legend": {
           "show": true
-        },
-        "exemplars": {
-          "color": "rgba(255,0,255,0.7)"
         }
       },
-      "description": "The liquidity of the pool the run traded, day by day, on the same time axis as the price and range above: whether the bot stood where liquidity was thick or thin. Empty until `lpbot pool-stats` has been run for the pool."
+      "description": "The liquidity of the pool the run traded, day by day, on the same time axis as the price above: whether the range stood where liquidity was thick or thin. Empty until `lpbot pool-stats` has been run for the pool."
     },
     {
-      "id": 2,
-      "title": "Value against simply holding, in the value token",
+      "id": 400,
+      "type": "row",
+      "title": "Value",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 401,
+      "title": "Value against holding, in the value token",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -386,7 +1888,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 42,
         "w": 12,
         "h": 8
       },
@@ -400,17 +1902,22 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(time) as time, equity as value, hold\nfrom series\nwhere run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(time) as time, equity as value, hold as \"holding the value token\" from series where run_id = '$run' order by 1"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
         "overrides": []
       },
       "options": {}
     },
     {
-      "id": 8,
+      "id": 402,
       "title": "Value in dollars, against holding the volatile token and holding dollars",
       "type": "timeseries",
       "datasource": {
@@ -419,7 +1926,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 42,
         "w": 12,
         "h": 8
       },
@@ -433,149 +1940,23 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "with r as (select start_usd, start_capital, start_price from runs where run_id = '$run')\nselect to_timestamp(s.time) as time, s.equity_usd as value,\n  r.start_usd * case when r.start_usd = r.start_capital then r.start_price / s.price\n                     else s.price / r.start_price end as \"holding the volatile token\",\n  r.start_usd as \"holding dollars\"\nfrom series s, r\nwhere s.run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(s.time) as time, s.equity_usd as value,\n  r.start_usd * case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end as \"holding the volatile token\",\n  r.start_usd as \"holding dollars\"\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {},
-      "description": "The run's value marked at the pool price, against putting the starting capital in the pool's ETH (or BTC) and leaving it, and against keeping it in dollars."
-    },
-    {
-      "id": 4,
-      "title": "Position state",
-      "type": "state-timeline",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 16,
-        "h": 5
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select to_timestamp(time) as time, state\nfrom series\nwhere run_id = '$run'\norder by 1"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "flat": {
-                  "color": "#6e7781",
-                  "index": 0,
-                  "text": "flat"
-                },
-                "resting": {
-                  "color": "#3274d9",
-                  "index": 1,
-                  "text": "resting"
-                },
-                "in_range": {
-                  "color": "#37872d",
-                  "index": 2,
-                  "text": "in range"
-                },
-                "beyond": {
-                  "color": "#e0752d",
-                  "index": 3,
-                  "text": "beyond"
-                },
-                "flipped": {
-                  "color": "#8f3bb8",
-                  "index": 4,
-                  "text": "flipped"
-                }
-              }
-            }
-          ],
+          "decimals": 0,
           "custom": {
-            "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 1
           }
         },
         "overrides": []
       },
-      "options": {
-        "mergeValues": true,
-        "showValue": "never",
-        "rowHeight": 0.8,
-        "legend": {
-          "showLegend": true,
-          "displayMode": "list",
-          "placement": "bottom"
-        }
-      },
-      "description": "flat: no position. resting: all in the value token. in_range: price inside the range. beyond: all in the other token. flipped: the proceeds sit in a range next to the price."
+      "options": {}
     },
     {
-      "id": 9,
-      "title": "Time in each state",
-      "type": "bargauge",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 32,
-        "w": 8,
-        "h": 5
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select state, round(100.0 * count(*) / sum(count(*)) over (), 1) as share\nfrom series\nwhere run_id = '$run'\ngroup by state\norder by 1"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "min": 0,
-          "max": 100,
-          "decimals": 1
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "values": true,
-          "calcs": [],
-          "fields": ""
-        },
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true
-      },
-      "description": "Share of the run's hours flat (no position), resting (back in the value token), in range (earning), beyond (wholly in the other token) or flipped."
-    },
-    {
-      "id": 3,
+      "id": 403,
       "title": "Where the result comes from, in the value token",
       "type": "timeseries",
       "datasource": {
@@ -584,7 +1965,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 50,
         "w": 12,
         "h": 7
       },
@@ -598,18 +1979,23 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(time) as time, fees as \"fees earned\",\n  equity - hold - fees as \"price moves and costs\", equity - hold as result\nfrom series\nwhere run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(time) as time, fees as \"fees earned\", equity - hold - fees as \"price moves and costs\", equity - hold as result from series where run_id = '$run' order by 1"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
         "overrides": []
       },
       "options": {},
-      "description": "Fees earned so far, against what price moves and costs did: the value less what simply holding the capital would be worth, less the fees. The two add up to the result."
+      "description": "Fees earned so far, against what price moves and costs did: the value less what holding the capital would be worth, less the fees. The two add up to the result."
     },
     {
-      "id": 10,
+      "id": 404,
       "title": "Fees per day, in the value token",
       "type": "barchart",
       "datasource": {
@@ -618,7 +2004,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 37,
+        "y": 50,
         "w": 12,
         "h": 7
       },
@@ -648,12 +2034,24 @@
           "showLegend": false
         },
         "xTickLabelSpacing": 100
-      },
-      "description": "Fees the run earned each day, from the hourly series."
+      }
     },
     {
-      "id": 5,
+      "id": 500,
+      "type": "row",
       "title": "Campaigns",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 501,
+      "title": "Campaigns: range in dollars, how long in and out of range, how each ended",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -661,9 +2059,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 58,
         "w": 24,
-        "h": 9
+        "h": 10
       },
       "targets": [
         {
@@ -675,18 +2073,61 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  c.exit_reason, c.amount_in, c.result, c.fees, c.gas, c.passes, c.flips,\n  round(c.seconds_held / 3600.0, 1) as hours_held, round(c.seconds_beyond / 3600.0, 1) as hours_beyond,\n  c.tick_lower, c.tick_upper\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
+          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  round(((c.closed_time - c.opened_time) / 3600.0)::numeric, 1) as hours,\n  (select count(*) from series s where s.run_id = c.run_id and s.time between c.opened_time and c.closed_time and s.state = 'in_range') as hours_in_range,\n  round((c.seconds_beyond / 3600.0)::numeric, 1) as hours_out_of_range,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  c.exit_reason, c.passes, c.flips, c.amount_in, c.result, round((c.result / nullif(c.amount_in, 0) * 100)::numeric, 3) as result_pct,\n  c.fees, c.gas\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
         }
       ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#c4162a",
+                      "value": null
+                    },
+                    {
+                      "color": "#37872d",
+                      "value": 0
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exit_reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          }
+        ]
       },
       "options": {},
-      "description": "Each campaign's range in dollars as entered, how it ended, and its result, fees and gas in the value token."
+      "description": "Hours in range are counted from the hourly series. Out of range is time wholly in the other token. The range is in dollars as entered."
     },
     {
-      "id": 6,
+      "id": 502,
       "title": "Patience decisions",
       "type": "table",
       "datasource": {
@@ -695,9 +2136,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 53,
+        "y": 68,
         "w": 24,
-        "h": 9
+        "h": 8
       },
       "targets": [
         {
@@ -709,15 +2150,14 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select to_timestamp(time) as time, campaign, leg, tick, round(seconds_stranded / 3600.0, 1) as hours_stranded, action, target_lower, target_upper, expected_wait, expected_flip, expected_close\nfrom decisions\nwhere run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(time) as time, campaign, leg, tick, round(seconds_stranded / 3600.0, 1) as hours_stranded, action, target_lower, target_upper, expected_wait, expected_flip, expected_close from decisions where run_id = '$run' order by 1"
         }
       ],
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
-      "options": {},
-      "description": "The expected results are filled in by the adaptive decision. A fixed rule expects nothing."
+      "options": {}
     }
   ]
 }
