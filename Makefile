@@ -105,6 +105,12 @@ history:
 rank:
 	cargo run --release -p lpbot -- rank
 
+## Sample every stored pool for the pool dashboard: price, value held,
+## volume and fees hour by hour, the liquidity around the price day by day.
+## Then `make load` puts them in Grafana's database.
+pool-stats:
+	cargo run --release -p lpbot -- pool-stats --results-dir $(RESULTS)
+
 ## Backtest an experiment file on the stored history.
 EXPERIMENT ?= experiments/width-and-patience-eth.yml
 backtest:

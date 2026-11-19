@@ -15,6 +15,7 @@ mod demo_cmd;
 mod fees_cmd;
 mod gates_cmd;
 mod load_cmd;
+mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
 mod zones_cmd;
@@ -69,6 +70,10 @@ enum Command {
     DemoData(DemoArgs),
     /// Show a pool's zone map: how often price crosses each candidate range.
     Zones(ZonesArgs),
+    /// Sample the stored pools: price, liquidity, value locked, volume and
+    /// fees over time, and the liquidity around the price, as the two pool
+    /// tables for the pool dashboard.
+    PoolStats(PoolStatsArgs),
 }
 
 #[derive(Args)]
@@ -213,6 +218,40 @@ struct ZonesArgs {
     /// Blocks per log request. Shrinks by itself when the node refuses.
     #[arg(long, default_value_t = 2_000)]
     log_chunk: u64,
+}
+
+#[derive(Args)]
+struct PoolStatsArgs {
+    /// Pool to sample, by address; repeat for several. Default: every
+    /// stored pool.
+    #[arg(long = "pool")]
+    pools: Vec<String>,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to sample, as YYYY-MM-DD. Default: the first stored day.
+    #[arg(long)]
+    from: Option<String>,
+    /// Time between rows of the series, such as 1h.
+    #[arg(long, default_value = "1h")]
+    every: String,
+    /// Time between liquidity distributions, such as 1d.
+    #[arg(long, default_value = "1d")]
+    liquidity_every: String,
+    /// How far the distribution reaches on each side of the price, in
+    /// percent. Stablecoin pairs use at most 0.5.
+    #[arg(long, default_value_t = 20.0)]
+    span_pct: f64,
+    /// Width of a distribution bucket, in percent of the price, widened to
+    /// the pool's tick spacing. Stablecoin pairs use at most 0.01.
+    #[arg(long, default_value_t = 0.5)]
+    bucket_pct: f64,
+    /// Data folder with the stored history. Defaults to LPBOT_DATA_DIR,
+    /// then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Folder the pool tables are written to, beside the run tables.
+    #[arg(long, default_value = "runs")]
+    results_dir: PathBuf,
 }
 
 #[derive(Args)]
@@ -454,8 +493,9 @@ fn real_main() -> Result<()> {
             })?;
             let report = load_cmd::run(&url, &args.results_dir)?;
             println!(
-                "loaded {} run(s), {} rows, from {}",
+                "loaded {} run(s) and {} pool(s), {} rows, from {}",
                 report.runs,
+                report.pools,
                 report.rows,
                 args.results_dir.display()
             );
@@ -513,6 +553,49 @@ fn real_main() -> Result<()> {
                 },
             )
             .map(|_| ())
+        }
+        Command::PoolStats(args) => {
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let pools = args
+                .pools
+                .iter()
+                .map(|p| chain_cmd::checked_address("pool", p))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let from = args
+                .from
+                .as_deref()
+                .map(|text| {
+                    text.parse::<lpbot_data::day::Day>()
+                        .map_err(|e| anyhow::anyhow!("--from {text}: {e}"))
+                })
+                .transpose()?;
+            let every = |text: &str, flag: &str| {
+                run_cmd::parse_duration(text)
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--{flag} {text}: give a duration such as 1h or 1d")
+                    })
+            };
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let written = pool_stats_cmd::run(
+                &config,
+                &pool_stats_cmd::PoolStatsArgs {
+                    pools: &pools,
+                    from,
+                    every: every(&args.every, "every")?,
+                    liquidity_every: every(&args.liquidity_every, "liquidity-every")?,
+                    span_pct: args.span_pct,
+                    bucket_pct: args.bucket_pct,
+                    root: &root,
+                    results: &args.results_dir,
+                    chain: &args.chain.chain,
+                },
+            )?;
+            println!(
+                "{written} pool(s) written to {}; `lpbot load-results` puts them in the viewer",
+                args.results_dir.display()
+            );
+            Ok(())
         }
         Command::Zones(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;

@@ -387,6 +387,158 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
     ]
 }
 
+/// What a pool looked like at one time. Amounts are in whole tokens; the
+/// price is the dollar price of the pool's other token when one of its
+/// tokens is a dollar stable, else token1 per token0. Dollar figures are
+/// empty for a pool without a dollar stable.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PoolSeriesRow {
+    pub time: u64,
+    pub block: u64,
+    pub tick: i32,
+    pub price: f64,
+    /// Liquidity active at the price.
+    pub liquidity: f64,
+    /// What all positions hold at the price.
+    pub locked0: f64,
+    pub locked1: f64,
+    pub tvl_usd: Option<f64>,
+    /// Swapped since the previous row.
+    pub volume0: f64,
+    pub volume1: f64,
+    pub volume_usd: Option<f64>,
+    /// Fees swappers paid since the previous row.
+    pub fees_usd: Option<f64>,
+    pub swaps: u32,
+}
+
+/// The liquidity in one bucket of prices at one time.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PoolLiquidityRow {
+    pub time: u64,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    /// The bucket's bounds and middle in the series' price, low first.
+    pub price_low: f64,
+    pub price_high: f64,
+    pub price_mid: f64,
+    /// Average liquidity over the bucket's ticks.
+    pub liquidity: f64,
+    /// What the positions hold inside the bucket, in whole tokens.
+    pub amount0: f64,
+    pub amount1: f64,
+    /// The same in dollars, in all and split by the token held.
+    pub value_usd: Option<f64>,
+    pub volatile_usd: Option<f64>,
+    pub dollar_usd: Option<f64>,
+    /// Whether the price was inside the bucket.
+    pub at_price: bool,
+}
+
+/// What names a pool in its tables.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PoolInfo {
+    /// The address, lower-case hex: the key of the pool's rows.
+    pub pool: String,
+    /// Such as `USDC/WETH 0.05`.
+    pub name: String,
+    /// What the price is in, such as `USDC per WETH`.
+    pub price_unit: String,
+}
+
+fn pool_table(info: &PoolInfo, name: &str, rows: usize, columns: Vec<(&str, Column)>) -> Table {
+    let mut all = vec![
+        (
+            "pool".to_string(),
+            Column::Text(vec![Some(info.pool.clone()); rows]),
+        ),
+        (
+            "pool_name".to_string(),
+            Column::Text(vec![Some(info.name.clone()); rows]),
+        ),
+        (
+            "price_unit".to_string(),
+            Column::Text(vec![Some(info.price_unit.clone()); rows]),
+        ),
+    ];
+    all.extend(columns.into_iter().map(|(n, c)| (n.to_string(), c)));
+    Table {
+        name: name.to_string(),
+        columns: all,
+    }
+}
+
+/// A pool's two tables, in the order of `POOL_TABLES`.
+pub fn pool_tables(
+    info: &PoolInfo,
+    series: &[PoolSeriesRow],
+    liquidity: &[PoolLiquidityRow],
+) -> Vec<Table> {
+    let s = series;
+    let l = liquidity;
+    vec![
+        pool_table(
+            info,
+            "pool_series",
+            s.len(),
+            vec![
+                ("time", int(s.iter().map(|r| r.time as i64))),
+                ("block", int(s.iter().map(|r| r.block as i64))),
+                ("tick", int(s.iter().map(|r| i64::from(r.tick)))),
+                ("price", float(s.iter().map(|r| r.price))),
+                ("liquidity", float(s.iter().map(|r| r.liquidity))),
+                ("locked0", float(s.iter().map(|r| r.locked0))),
+                ("locked1", float(s.iter().map(|r| r.locked1))),
+                ("tvl_usd", float_or_empty(s.iter().map(|r| r.tvl_usd))),
+                ("volume0", float(s.iter().map(|r| r.volume0))),
+                ("volume1", float(s.iter().map(|r| r.volume1))),
+                ("volume_usd", float_or_empty(s.iter().map(|r| r.volume_usd))),
+                ("fees_usd", float_or_empty(s.iter().map(|r| r.fees_usd))),
+                ("swaps", int(s.iter().map(|r| i64::from(r.swaps)))),
+            ],
+        ),
+        pool_table(
+            info,
+            "pool_liquidity",
+            l.len(),
+            vec![
+                ("time", int(l.iter().map(|r| r.time as i64))),
+                ("tick_lower", int(l.iter().map(|r| i64::from(r.tick_lower)))),
+                ("tick_upper", int(l.iter().map(|r| i64::from(r.tick_upper)))),
+                ("price_low", float(l.iter().map(|r| r.price_low))),
+                ("price_high", float(l.iter().map(|r| r.price_high))),
+                ("price_mid", float(l.iter().map(|r| r.price_mid))),
+                ("liquidity", float(l.iter().map(|r| r.liquidity))),
+                ("amount0", float(l.iter().map(|r| r.amount0))),
+                ("amount1", float(l.iter().map(|r| r.amount1))),
+                ("value_usd", float_or_empty(l.iter().map(|r| r.value_usd))),
+                (
+                    "volatile_usd",
+                    float_or_empty(l.iter().map(|r| r.volatile_usd)),
+                ),
+                ("dollar_usd", float_or_empty(l.iter().map(|r| r.dollar_usd))),
+                (
+                    "at_price",
+                    Column::Flag(l.iter().map(|r| Some(r.at_price)).collect()),
+                ),
+            ],
+        ),
+    ]
+}
+
+/// Writes a pool's two tables, named by its address, and returns their paths.
+pub fn write_pool(
+    results: &Path,
+    info: &PoolInfo,
+    series: &[PoolSeriesRow],
+    liquidity: &[PoolLiquidityRow],
+) -> Result<Vec<PathBuf>, TableError> {
+    pool_tables(info, series, liquidity)
+        .iter()
+        .map(|table| write_table(results, &info.pool, table))
+        .collect()
+}
+
 /// Where a run's file of a table lives.
 pub fn table_path(results: &Path, table: &str, run_id: &str) -> PathBuf {
     results.join(table).join(format!("{run_id}.parquet"))

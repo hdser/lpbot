@@ -1,4 +1,5 @@
--- The six result tables, empty. Generated from the table definitions in
+-- The six result tables and the two pool tables, empty. Generated from the
+-- table definitions in
 -- crates/sim/src/tables.rs; do not edit by hand. To regenerate:
 --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file
 
@@ -122,3 +123,41 @@ ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS passes_per_day double precision;
 ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS time_in_range double precision;
 ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS return_odds_1d double precision;
 CREATE INDEX IF NOT EXISTS zone_map_run_id ON zone_map (run_id);
+
+CREATE TABLE IF NOT EXISTS pool_series (pool text NOT NULL);
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS pool text;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS pool_name text;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS price_unit text;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS time bigint;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS block bigint;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS tick bigint;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS price double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS liquidity double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS locked0 double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS locked1 double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS tvl_usd double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS volume0 double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS volume1 double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS volume_usd double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS fees_usd double precision;
+ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS swaps bigint;
+CREATE INDEX IF NOT EXISTS pool_series_pool ON pool_series (pool);
+
+CREATE TABLE IF NOT EXISTS pool_liquidity (pool text NOT NULL);
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS pool text;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS pool_name text;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS price_unit text;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS time bigint;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS tick_lower bigint;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS tick_upper bigint;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS price_low double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS price_high double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS price_mid double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS liquidity double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS amount0 double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS amount1 double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS value_usd double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS volatile_usd double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS dollar_usd double precision;
+ALTER TABLE pool_liquidity ADD COLUMN IF NOT EXISTS at_price boolean;
+CREATE INDEX IF NOT EXISTS pool_liquidity_pool ON pool_liquidity (pool);

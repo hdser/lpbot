@@ -12,7 +12,7 @@ Do not reopen these without the owner asking.
 
 - **Language:** all Rust. No Python, no notebooks. The only non-Rust piece will be a small TypeScript script that applies the Safe roles policy.
 - **Experiments:** every run (backtest, paper, live) is one YAML file in `experiments/` over a base config in `config/`. No experiment-specific code.
-- **Results:** every run writes the same six tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map`. The viewer (Grafana) knows only these tables.
+- **Results:** every run writes the same six tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map`. Besides them, two pool tables, keyed by pool and not by run, hold what each pool looked like over its stored history: `pool_series` and `pool_liquidity`, from `lpbot pool-stats` (added at the owner's request on 19 November 2026). The viewer (Grafana) knows only these eight tables.
 - **Universe:** WETH, WBTC, USDC, USDT. A pool qualifies only if both tokens are listed.
 - **Ranking:** implied volatility from fee, volume and in-range liquidity (not total liquidity), at the price and per zone.
 - **Run inputs:** capital, loss limit (percent, in the value token) and autonomy (`auto` or `approve`). Capital and loss limit have no default; a run refuses to start without them. Backtests always run as `auto`.

@@ -311,6 +311,72 @@
       "description": "The non-dollar token's price in dollars at the pool price, hourly. The shaded band is the range the position is in; none while flat."
     },
     {
+      "id": 11,
+      "title": "The run's pool: liquidity around the price, in dollars",
+      "type": "heatmap",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(l.time) as time, round(l.price_mid::numeric, greatest(0, 5 - floor(log(abs(l.price_mid)))::int))::text as metric, l.value_usd as value\nfrom pool_liquidity l\nwhere l.pool_name = (select pool from runs where run_id = '$run') and $__unixEpochFilter(l.time)\norder by 1, l.price_mid"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "fill": "dark-orange",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64,
+          "reverse": false
+        },
+        "cellGap": 0,
+        "tooltip": {
+          "mode": "single",
+          "yHistogram": false,
+          "showColorScale": true
+        },
+        "legend": {
+          "show": true
+        },
+        "exemplars": {
+          "color": "rgba(255,0,255,0.7)"
+        }
+      },
+      "description": "The liquidity of the pool the run traded, day by day, on the same time axis as the price and range above: whether the bot stood where liquidity was thick or thin. Empty until `lpbot pool-stats` has been run for the pool."
+    },
+    {
       "id": 2,
       "title": "Value against simply holding, in the value token",
       "type": "timeseries",
@@ -320,7 +386,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -353,7 +419,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -390,7 +456,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 32,
         "w": 16,
         "h": 5
       },
@@ -470,7 +536,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 22,
+        "y": 32,
         "w": 8,
         "h": 5
       },
@@ -518,7 +584,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 27,
+        "y": 37,
         "w": 12,
         "h": 7
       },
@@ -552,7 +618,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 27,
+        "y": 37,
         "w": 12,
         "h": 7
       },
@@ -595,7 +661,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 44,
         "w": 24,
         "h": 9
       },
@@ -629,7 +695,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 53,
         "w": 24,
         "h": 9
       },

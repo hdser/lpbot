@@ -721,6 +721,15 @@ A sweep may only set a setting the strategy already has in the base config; a mi
 
 Tables are written as Parquet per run, as `<results>/<table>/<run id>.parquet` with a `run_id` column in every table, and loaded into Postgres for viewing, with the time series thinned for display. Full resolution stays in Parquet.
 
+**What every pool writes.** Two more tables describe the pools themselves rather than a run: `lpbot pool-stats` replays each pool's stored history through the replica and samples it on a fixed clock. They are keyed by pool, written as `<results>/<table>/<pool address>.parquet`, and loaded with the run tables; loading a pool again replaces its rows.
+
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `pool_series` | Pool and hour | Price, active liquidity, what every position holds at the price (in each token and in dollars), and the volume, fees and swaps since the previous row |
+| `pool_liquidity` | Pool, day and bucket of prices | The liquidity in fixed buckets of ticks around the price (20% either side in 0.5% buckets by default; stablecoin pairs closer), with what the positions hold in each, in each token and in dollars, split by the token held |
+
+The value held by positions leaves out fees earned but not collected, which a pool's token balances include, so it reads somewhat below a TVL taken from balances: on 19 November 2026 the USDC/WETH 0.05% pool held $61.8M in positions against $71.7M on revert.finance a day later, while volume and fees agreed within the difference between the two days.
+
 **The viewer.** It is generic because it knows only these tables, never a particular experiment. A new strategy or sweep needs no new charts. My choice is Grafana, since it is already in the stack for monitoring; a small web page served by the bot itself is the alternative if you prefer no extra tool.
 
 | View | Shows |
@@ -729,6 +738,7 @@ Tables are written as Parquet per run, as `<results>/<table>/<run id>.parquet` w
 | Run detail | The result in the value token and in dollars, APR, fee APR, divergence, gas and time in range; the price in dollars with the bot's range as a band; value against holding in the value token, and in dollars against holding ETH and holding dollars; time in each state; fees against price moves, fees per day; each campaign's range in dollars |
 | Decisions | Each patience decision with its three options, what was chosen and what happened next |
 | Pools and zones | The ranking table through time; the zone map as a heat map |
+| Pool | One pool over its history: price, value held by positions, volume, fees, volume over value held, active liquidity; the liquidity around the price now as stacked bars by token held, and over time as a heat map. The run detail shows the same heat map for the run's pool under the price and range |
 | Live | The same views on the running bot, plus node and safety status |
 
 Backtest, simulation and live runs appear in the same views, so a live run can be laid directly over the simulation it came from.

@@ -19,14 +19,15 @@ pub fn connect(url: &str) -> Result<postgres::Client> {
         .map_err(|e| anyhow!("cannot connect to the database: {e}"))
 }
 
-/// Loads every run under `results`. A run that is already loaded replaces
-/// itself.
+/// Loads every run, and every pool's tables, under `results`. A run or a
+/// pool that is already loaded replaces itself.
 pub fn run(url: &str, results: &Path) -> Result<LoadReport> {
     let mut client = connect(url)?;
     let report = load_results(&mut client, results)?;
-    if report.runs == 0 {
+    if report.runs == 0 && report.pools == 0 {
         bail!(
-            "no runs found under {}; run `lpbot run <experiment.yml>` first",
+            "no runs or pool tables found under {}; run `lpbot run <experiment.yml>` or \
+             `lpbot pool-stats` first",
             results.display()
         );
     }
