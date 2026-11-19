@@ -3,6 +3,7 @@
 //! the value locked, volume and fees, hour by hour; the distribution has
 //! the liquidity in fixed price buckets around the price, day by day.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use alloy_primitives::Address;
@@ -24,6 +25,27 @@ pub enum DollarSide {
     One,
 }
 
+/// Dollars per whole token for one of a pool's tokens, hour by hour, taken
+/// from a pool that pairs that token with a dollar stable. It prices a pool
+/// that has no dollar stable of its own, such as WBTC/WETH.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reference {
+    /// Which of this pool's tokens the prices are for.
+    pub side: DollarSide,
+    /// (time, dollars per whole token), by time.
+    pub usd: Vec<(u64, f64)>,
+    /// The pool the prices come from, for the output.
+    pub from: String,
+}
+
+impl Reference {
+    /// The latest price at or before `time`; before the first, the first.
+    pub fn at(&self, time: u64) -> Option<f64> {
+        let after = self.usd.partition_point(|(t, _)| *t <= time);
+        self.usd.get(after.saturating_sub(1)).map(|(_, usd)| *usd)
+    }
+}
+
 /// How a pool's raw figures become whole tokens, prices and dollars.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quote {
@@ -34,6 +56,9 @@ pub struct Quote {
     /// `None` for a pool without a dollar stable. When both tokens are
     /// stables, token1 counts as the dollar.
     pub dollar: Option<DollarSide>,
+    /// For a pool without a dollar stable: one token's dollar price from
+    /// another pool. `None` leaves such a pool without dollar figures.
+    pub reference: Option<Reference>,
 }
 
 impl Quote {
@@ -67,22 +92,47 @@ impl Quote {
         }
     }
 
-    /// Dollars per whole token0 and per whole token1 at a raw price.
-    fn dollars_per(&self, raw_price: f64) -> Option<(f64, f64)> {
+    /// Dollars per whole token0 and per whole token1 at a raw price and a
+    /// time: from the pool's dollar stable, or from the reference price of
+    /// one of its tokens.
+    fn dollars_per(&self, raw_price: f64, time: u64) -> Option<(f64, f64)> {
         let p = self.one_per_zero(raw_price);
-        match self.dollar? {
-            DollarSide::One => Some((p, 1.0)),
-            DollarSide::Zero => Some((1.0, 1.0 / p)),
+        match self.dollar {
+            Some(DollarSide::One) => Some((p, 1.0)),
+            Some(DollarSide::Zero) => Some((1.0, 1.0 / p)),
+            None => {
+                let reference = self.reference.as_ref()?;
+                let usd = reference.at(time)?;
+                Some(match reference.side {
+                    DollarSide::Zero => (usd, usd / p),
+                    DollarSide::One => (usd * p, usd),
+                })
+            }
         }
     }
 
-    /// Whole amounts in dollars at a raw price, split as (volatile, dollar).
-    fn split_usd(&self, whole0: f64, whole1: f64, raw_price: f64) -> Option<(f64, f64)> {
-        let (usd0, usd1) = self.dollars_per(raw_price)?;
-        Some(match self.dollar? {
+    /// The token the price is quoted in: the dollar stable, or token1.
+    fn quote_side(&self) -> DollarSide {
+        self.dollar.unwrap_or(DollarSide::One)
+    }
+
+    /// Whole amounts in dollars at a raw price and time, split as (base
+    /// token, quote token): the token priced and the one it is priced in.
+    fn split_usd(&self, whole0: f64, whole1: f64, raw_price: f64, time: u64) -> Option<(f64, f64)> {
+        let (usd0, usd1) = self.dollars_per(raw_price, time)?;
+        Some(match self.quote_side() {
             DollarSide::One => (whole0 * usd0, whole1 * usd1),
             DollarSide::Zero => (whole1 * usd1, whole0 * usd0),
         })
+    }
+
+    /// The token whose dollar price this pool gives, when it pairs a
+    /// volatile token with a dollar stable.
+    fn volatile_symbol(&self) -> Option<&str> {
+        match self.dollar? {
+            DollarSide::Zero => Some(&self.symbol1),
+            DollarSide::One => Some(&self.symbol0),
+        }
     }
 }
 
@@ -112,7 +162,56 @@ pub fn quote_for(config: &Config, chain: &str, token0: Address, token1: Address)
         decimals0,
         decimals1,
         dollar,
+        reference: None,
     })
+}
+
+/// A volatile token's dollar prices from the preferred pool sampled so far.
+struct PriceSource {
+    preference: (usize, usize),
+    name: String,
+    usd: Vec<(u64, f64)>,
+}
+
+/// How much a pool is preferred as the source of a token's dollar price:
+/// the busiest fee tiers first, then the config's order of stables. Lower
+/// is better.
+fn preference(quote: &Quote, fee_pips: u32, stables: &[String]) -> (usize, usize) {
+    let fee = [500, 3_000, 100, 10_000]
+        .iter()
+        .position(|f| *f == fee_pips)
+        .unwrap_or(4);
+    let stable = match quote.dollar {
+        Some(DollarSide::Zero) => &quote.symbol0,
+        Some(DollarSide::One) => &quote.symbol1,
+        None => return (usize::MAX, usize::MAX),
+    };
+    let order = stables
+        .iter()
+        .position(|s| s == stable)
+        .unwrap_or(stables.len());
+    (fee, order)
+}
+
+/// The pool to take a dollar price from for a pool without a dollar
+/// stable: of the pools pairing its quote token (else its base token) with
+/// a stable, the preferred one. `None` when no such pool is stored.
+pub fn reference_pool<'a>(
+    quote: &Quote,
+    candidates: &'a [(Address, Quote, u32)],
+    stables: &[String],
+) -> Option<&'a (Address, Quote, u32)> {
+    [&quote.symbol1, &quote.symbol0]
+        .into_iter()
+        .find_map(|symbol| {
+            candidates
+                .iter()
+                .filter(|(_, q, _)| {
+                    q.volatile_symbol() == Some(symbol.as_str())
+                        && !(stables.contains(&q.symbol0) && stables.contains(&q.symbol1))
+                })
+                .min_by_key(|(_, q, fee)| preference(q, *fee, stables))
+        })
 }
 
 /// The series in whole tokens and dollars.
@@ -122,7 +221,7 @@ pub fn series_rows(quote: &Quote, points: &[SeriesPoint]) -> Vec<PoolSeriesRow> 
         .map(|p| {
             let (locked0, locked1) = (quote.whole0(p.locked0), quote.whole1(p.locked1));
             let (volume0, volume1) = (quote.whole0(p.volume0), quote.whole1(p.volume1));
-            let dollars = quote.dollars_per(p.raw_price);
+            let dollars = quote.dollars_per(p.raw_price, p.time);
             PoolSeriesRow {
                 time: p.time,
                 block: p.block,
@@ -134,10 +233,11 @@ pub fn series_rows(quote: &Quote, points: &[SeriesPoint]) -> Vec<PoolSeriesRow> 
                 tvl_usd: dollars.map(|(u0, u1)| locked0 * u0 + locked1 * u1),
                 volume0,
                 volume1,
-                // A swap's dollar volume is what moved on its dollar side.
-                volume_usd: quote.dollar.map(|side| match side {
-                    DollarSide::Zero => volume0,
-                    DollarSide::One => volume1,
+                // A swap's dollar volume is what moved on its quote side:
+                // the dollar stable, or token1 at its reference price.
+                volume_usd: dollars.map(|(u0, u1)| match quote.quote_side() {
+                    DollarSide::Zero => volume0 * u0,
+                    DollarSide::One => volume1 * u1,
                 }),
                 fees_usd: dollars
                     .map(|(u0, u1)| quote.whole0(p.fees0) * u0 + quote.whole1(p.fees1) * u1),
@@ -157,7 +257,7 @@ pub fn liquidity_rows(quote: &Quote, buckets: &[BucketPoint]) -> Vec<PoolLiquidi
             let (a, c) = (at(b.tick_lower), at(b.tick_upper));
             let (low, high) = (a.min(c), a.max(c));
             let (amount0, amount1) = (quote.whole0(b.amount0), quote.whole1(b.amount1));
-            let split = quote.split_usd(amount0, amount1, 1.0001f64.powi(b.tick));
+            let split = quote.split_usd(amount0, amount1, 1.0001f64.powi(b.tick), b.time);
             PoolLiquidityRow {
                 time: b.time,
                 tick_lower: b.tick_lower,
@@ -197,13 +297,19 @@ pub struct PoolStatsArgs<'a> {
 
 /// Samples every pool asked for and writes its two tables. Returns the
 /// pools written.
+///
+/// A pool without a dollar stable, such as WBTC/WETH, is priced in dollars
+/// through the preferred pool that pairs one of its tokens with a stable
+/// (USDC/WETH 0.05% for WETH). That pool is sampled first, and added to
+/// the pools sampled when it was not asked for.
 pub fn run(config: &Config, args: &PoolStatsArgs) -> Result<usize> {
-    let pools = if args.pools.is_empty() {
-        stored_pools(args.root, args.chain)?
+    let stored = stored_pools(args.root, args.chain)?;
+    let asked = if args.pools.is_empty() {
+        stored.clone()
     } else {
         args.pools.to_vec()
     };
-    if pools.is_empty() {
+    if asked.is_empty() {
         bail!(
             "no pool history under {}; store some with `lpbot backfill` first",
             args.root.display()
@@ -211,8 +317,64 @@ pub fn run(config: &Config, args: &PoolStatsArgs) -> Result<usize> {
     }
     let snapshots = SnapshotStore::new(args.root);
     let events = EventStore::new(args.root);
+    let stables = &config.universe.usd_stables;
+
+    // A pool's quote and fee tier, from its first snapshot.
+    let describe = |pool: Address| -> Result<(Address, Quote, u32)> {
+        let day = snapshots
+            .days(args.chain, pool)?
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                anyhow!("pool {pool:#x} has no stored snapshot; run `lpbot backfill` first")
+            })?;
+        let snapshot = snapshots.read(args.chain, pool, day)?;
+        let quote = quote_for(config, args.chain, snapshot.token0, snapshot.token1)?;
+        Ok((pool, quote, snapshot.state.fee_pips))
+    };
+    let mut plan = asked
+        .iter()
+        .map(|pool| describe(*pool))
+        .collect::<Result<Vec<_>>>()?;
+    if plan.iter().any(|(_, quote, _)| quote.dollar.is_none()) {
+        let candidates = stored
+            .iter()
+            .map(|pool| describe(*pool))
+            .collect::<Result<Vec<_>>>()?;
+        let mut sources: Vec<(Address, Quote, u32)> = Vec::new();
+        for (_, quote, _) in plan.iter().filter(|(_, q, _)| q.dollar.is_none()) {
+            if let Some(source) = reference_pool(quote, &candidates, stables) {
+                let known =
+                    |list: &[(Address, Quote, u32)]| list.iter().any(|(p, _, _)| *p == source.0);
+                if !known(&plan) && !known(&sources) {
+                    sources.push(source.clone());
+                }
+            }
+        }
+        plan.extend(sources);
+    }
+    // Pools with a dollar stable first: they give the others their prices.
+    plan.sort_by_key(|(_, quote, _)| quote.dollar.is_none());
+
+    // The dollar price of each volatile token.
+    let mut prices: HashMap<String, PriceSource> = HashMap::new();
     let mut written = 0;
-    for pool in pools {
+    for (pool, mut quote, fee_pips) in plan {
+        if quote.dollar.is_none() {
+            let reference = [
+                (quote.symbol1.clone(), DollarSide::One),
+                (quote.symbol0.clone(), DollarSide::Zero),
+            ]
+            .into_iter()
+            .find_map(|(symbol, side)| {
+                prices.get(&symbol).map(|source| Reference {
+                    side,
+                    usd: source.usd.clone(),
+                    from: source.name.clone(),
+                })
+            });
+            quote.reference = reference;
+        }
         let days = snapshots.days(args.chain, pool)?;
         let day = match args.from {
             Some(from) => days.iter().rfind(|d| **d <= from).or_else(|| days.first()),
@@ -233,16 +395,14 @@ pub fn run(config: &Config, args: &PoolStatsArgs) -> Result<usize> {
             println!("  {pool:#x}: no complete day stored yet, left out");
             continue;
         };
-        let quote = quote_for(config, args.chain, snapshot.token0, snapshot.token1)?;
         let name = format!(
             "{}/{} {}",
             quote.symbol0,
             quote.symbol1,
-            f64::from(snapshot.state.fee_pips) / 10_000.0
+            f64::from(fee_pips) / 10_000.0
         );
         // Stablecoin pairs sit within a fraction of a percent of each other.
-        let stable_pair = config.universe.usd_stables.contains(&quote.symbol0)
-            && config.universe.usd_stables.contains(&quote.symbol1);
+        let stable_pair = stables.contains(&quote.symbol0) && stables.contains(&quote.symbol1);
         let (span_pct, bucket_pct) = if stable_pair {
             (args.span_pct.min(0.5), args.bucket_pct.min(0.01))
         } else {
@@ -274,13 +434,32 @@ pub fn run(config: &Config, args: &PoolStatsArgs) -> Result<usize> {
         let series = series_rows(&quote, &stats.series);
         let liquidity = liquidity_rows(&quote, &stats.liquidity);
         write_pool(args.results, &info, &series, &liquidity)?;
+        let priced = match (&quote.dollar, &quote.reference) {
+            (Some(_), _) => String::new(),
+            (None, Some(reference)) => format!(", dollars through {}", reference.from),
+            (None, None) => ", no dollar figures: no stored pool prices either token".to_string(),
+        };
         println!(
-            "  {name:<18} {} to {}: {} series rows, {} bucket rows",
+            "  {name:<18} {} to {}: {} series rows, {} bucket rows{priced}",
             snapshot.day,
             last,
             series.len(),
             liquidity.len()
         );
+        if let (Some(symbol), false) = (quote.volatile_symbol(), stable_pair) {
+            let rank = preference(&quote, fee_pips, stables);
+            if prices.get(symbol).is_none_or(|best| rank < best.preference) {
+                let usd = series.iter().map(|row| (row.time, row.price)).collect();
+                prices.insert(
+                    symbol.to_string(),
+                    PriceSource {
+                        preference: rank,
+                        name: name.clone(),
+                        usd,
+                    },
+                );
+            }
+        }
         written += 1;
     }
     Ok(written)
@@ -298,6 +477,7 @@ mod tests {
             decimals0: 6,
             decimals1: 18,
             dollar: Some(DollarSide::Zero),
+            reference: None,
         }
     }
 
@@ -308,6 +488,7 @@ mod tests {
             decimals0: 18,
             decimals1: 6,
             dollar: Some(DollarSide::One),
+            reference: None,
         }
     }
 
@@ -400,10 +581,145 @@ mod tests {
             "{row:?}"
         );
         assert!(row.at_price);
-        // USDC is the dollar side, the WETH the volatile one.
+        // USDC is the dollar side and the quote token, WETH the base one.
         assert!((row.dollar_usd.unwrap() - 1_000.0).abs() < 1e-6);
         assert!((row.volatile_usd.unwrap() - 2_000.0).abs() < 1.0);
         assert!((row.value_usd.unwrap() - 3_000.0).abs() < 1.0);
+    }
+
+    /// WBTC is token0 (8 decimals), WETH token1 (18): no dollar stable,
+    /// WETH priced at `weth_usd` throughout from another pool.
+    fn wbtc_weth(weth_usd: f64) -> Quote {
+        Quote {
+            symbol0: "WBTC".into(),
+            symbol1: "WETH".into(),
+            decimals0: 8,
+            decimals1: 18,
+            dollar: None,
+            reference: Some(Reference {
+                side: DollarSide::One,
+                usd: vec![(0, weth_usd)],
+                from: "USDC/WETH 0.05".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_reference_price_is_the_latest_at_or_before_the_time() {
+        let reference = Reference {
+            side: DollarSide::One,
+            usd: vec![(3_600, 2_000.0), (7_200, 2_100.0)],
+            from: String::new(),
+        };
+        assert_eq!(reference.at(0), Some(2_000.0));
+        assert_eq!(reference.at(3_600), Some(2_000.0));
+        assert_eq!(reference.at(7_199), Some(2_000.0));
+        assert_eq!(reference.at(7_200), Some(2_100.0));
+        assert_eq!(reference.at(99_999), Some(2_100.0));
+        let empty = Reference {
+            usd: Vec::new(),
+            ..reference
+        };
+        assert_eq!(empty.at(0), None);
+    }
+
+    #[test]
+    fn a_pool_without_a_dollar_stable_is_priced_through_its_reference() {
+        // 1 WBTC is 30 WETH and WETH is $2,000: 1 WBTC and 10 WETH locked
+        // are $80,000; 3 WETH of volume is $6,000.
+        let raw = 30.0 * 1e10;
+        let point = SeriesPoint {
+            raw_price: raw,
+            locked0: 1e8,
+            locked1: 10e18,
+            volume0: 0.1e8,
+            volume1: 3e18,
+            fees0: 0.0,
+            fees1: 0.009e18,
+            ..row_point()
+        };
+        let quote = wbtc_weth(2_000.0);
+        let row = &series_rows(&quote, &[point])[0];
+        assert!((row.price - 30.0).abs() < 1e-9, "WETH per WBTC");
+        assert_eq!(quote.price_unit(), "WETH per WBTC");
+        assert!((row.tvl_usd.unwrap() - 80_000.0).abs() < 1e-6);
+        assert!((row.volume_usd.unwrap() - 6_000.0).abs() < 1e-6);
+        assert!((row.fees_usd.unwrap() - 18.0).abs() < 1e-9);
+
+        // The liquidity: WBTC is the base token, WETH the quote token.
+        let tick = (raw.ln() / 1.0001f64.ln()).floor() as i32;
+        let bucket = BucketPoint {
+            time: 0,
+            tick_lower: tick - 50,
+            tick_upper: tick + 50,
+            tick,
+            liquidity: 1.0,
+            amount0: 0.5e8,
+            amount1: 5e18,
+        };
+        let row = &liquidity_rows(&quote, &[bucket])[0];
+        assert!(
+            (row.volatile_usd.unwrap() - 30_000.0).abs() < 10.0,
+            "{row:?}"
+        );
+        assert!((row.dollar_usd.unwrap() - 10_000.0).abs() < 1e-6);
+
+        // Without a reference there are still no dollar figures.
+        let plain = Quote {
+            reference: None,
+            ..quote
+        };
+        assert_eq!(series_rows(&plain, &[row_point()])[0].tvl_usd, None);
+    }
+
+    #[test]
+    fn the_reference_comes_from_the_busiest_fee_tier_and_the_first_stable() {
+        let stables = vec!["USDC".to_string(), "USDT".to_string()];
+        let pool = |byte: u8| Address::repeat_byte(byte);
+        let usdt_weth = Quote {
+            symbol0: "WETH".into(),
+            symbol1: "USDT".into(),
+            ..weth_usdt()
+        };
+        let usdc_usdt = Quote {
+            symbol0: "USDC".into(),
+            symbol1: "USDT".into(),
+            decimals0: 6,
+            decimals1: 6,
+            dollar: Some(DollarSide::One),
+            reference: None,
+        };
+        let wbtc_usdc = Quote {
+            symbol0: "WBTC".into(),
+            symbol1: "USDC".into(),
+            decimals0: 8,
+            decimals1: 6,
+            dollar: Some(DollarSide::One),
+            reference: None,
+        };
+        let candidates = vec![
+            (pool(1), usdc_weth(), 3_000),
+            (pool(2), usdt_weth.clone(), 500),
+            (pool(3), usdc_weth(), 500),
+            (pool(4), usdc_usdt, 100),
+            (pool(5), wbtc_usdc, 500),
+        ];
+        // WETH, the quote token, first: 0.05% beats 0.3%, USDC beats USDT.
+        let chosen = reference_pool(&wbtc_weth(0.0), &candidates, &stables).unwrap();
+        assert_eq!(chosen.0, pool(3));
+        // Without a WETH pool, WBTC's own.
+        let no_weth: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.1.symbol1 != "WETH" && c.1.symbol0 != "WETH")
+            .cloned()
+            .collect();
+        assert_eq!(
+            reference_pool(&wbtc_weth(0.0), &no_weth, &stables)
+                .unwrap()
+                .0,
+            pool(5)
+        );
+        assert!(reference_pool(&wbtc_weth(0.0), &[], &stables).is_none());
     }
 
     #[test]

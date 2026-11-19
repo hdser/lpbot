@@ -735,6 +735,8 @@ Tables are written as Parquet per run, as `<results>/<table>/<run id>.parquet` w
 | `pool_series` | Pool and hour | Price, active liquidity, what every position holds at the price (in each token and in dollars), and the volume, fees and swaps since the previous row |
 | `pool_liquidity` | Pool, day and bucket of prices | The liquidity in fixed buckets of ticks around the price (20% either side in 0.5% buckets by default; stablecoin pairs closer), with what the positions hold in each, in each token and in dollars, split by the token held |
 
+A pool without a dollar stable, such as WBTC/WETH, is priced in dollars through the preferred stored pool that pairs one of its tokens with a stable, hour by hour: its quote token first (WETH, through USDC/WETH 0.05%), else its base token; the busiest fee tiers first (0.05%, 0.3%, 0.01%, 1%), then the config's order of stables. `lpbot pool-stats` samples that pool first, adding it when it was not asked for. In the liquidity table the two dollar columns split what positions hold into the base token (the one priced) and the quote token (the one it is priced in).
+
 The value held by positions leaves out fees earned but not collected, which a pool's token balances include, so it reads somewhat below a TVL taken from balances: on 19 November 2026 the USDC/WETH 0.05% pool held $61.8M in positions against $71.7M on revert.finance a day later, while volume and fees agreed within the difference between the two days.
 
 **The viewer.** It is generic because it knows only these tables, never a particular experiment. A new strategy or sweep needs no new charts. My choice is Grafana, since it is already in the stack for monitoring; a small web page served by the bot itself is the alternative if you prefer no extra tool.
