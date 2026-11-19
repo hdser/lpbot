@@ -55,6 +55,14 @@ fn number(map: &BTreeMap<String, Value>, path: &[&str]) -> Option<f64> {
     lookup(map, path).and_then(Value::as_f64)
 }
 
+/// A duration that may be left out or null: `None` then.
+fn optional_duration(map: &BTreeMap<String, Value>, path: &[&str]) -> Result<Option<u64>> {
+    match lookup(map, path) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => duration(map, path, 0).map(Some),
+    }
+}
+
 fn duration(map: &BTreeMap<String, Value>, path: &[&str], default: u64) -> Result<u64> {
     match lookup(map, path) {
         None => Ok(default),
@@ -466,6 +474,12 @@ fn settings(
         move_margin: number(&strategy.extra, &["entry", "move_margin"]).unwrap_or(1.5),
         min_passes_per_day: number(&strategy.extra, &["entry", "min_passes_per_day"])
             .unwrap_or(0.0),
+        max_vol_to_width: number(&strategy.extra, &["entry", "max_vol_to_width"]),
+        max_daily_vol_ticks: number(&strategy.extra, &["entry", "max_daily_vol_pct"])
+            .map(|pct| (1.0 + pct / 100.0).ln() / 1.0001f64.ln()),
+        min_gas_multiple: number(&strategy.extra, &["entry", "min_gas_multiple"]),
+        max_seconds_beyond: optional_duration(&strategy.patience.extra, &["max_wait"])?,
+        exit_vol_to_width: number(&strategy.extra, &["exit", "max_vol_to_width"]),
         gas,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,

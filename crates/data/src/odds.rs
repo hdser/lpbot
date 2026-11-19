@@ -75,6 +75,28 @@ impl TickBuckets {
         self.low[i] = self.low[i].min(tick);
     }
 
+    /// Realized volatility over the `window` seconds before `now`, scaled
+    /// to a day, in ticks: the standard deviation of the closing tick's
+    /// change from one bucket to the next, times the square root of the
+    /// buckets in a day. A tick is about 0.01% of the price. Only buckets
+    /// that ended before `now` count. `None` with fewer than six changes
+    /// to measure.
+    pub fn daily_vol_ticks(&self, now: u64, window: u64) -> Option<f64> {
+        let start = self.start?;
+        let end = (now.checked_sub(start)? / self.step) as usize;
+        let end = end.min(self.close.len());
+        let wanted = (window / self.step) as usize + 1;
+        let closes = &self.close[end.saturating_sub(wanted)..end];
+        if closes.len() < 7 {
+            return None;
+        }
+        let changes: Vec<f64> = closes.windows(2).map(|w| f64::from(w[1] - w[0])).collect();
+        let n = changes.len() as f64;
+        let mean = changes.iter().sum::<f64>() / n;
+        let variance = changes.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        Some(variance.sqrt() * (86_400.0 / self.step as f64).sqrt())
+    }
+
     /// Odds of a move of `delta` ticks (up when positive, down when
     /// negative) within `horizon` seconds, over starting points in the
     /// `lookback` seconds before `now`. `None` when the history holds no
@@ -227,5 +249,27 @@ mod tests {
             .move_odds(60 * HOUR + 1, 1_000 * HOUR, 10, HOUR)
             .unwrap();
         assert_eq!(early.samples, 59);
+    }
+
+    #[test]
+    fn realized_volatility_is_scaled_to_a_day_and_needs_enough_buckets() {
+        let mut buckets = TickBuckets::new(600);
+        // A tick that alternates up and down by 10 every ten minutes.
+        for i in 0..200u64 {
+            buckets.push(i * 600, if i % 2 == 0 { 0 } else { 10 });
+        }
+        let vol = buckets.daily_vol_ticks(200 * 600, 86_400).unwrap();
+        // Changes of +10 and -10: a standard deviation of about 10 per
+        // bucket, 144 buckets a day.
+        assert!((vol / (10.0 * 12.0) - 1.0).abs() < 0.01, "{vol}");
+        // A flat price has none.
+        let mut flat = TickBuckets::new(600);
+        for i in 0..50u64 {
+            flat.push(i * 600, 7);
+        }
+        assert_eq!(flat.daily_vol_ticks(50 * 600, 86_400), Some(0.0));
+        // Too little history, or a time before it, gives nothing.
+        assert_eq!(flat.daily_vol_ticks(5 * 600, 86_400), None);
+        assert_eq!(TickBuckets::new(600).daily_vol_ticks(1_000, 86_400), None);
     }
 }

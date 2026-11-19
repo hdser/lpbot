@@ -63,10 +63,16 @@ strategies:
       max_gap_ticks: null            # how far from the price an entry may sit; null is one width
       move_margin: 1.5               # a resting range moves to one crossed this many times as often
       min_passes_per_day: 0          # passes per day a range needs on the longest lookback; 0 takes any crossed lately
+      max_vol_to_width: null         # enter only while the day's volatility is at most this many range widths
+      max_daily_vol_pct: null        # enter only while the day's volatility is at most this, in percent
+      min_gas_multiple: null         # an entry must put in this many times the gas of its open, close and swap
     patience:
       mode: adaptive                 # or a fixed rule: wait | flip | close
       decide_every: 1h
       switch_margin: calibrated      # or a fixed percentage
+      max_wait: null                 # close a position stranded beyond its range this long, such as 72h
+    exit:
+      max_vol_to_width: null         # a resting range steps aside to cash while the day's volatility exceeds this many widths
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings

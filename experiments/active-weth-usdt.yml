@@ -1,0 +1,30 @@
+# Active management on the WETH/USDT pools, May to October 2026: enter only
+# when the day is calm for the range, step aside to cash when it turns
+# wild, close a stranding after a while or never, never open a position too
+# small for its gas. Against the plain "wait" rule (every gate off).
+# Expands into 96 runs, each counted in ETH and in USD.
+#
+# Research settings: all capital in each campaign, a 50% loss limit so
+# every run sees the whole window. The volatility gates are in range
+# widths: a day's realized volatility, in ticks, over the width.
+#
+#   cargo run --release -p lpbot -- run experiments/active-weth-usdt.yml
+
+experiment: active-weth-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0x11b815efB8f581194ae79006d24E0d814B7697F6"   # WETH/USDT 0.05%
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  entry.width_ticks: [40, 120]
+  entry.min_gas_multiple: [100]
+  entry.max_vol_to_width: [null, 4, 8]
+  exit.max_vol_to_width: [null, 12]
+  patience.mode: [wait]
+  patience.max_wait: [null, 72h]

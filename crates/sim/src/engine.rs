@@ -192,6 +192,21 @@ pub struct Settings {
     /// Full passes per day a range needs on the longest lookback to be
     /// entered. 0 lets any range in that price crossed lately qualify.
     pub min_passes_per_day: f64,
+    /// Entry gate: the day's realized volatility, in ticks, at most this
+    /// many times the range width. `None`: no gate.
+    pub max_vol_to_width: Option<f64>,
+    /// Entry gate: the day's realized volatility at most this many ticks.
+    /// `None`: no gate.
+    pub max_daily_vol_ticks: Option<f64>,
+    /// An entry must put in at least this many times the gas of opening,
+    /// closing and one swap, or it is not made. `None`: any size.
+    pub min_gas_multiple: Option<f64>,
+    /// A position wholly in the other token for this many seconds is
+    /// closed, whatever the patience rule says. `None`: no limit.
+    pub max_seconds_beyond: Option<u64>,
+    /// A resting position steps aside, back to cash, when the day's
+    /// volatility exceeds this many times the range width. `None`: never.
+    pub exit_vol_to_width: Option<f64>,
     pub gas: GasModel,
     /// Seconds between rows of the series.
     pub series_every: u64,
@@ -229,8 +244,10 @@ pub struct CampaignRow {
     pub closed_time: u64,
     pub closed_block: u64,
     /// `round_trip_complete`, `repositioned`, `patience_close`,
-    /// `flip_failed` (a flip whose new range could not open, closed
-    /// instead), `loss_limit` or `window_end`.
+    /// `patience_timeout` (stranded longer than the longest wait),
+    /// `stepped_aside` (a resting position taken out because the day turned
+    /// too volatile for its range), `flip_failed` (a flip whose new range
+    /// could not open, closed instead), `loss_limit` or `window_end`.
     pub exit_reason: String,
     pub amount_in: f64,
     /// Capital after the campaign minus capital before it: fees, losses,
@@ -346,6 +363,21 @@ pub struct Output {
     pub series: Vec<SeriesRow>,
     pub zones: Vec<ZoneLook>,
     pub summary: Summary,
+}
+
+/// What may hold a new leg back: the cap on its share of the liquidity in
+/// its range, and the least it must put in.
+#[derive(Debug, Clone, Copy)]
+struct LegLimits {
+    cap: Option<LiquidityShareCap>,
+    min_used: U256,
+}
+
+impl LegLimits {
+    const NONE: LegLimits = LegLimits {
+        cap: None,
+        min_used: U256::ZERO,
+    };
 }
 
 /// A virtual position.
@@ -553,6 +585,25 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// The day's realized volatility in ticks, from the price seen so far.
+    fn daily_vol(&self, now: u64) -> Option<f64> {
+        self.buckets.daily_vol_ticks(now, 86_400)
+    }
+
+    /// Whether the volatility gates let a campaign start now. A gate with
+    /// no history to measure keeps the bot out.
+    fn calm_enough(&self, now: u64) -> bool {
+        if self.s.max_vol_to_width.is_none() && self.s.max_daily_vol_ticks.is_none() {
+            return true;
+        }
+        let Some(vol) = self.daily_vol(now) else {
+            return false;
+        };
+        let width = f64::from(self.s.width);
+        self.s.max_vol_to_width.is_none_or(|r| vol <= r * width)
+            && self.s.max_daily_vol_ticks.is_none_or(|m| vol <= m)
+    }
+
     fn side(&self) -> EntrySide {
         // Token0 alone sits above the price, token1 alone below it.
         match self.s.value {
@@ -675,8 +726,9 @@ impl<'a> Engine<'a> {
         lower: Tick,
         upper: Tick,
         flip: bool,
-        cap: Option<LiquidityShareCap>,
+        limits: LegLimits,
     ) -> Result<Option<Opened>, MathError> {
+        let LegLimits { cap, min_used } = limits;
         let sqrt_lower = get_sqrt_ratio_at_tick(lower)?;
         let sqrt_upper = get_sqrt_ratio_at_tick(upper)?;
         let price = self.pool.sqrt_price_x96();
@@ -694,7 +746,7 @@ impl<'a> Engine<'a> {
             Token::Zero => get_amount0_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
             Token::One => get_amount1_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
         };
-        if liquidity == 0 || used > amount {
+        if liquidity == 0 || used > amount || used < min_used {
             return Ok(None);
         }
         if self.pool.watch_tick(lower).is_err() {
@@ -801,8 +853,19 @@ impl<'a> Engine<'a> {
                 }
                 let budget = share_of(self.cash - gas, self.capital_ppm);
                 let cash_before = self.cash;
+                // Too small to pay for its own way in and out: not made.
+                let min_used = self.s.min_gas_multiple.map_or(U256::ZERO, |multiple| {
+                    let round_trip = self.gas.cost(
+                        self.s.gas.open_units + self.s.gas.close_units + self.s.gas.swap_units,
+                    );
+                    whole(multiple * to_f64(round_trip)).unwrap_or(U256::MAX)
+                });
+                let limits = LegLimits {
+                    cap: self.share_cap,
+                    min_used,
+                };
                 let Some(opened) =
-                    self.open_leg(self.s.value, budget, lower, upper, false, self.share_cap)?
+                    self.open_leg(self.s.value, budget, lower, upper, false, limits)?
                 else {
                     // Price moved onto the range in the meantime, or the
                     // pool has no liquidity in part of it to take a share
@@ -884,7 +947,7 @@ impl<'a> Engine<'a> {
                     target.tick_lower,
                     target.tick_upper,
                     true,
-                    None,
+                    LegLimits::NONE,
                 )? {
                     Some(opened) => {
                         // The few units the range could not take stay in
@@ -1222,8 +1285,10 @@ impl<'a> Engine<'a> {
             // Flat: look for a range to enter.
             if time >= self.next_check {
                 self.next_check = time + self.s.check_every.max(1);
-                if let Some((lower, upper)) = self.best_entry(time) {
-                    self.schedule(block, Action::Open { lower, upper });
+                if self.calm_enough(time) {
+                    if let Some((lower, upper)) = self.best_entry(time) {
+                        self.schedule(block, Action::Open { lower, upper });
+                    }
                 }
             }
             return Ok(());
@@ -1242,6 +1307,24 @@ impl<'a> Engine<'a> {
                 // A resting entry leg stays for the next pass, unless price
                 // has moved away from it or a much busier range is at hand.
                 self.next_check = time + self.s.check_every.max(1);
+                // The day turned too volatile for the range: back to cash,
+                // to come back in when the gates allow.
+                let width = f64::from(self.s.width);
+                if self
+                    .s
+                    .exit_vol_to_width
+                    .zip(self.daily_vol(time))
+                    .is_some_and(|(limit, vol)| vol > limit * width)
+                {
+                    self.schedule(
+                        block,
+                        Action::Withdraw {
+                            reason: "stepped_aside",
+                        },
+                    );
+                    self.next_check = time;
+                    return Ok(());
+                }
                 let own_gap = gap(tick, leg.lower, leg.upper, self.side());
                 let own = self.score(leg.lower, leg.upper, time);
                 let best = self.best_entry(time);
@@ -1286,6 +1369,33 @@ impl<'a> Engine<'a> {
                 EntrySide::Below => EntrySide::Above,
             };
             if leg.flip && gap(tick, leg.lower, leg.upper, other_side) < self.s.width {
+                return Ok(());
+            }
+            if self
+                .s
+                .max_seconds_beyond
+                .is_some_and(|limit| time.saturating_sub(since) >= limit)
+            {
+                self.out.decisions.push(DecisionRow {
+                    campaign: self.campaign.as_ref().map_or(0, |c| c.id),
+                    time,
+                    block,
+                    tick,
+                    leg: if leg.flip { "flip" } else { "entry" }.to_string(),
+                    seconds_stranded: time.saturating_sub(since),
+                    action: "close".to_string(),
+                    target_lower: None,
+                    target_upper: None,
+                    expected_wait: None,
+                    expected_flip: None,
+                    expected_close: None,
+                });
+                self.schedule(
+                    block,
+                    Action::Close {
+                        reason: "patience_timeout",
+                    },
+                );
                 return Ok(());
             }
             let market = self.market()?;
