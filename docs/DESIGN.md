@@ -230,10 +230,11 @@ Sizes grow, so check current snapshot sizes before buying disks. Locally attache
 | --- | --- | --- |
 | 0 | Local node: ExEx, IPC or WebSocket | Every read that feeds a decision; transaction simulation |
 | 1 | Second own node, if you add one | Failover |
-| 2 | Public endpoints (PublicNode, LlamaRPC, the chains' official RPCs) | Cross-check of head hash and pool price before each transaction; exit-only fallback; one-time backfill |
+| 2 | Public endpoints (Alchemy's free tier with a key, PublicNode, LlamaRPC, the chains' official RPCs) | Cross-check of head hash and pool price before each transaction; exit-only fallback; one-time backfill |
 
 Rules the pool enforces:
 
+- An endpoint's key never goes in the config: its URL names the key as `${NAME}` (the Ethereum config has `${ALCHEMY_API_KEY}`), read from the environment, which `make gates` fills from `deploy/.env`. An endpoint whose key is not set is left out, and output and logs show an endpoint by its host only. Keyless endpoints have stopped serving older logs (PublicNode asks for a token beyond recent blocks), so the row-count cross-check of November 2026 found no keyless endpoint that would answer.
 - No decision is made on tier-2 data alone. Public endpoints rate-limit hard, cap `eth_getLogs` block ranges and often disable trace methods ([Chainstack](https://chainstack.com/learn/how-to/how-to-get-ethereum-rpc-endpoint-ai-agents-2026/)). One provider's keyless endpoint allows 2 requests per second per IP ([NodeFlare](https://nodeflare.app/chains)).
 - If the local head lags a public head by more than a set number of blocks, the bot enters exit-only mode.
 - If tier 0 is down, tier 2 may be used only to withdraw liquidity, with two endpoints agreeing on state.

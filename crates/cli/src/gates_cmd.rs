@@ -703,7 +703,17 @@ impl Gates {
         );
 
         let mut disagreeing = Vec::new();
-        for url in &endpoints {
+        for endpoint in &endpoints {
+            let url = match endpoint {
+                chain_cmd::Endpoint::Ready(url) => url,
+                chain_cmd::Endpoint::Missing { template, setting } => {
+                    println!(
+                        "  {}: left out, {setting} is not set (add it to deploy/.env)",
+                        host_of(template)
+                    );
+                    continue;
+                }
+            };
             let host = host_of(url);
             match read_elsewhere(url, chain_id, pool, blocks, last_hash) {
                 Err(error) => {

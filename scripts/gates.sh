@@ -38,6 +38,17 @@ if [[ -z "${LPBOT_DB_URL:-}" ]]; then
   fi
 fi
 
+# Keys of the public endpoints the config names as ${NAME}, such as
+# ALCHEMY_API_KEY, for the cross-check. A key already in the environment wins.
+while IFS= read -r key; do
+  if [[ -z "${!key:-}" ]]; then
+    value="$(setting "$key")"
+    if [[ -n "$value" ]]; then
+      export "$key=$value"
+    fi
+  fi
+done < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*_API_KEY=' "$ENV_FILE" 2>/dev/null | tr -d '=')
+
 cargo build --release -p lpbot
 
 mkdir -p logs

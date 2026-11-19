@@ -141,9 +141,59 @@ pub fn connect_to(config: &Config, chain_name: &str, rpc_override: Option<&str>)
     })
 }
 
+/// A public endpoint the config lists, ready to use or waiting for a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    Ready(String),
+    /// The URL names a setting, such as `${ALCHEMY_API_KEY}`, that is not set.
+    Missing {
+        template: String,
+        setting: String,
+    },
+}
+
 /// The public endpoints the config lists for a chain, for cross-checks.
-pub fn public_endpoints(config: &Config, chain_name: &str) -> Result<Vec<String>> {
-    Ok(chain_config(config, chain_name)?.rpc.public.clone())
+/// A URL may name settings as `${NAME}`, so a provider's key stays out
+/// of the config: they are read from the environment, which `make gates`
+/// fills from deploy/.env.
+pub fn public_endpoints(config: &Config, chain_name: &str) -> Result<Vec<Endpoint>> {
+    chain_config(config, chain_name)?
+        .rpc
+        .public
+        .iter()
+        .map(|url| expand_endpoint(url, |name| std::env::var(name).ok()))
+        .collect()
+}
+
+/// `url` with every `${NAME}` replaced by `lookup(NAME)`. A setting that
+/// is missing or empty leaves the endpoint waiting for it; a `${` without
+/// its `}` is a mistake in the config.
+pub fn expand_endpoint(url: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Endpoint> {
+    let mut expanded = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(open) = rest.find("${") {
+        expanded.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find('}') else {
+            bail!(
+                "a public endpoint of {} has `${{` without its `}}`; write a setting as ${{NAME}}",
+                crate::gates_cmd::host_of(url)
+            );
+        };
+        let name = &after[..close];
+        match lookup(name).filter(|value| !value.is_empty()) {
+            Some(value) => expanded.push_str(&value),
+            None => {
+                return Ok(Endpoint::Missing {
+                    template: url.to_string(),
+                    setting: name.to_string(),
+                })
+            }
+        }
+        rest = &after[close + 1..];
+    }
+    expanded.push_str(rest);
+    Ok(Endpoint::Ready(expanded))
 }
 
 pub(crate) fn symbol_of(chain: &Chain, address: Address) -> String {
@@ -340,6 +390,65 @@ mod tests {
             warning.contains("no finalized block") && warning.contains("5 blocks"),
             "{warning}"
         );
+    }
+
+    #[test]
+    fn an_endpoint_takes_its_key_from_a_setting_and_waits_without_it() {
+        let lookup = |name: &str| match name {
+            "ALCHEMY_API_KEY" => Some("abc123".to_string()),
+            "EMPTY_KEY" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_endpoint("https://eth.llamarpc.com", lookup).unwrap(),
+            Endpoint::Ready("https://eth.llamarpc.com".into())
+        );
+        assert_eq!(
+            expand_endpoint(
+                "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}",
+                lookup
+            )
+            .unwrap(),
+            Endpoint::Ready("https://eth-mainnet.g.alchemy.com/v2/abc123".into())
+        );
+        for setting in ["OTHER_KEY", "EMPTY_KEY"] {
+            let template = format!("https://x.example/v2/${{{setting}}}");
+            assert_eq!(
+                expand_endpoint(&template, lookup).unwrap(),
+                Endpoint::Missing {
+                    template: template.clone(),
+                    setting: setting.into()
+                }
+            );
+        }
+        let error = expand_endpoint("https://x.example/v2/${OPEN", lookup).unwrap_err();
+        assert!(
+            error.to_string().contains("x.example") && !error.to_string().contains("/v2/"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_config_keeps_keys_out_and_names_them_by_setting() {
+        let config = load_base_config(&repo_file("config/mainnet.yml")).unwrap();
+        let public = &chain_config(&config, "ethereum").unwrap().rpc.public;
+        assert!(
+            public
+                .iter()
+                .any(|url| url.ends_with("/v2/${ALCHEMY_API_KEY}")),
+            "{public:?}"
+        );
+        let endpoints: Vec<Endpoint> = public
+            .iter()
+            .map(|url| expand_endpoint(url, |_| None).unwrap())
+            .collect();
+        assert!(endpoints.contains(&Endpoint::Missing {
+            template: "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}".into(),
+            setting: "ALCHEMY_API_KEY".into(),
+        }));
+        assert!(endpoints.contains(&Endpoint::Ready(
+            "https://ethereum-rpc.publicnode.com".into()
+        )));
     }
 
     #[test]
