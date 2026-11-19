@@ -10,7 +10,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
-    GasModel, Output, Policy, Settings, Token,
+    GasModel, Output, Policy, Settings, Shape, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -98,6 +98,7 @@ fn history(targets: &[i32]) -> (PoolSnapshot, Vec<TimedEvent>) {
 fn settings(rule: FixedRule) -> Settings {
     Settings {
         value: Token::One,
+        shape: Shape::OneSided,
         dollar: Dollar::Other,
         decimals0: 18,
         decimals1: 18,
@@ -119,6 +120,7 @@ fn settings(rule: FixedRule) -> Settings {
         min_gas_multiple: None,
         max_seconds_beyond: None,
         exit_vol_to_width: None,
+        recenter_after: None,
         gas: GasModel::free(),
         series_every: HOUR,
         trade_from: T0,
@@ -1222,5 +1224,198 @@ fn a_resting_position_steps_aside_when_the_day_turns_wild() {
         .expect("it steps aside");
     assert!(out.campaigns[aside].passes >= 2, "after round trips");
     assert_eq!(out.campaigns.len(), aside + 1, "and does not come back");
+    assert_conserved(&out);
+}
+
+fn around(rule: FixedRule) -> Settings {
+    Settings {
+        shape: Shape::AroundPrice,
+        ..settings(rule)
+    }
+}
+
+/// Small moves around tick 5, never below 3.
+const CHOPPY: [i32; 8] = [5, 6, 8, 4, 7, 3, 9, 5];
+
+#[test]
+fn an_entry_around_the_price_holds_both_tokens_and_earns_at_once() {
+    let (snapshot, events) = history(&CHOPPY);
+    let out = run(snapshot.clone(), &events, &around(FixedRule::Wait)).unwrap();
+    let first = &out.campaigns[0];
+    // Decided at tick 5: the range centred on it, filled in the next block.
+    assert_eq!((first.tick_lower, first.tick_upper), (0, 20));
+    assert_eq!(first.shape, "around_price");
+    assert_eq!(first.opened_block, events[1].block);
+    assert_eq!(first.exit_reason, "window_end");
+    // Price never left the range: no pass, in range from the entry on.
+    assert_eq!(first.passes, 0);
+    assert!(out.series[1..].iter().all(|r| r.state == "in_range"));
+    // At tick 5 in [0, 20) three quarters of the range is the other token,
+    // swapped at the 0.05% fee. The range then takes the value token in
+    // the same proportion as the other token it got, short by that fee:
+    // about 0.05% of the quarter is left over.
+    assert!((0.999_8..1.0).contains(&first.amount_in), "{first:?}");
+    // Marked at the pool price after the swap fee, as a close would sell
+    // the other token: about 0.0375% for the entry's swap, 0.0375% for the
+    // one marked in.
+    let marked = out.series[1].equity / out.series[1].hold;
+    assert!((0.999_0..0.999_5).contains(&marked), "{marked}");
+    // It earns from the first move; the one-sided range below the price,
+    // which price never reached, earns nothing.
+    assert!(first.fees > 0.0);
+    let one_sided = run(snapshot, &events, &settings(FixedRule::Wait)).unwrap();
+    assert_eq!(one_sided.summary.fees, 0.0);
+    assert_conserved(&out);
+}
+
+#[test]
+fn an_entry_around_the_price_pays_for_its_swaps() {
+    let (snapshot, events) = history(&CHOPPY);
+    let priced_around = Settings {
+        gas: priced(),
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &priced_around).unwrap();
+    // Open and swap in; close and swap the other token back out.
+    let gas = out.campaigns[0].gas;
+    assert!((gas - 0.012).abs() < 1e-9, "{gas}");
+    assert_conserved(&out);
+}
+
+#[test]
+fn around_the_price_a_pass_runs_from_one_side_of_the_range_to_the_other() {
+    let (snapshot, events) = history(&[5, 6, 30, 31, -10, -11, 30, 31]);
+    let out = run(snapshot, &events, &around(FixedRule::Wait)).unwrap();
+    let states: Vec<&str> = out.series.iter().map(|r| r.state.as_str()).collect();
+    // Above [0, 20) the position is all token1, the value token; below it
+    // all token0.
+    assert_eq!(
+        states,
+        vec!["flat", "in_range", "resting", "resting", "beyond", "beyond", "resting", "resting"]
+    );
+    // Leaving the middle for the first time is half a pass; then down
+    // through the range and up again are one each.
+    let first = &out.campaigns[0];
+    assert_eq!(first.passes, 2);
+    assert_eq!(first.seconds_beyond, 2 * HOUR);
+    assert_eq!(out.campaigns.len(), 1);
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_position_price_has_left_is_recentred_with_one_swap() {
+    let recentring = Settings {
+        recenter_after: Some(0),
+        gas: priced(),
+        ..around(FixedRule::Wait)
+    };
+    // Up and out of [0, 20), where the position is all value token; then
+    // down and out, where it is all the other token.
+    for (path, target) in [
+        ([5, 6, 60, 61, 62, 63], (50, 70)),
+        ([5, 6, -40, -41, -42, -43], (-50, -30)),
+    ] {
+        let (snapshot, events) = history(&path);
+        let out = run(snapshot, &events, &recentring).unwrap();
+        assert_eq!(out.campaigns.len(), 1, "the campaign goes on");
+        let first = &out.campaigns[0];
+        assert_eq!(first.recentres, 1);
+        assert_eq!(first.exit_reason, "window_end");
+        let moves: Vec<_> = out
+            .decisions
+            .iter()
+            .filter(|d| d.action == "recenter")
+            .collect();
+        assert_eq!(moves.len(), 1);
+        assert_eq!(
+            (moves[0].target_lower, moves[0].target_upper),
+            (Some(target.0), Some(target.1))
+        );
+        assert_eq!(moves[0].seconds_stranded, 0);
+        // Decided on the block that left the range, moved on the next one.
+        let after: Vec<_> = out.series[3..].iter().collect();
+        assert!(after.iter().all(|r| r.state == "in_range"), "{path:?}");
+        assert!(after
+            .iter()
+            .all(|r| (r.tick_lower, r.tick_upper) == (Some(target.0), Some(target.1))));
+        // In: open and swap. The move: close, open and one swap. Out:
+        // close and swap.
+        assert!((first.gas - 0.022).abs() < 1e-9, "{}", first.gas);
+        assert_conserved(&out);
+    }
+}
+
+#[test]
+fn without_a_time_to_move_a_range_around_the_price_follows_the_one_sided_rules() {
+    // Up and far out of [0, 20): resting in the value token more than a
+    // width away, it is withdrawn, and the next entry is around the price.
+    let (snapshot, events) = history(&[5, 6, 60, 61, 62, 63]);
+    let out = run(snapshot, &events, &around(FixedRule::Wait)).unwrap();
+    assert_eq!(out.campaigns[0].exit_reason, "repositioned");
+    assert_eq!(out.campaigns[0].recentres, 0);
+    assert_eq!(
+        (out.campaigns[1].tick_lower, out.campaigns[1].tick_upper),
+        (50, 70)
+    );
+    assert_conserved(&out);
+}
+
+#[test]
+fn moving_to_the_range_around_the_price_needs_that_shape() {
+    let (snapshot, events) = history(&[5]);
+    let one_sided = Settings {
+        recenter_after: Some(0),
+        ..settings(FixedRule::Wait)
+    };
+    let error = run(snapshot, &events, &one_sided).unwrap_err().to_string();
+    assert!(error.contains("entry.shape: around_price"), "{error}");
+}
+
+#[test]
+fn an_entry_around_the_price_works_with_the_value_token_as_token0() {
+    let (snapshot, events) = history(&[-5, -6, -8, -4, -7, -3, -9, -5]);
+    let mirrored = Settings {
+        value: Token::Zero,
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &mirrored).unwrap();
+    let first = &out.campaigns[0];
+    // Tick -5 is halfway between two centred ranges; the higher one wins.
+    assert_eq!((first.tick_lower, first.tick_upper), (-10, 10));
+    assert!(out.series[1..].iter().all(|r| r.state == "in_range"));
+    // At tick -5, a quarter of the way up [-10, 10), the value token is
+    // three quarters of the range and a quarter is swapped. The range
+    // takes the value token short by the swap fee on the other token:
+    // 0.05% of three quarters is left over. About 0.0125% goes on the
+    // swap, and as much on marking the other token in.
+    assert!((0.999_5..0.999_7).contains(&first.amount_in), "{first:?}");
+    let marked = out.series[1].equity / out.series[1].hold;
+    assert!((0.999_6..0.999_9).contains(&marked), "{marked}");
+    assert!(first.fees > 0.0);
+    assert_conserved(&out);
+}
+
+#[test]
+fn the_share_cap_holds_back_capital_before_the_swap() {
+    let (snapshot, events) = history(&CHOPPY);
+    let full = run(snapshot.clone(), &events, &around(FixedRule::Wait)).unwrap();
+    // As for a one-sided entry, the capital buys about a tenth of a
+    // percent of the range's liquidity; at a hundredth of a percent a
+    // tenth goes in.
+    let capped = Settings {
+        max_share_of_in_range_liquidity: Some(0.000_1),
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &capped).unwrap();
+    assert_eq!(out.summary.capped_entries, 1);
+    let first = &out.campaigns[0];
+    assert!((0.099_9..0.100_1).contains(&first.amount_in), "{first:?}");
+    // The rest stayed in the value token: the result on what went in is
+    // that of the full entry, swap costs included.
+    let (small, large) = (
+        first.result / first.amount_in,
+        full.campaigns[0].result / full.campaigns[0].amount_in,
+    );
+    assert!((small - large).abs() < 1e-5, "{small} {large}");
     assert_conserved(&out);
 }

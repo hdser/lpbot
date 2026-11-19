@@ -117,7 +117,7 @@ Known gaps, in the order they matter:
 2. Decisions are not scored afterwards against the two options not taken (the `decisions` table has the expectations, not the outcomes).
 3. The calibrator fits the patience settings only. Width and fee tier are compared by sweeping them; zone-ranking weights and entry shape are not searched.
 4. A run trades one pool with one campaign at a time; `allocator` settings in the config are not used yet.
-5. Only one-sided entries exist, so every campaign carries the trend against its value token. Entries around the price, ladders on both sides and hedges are designed but not built.
+5. Entries are one-sided or around the price (`entry.shape`), with an optional move back around the price once price has left (`exit.recenter_after`). Both still carry the trend against the value token while a position is wholly in the other token; hedges are designed but not built. A ladder of adjacent ranges is one range in v3 maths and is not built as a separate shape.
 6. Four months of trading history (plus the lookback) is too little to fit and score the gates walk-forward: backfill earlier history first.
 
 The first run on real data (`make gates`, 19 November 2026) traded WETH/USDT 0.3%, the ranked pool, from May to October: all 16 runs of `width-and-patience-eth` stopped at the 5% loss limit whatever the patience rule, and always-wait shipped in every calibration. The width sweep (10, 20, 40, 80 ticks) is only two widths on that pool, whose tick spacing is 60: widths round up to 60 and 120.

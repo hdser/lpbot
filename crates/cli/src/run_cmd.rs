@@ -15,7 +15,7 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, Dollar, GasModel, Policy, Settings, Token};
+use lpbot_sim::engine::{self, Dollar, GasModel, Policy, Settings, Shape, Token};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
@@ -55,6 +55,22 @@ fn number(map: &BTreeMap<String, Value>, path: &[&str]) -> Option<f64> {
     lookup(map, path).and_then(Value::as_f64)
 }
 
+fn text(map: &BTreeMap<String, Value>, path: &[&str]) -> Option<String> {
+    lookup(map, path)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// A wait that may be left out or null (`None`), or 0 (at once), or a
+/// duration.
+fn optional_wait(map: &BTreeMap<String, Value>, path: &[&str]) -> Result<Option<u64>> {
+    match lookup(map, path) {
+        Some(value) if value.as_f64() == Some(0.0) => Ok(Some(0)),
+        Some(value) if value.as_str().and_then(parse_duration) == Some(0) => Ok(Some(0)),
+        _ => optional_duration(map, path),
+    }
+}
+
 /// A duration that may be left out or null: `None` then.
 fn optional_duration(map: &BTreeMap<String, Value>, path: &[&str]) -> Result<Option<u64>> {
     match lookup(map, path) {
@@ -76,6 +92,17 @@ fn duration(map: &BTreeMap<String, Value>, path: &[&str], default: u64) -> Resul
                     path.join(".")
                 )
             }),
+    }
+}
+
+/// How the run's campaigns go in: `entry.shape`, one-sided unless set.
+pub fn entry_shape(strategy: &StrategyConfig) -> Result<Shape> {
+    match text(&strategy.extra, &["entry", "shape"]).as_deref() {
+        None | Some("one_sided") => Ok(Shape::OneSided),
+        Some("around_price") => Ok(Shape::AroundPrice),
+        Some(other) => {
+            bail!("entry.shape `{other}` is not built; set it to one_sided or around_price")
+        }
     }
 }
 
@@ -450,6 +477,7 @@ fn settings(
 
     let settings = Settings {
         value,
+        shape: entry_shape(strategy)?,
         dollar: if stables.contains(value_symbol) {
             Dollar::Value
         } else {
@@ -480,6 +508,7 @@ fn settings(
         min_gas_multiple: number(&strategy.extra, &["entry", "min_gas_multiple"]),
         max_seconds_beyond: optional_duration(&strategy.patience.extra, &["max_wait"])?,
         exit_vol_to_width: number(&strategy.extra, &["exit", "max_vol_to_width"]),
+        recenter_after: optional_wait(&strategy.extra, &["exit", "recenter_after"])?,
         gas,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
@@ -580,6 +609,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             value_token: strategy.value_token.clone(),
             fee_pips: history.snapshot.state.fee_pips,
             width_ticks: settings.width,
+            entry_shape: settings.shape.name().to_string(),
             sweep: run
                 .sweep_point
                 .iter()
@@ -1371,6 +1401,32 @@ pub(crate) mod tests {
         for bad in ["", "h", "1", "1w", "-1h", "1.5h", "one hour"] {
             assert_eq!(parse_duration(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_entry_shape_is_one_sided_unless_set() {
+        assert_eq!(entry_shape(&strategy(BASE)).unwrap(), Shape::OneSided);
+        let around = strategy(&format!("{BASE}entry: {{ shape: around_price }}\n"));
+        assert_eq!(entry_shape(&around).unwrap(), Shape::AroundPrice);
+        let one = strategy(&format!("{BASE}entry: {{ shape: one_sided }}\n"));
+        assert_eq!(entry_shape(&one).unwrap(), Shape::OneSided);
+        let ladder = strategy(&format!("{BASE}entry: {{ shape: ladder }}\n"));
+        let error = entry_shape(&ladder).unwrap_err().to_string();
+        assert!(error.contains("one_sided or around_price"), "{error}");
+    }
+
+    #[test]
+    fn a_wait_is_left_out_null_zero_or_a_duration() {
+        let wait = |yaml: &str| {
+            let map: BTreeMap<String, Value> = serde_yaml::from_str(yaml).unwrap();
+            optional_wait(&map, &["exit", "recenter_after"])
+        };
+        assert_eq!(wait("exit: {}").unwrap(), None);
+        assert_eq!(wait("exit: { recenter_after: null }").unwrap(), None);
+        assert_eq!(wait("exit: { recenter_after: 0 }").unwrap(), Some(0));
+        assert_eq!(wait("exit: { recenter_after: 0m }").unwrap(), Some(0));
+        assert_eq!(wait("exit: { recenter_after: 6h }").unwrap(), Some(21_600));
+        assert!(wait("exit: { recenter_after: soon }").is_err());
     }
 
     #[test]

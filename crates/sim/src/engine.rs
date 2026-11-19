@@ -23,12 +23,15 @@ use lpbot_data::odds::TickBuckets;
 use lpbot_data::zone_map::{zone_stats, PathPoint, DAY};
 use lpbot_risk::{parts_per_million, LiquidityShareCap, LossCheck, LossLimit, MILLION};
 use lpbot_strategy::adaptive::{self, AdaptiveParams, Choice, Expected, Gamble, Options};
-use lpbot_strategy::zone_round_trip::{choose_zone, entry_candidates, gap, ZoneScore};
+use lpbot_strategy::zone_round_trip::{
+    around_price, choose_zone, entry_candidates, gap, ZoneScore,
+};
 use lpbot_strategy::{FixedRule, MarketView, PatienceAction, PatiencePolicy};
 use lpbot_venues::uniswap_v3::events::PoolEvent;
 use lpbot_venues::uniswap_v3::full_math::mul_div;
 use lpbot_venues::uniswap_v3::liquidity_amounts::{
     get_amounts_for_liquidity, get_liquidity_for_amount0, get_liquidity_for_amount1,
+    get_liquidity_for_amounts,
 };
 use lpbot_venues::uniswap_v3::pool::{
     fees_earned, Pool, PoolError, PoolSnapshot, Replay, StepInfo,
@@ -37,7 +40,7 @@ use lpbot_venues::uniswap_v3::sqrt_price_math::{get_amount0_delta, get_amount1_d
 use lpbot_venues::uniswap_v3::tick_math::{
     get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MIN_SQRT_RATIO,
 };
-use lpbot_venues::uniswap_v3::{MathError, Q128};
+use lpbot_venues::uniswap_v3::{MathError, Q128, Q96};
 
 /// One of a pool's two tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,11 +157,34 @@ pub enum Dollar {
     Other,
 }
 
+/// How a campaign goes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// All of the value token in a range on the side price must travel
+    /// into: no swap, nothing earned until price arrives.
+    OneSided,
+    /// Part of the value token swapped into the other token, and both in
+    /// the range centred on the price: earns at once, holds both tokens.
+    AroundPrice,
+}
+
+impl Shape {
+    /// The name used in the config and the result tables.
+    pub fn name(self) -> &'static str {
+        match self {
+            Shape::OneSided => "one_sided",
+            Shape::AroundPrice => "around_price",
+        }
+    }
+}
+
 /// Everything that defines one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The token results are counted in.
     pub value: Token,
+    /// How campaigns go in.
+    pub shape: Shape,
     /// Which token counts as the dollar, for the results in USD.
     pub dollar: Dollar,
     pub decimals0: u8,
@@ -207,6 +233,11 @@ pub struct Settings {
     /// A resting position steps aside, back to cash, when the day's
     /// volatility exceeds this many times the range width. `None`: never.
     pub exit_vol_to_width: Option<f64>,
+    /// An around-price position wholly in one token this many seconds is
+    /// moved to the range around the price, swapping only what the new
+    /// range needs. 0 moves it as soon as price leaves. `None`: never; the
+    /// one-sided rules apply instead. Only for `Shape::AroundPrice`.
+    pub recenter_after: Option<u64>,
     pub gas: GasModel,
     /// Seconds between rows of the series.
     pub series_every: u64,
@@ -247,8 +278,11 @@ pub struct CampaignRow {
     /// `patience_timeout` (stranded longer than the longest wait),
     /// `stepped_aside` (a resting position taken out because the day turned
     /// too volatile for its range), `flip_failed` (a flip whose new range
-    /// could not open, closed instead), `loss_limit` or `window_end`.
+    /// could not open, closed instead), `recenter_failed` (likewise for a
+    /// move to the range around the price), `loss_limit` or `window_end`.
     pub exit_reason: String,
+    /// `one_sided` or `around_price`: how the campaign went in.
+    pub shape: String,
     pub amount_in: f64,
     /// Capital after the campaign minus capital before it: fees, losses,
     /// gas and swap costs all included.
@@ -258,6 +292,8 @@ pub struct CampaignRow {
     /// Full passes of price through the campaign's ranges.
     pub passes: u32,
     pub flips: u32,
+    /// Moves to the range around the price (`Settings::recenter_after`).
+    pub recentres: u32,
     pub seconds_beyond: u64,
 }
 
@@ -271,12 +307,14 @@ pub struct DecisionRow {
     /// `entry` or `flip`: which leg of the campaign was stranded.
     pub leg: String,
     pub seconds_stranded: u64,
-    /// `wait`, `flip` or `close`. What came of it is in the campaign's
-    /// row: a flip whose new range could not open ends it as `flip_failed`.
+    /// `wait`, `flip`, `close` or `recenter`. What came of it is in the
+    /// campaign's row: a flip whose new range could not open ends it as
+    /// `flip_failed`, a move to the range around the price as
+    /// `recenter_failed`.
     pub action: String,
-    /// For a flip, the range it went to: the one next to the price when it
-    /// was carried out, which a move during the latency can make differ
-    /// from the one next to the price when it was decided.
+    /// For a flip or a move, the range it went to: the one next to or
+    /// around the price when it was carried out, which a move during the
+    /// latency can make differ from the one when it was decided.
     pub target_lower: Option<Tick>,
     pub target_upper: Option<Tick>,
     /// What the adaptive decision expected from each option, in whole
@@ -491,10 +529,28 @@ struct Opened {
     capped: bool,
 }
 
+/// What a leg around the price took, and what it left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Mixed {
+    /// Value token and other token not in the range: what the range could
+    /// not take after the swap, and what the share cap held back.
+    value_left: U256,
+    other_left: U256,
+    /// A swap was made to get the range's mix of the two tokens.
+    swapped: bool,
+    /// The share cap made it smaller than the amounts would have bought.
+    capped: bool,
+}
+
+/// The last side of its range price left a campaign's position on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Extreme {
+    /// Wholly in the value token.
     Value,
+    /// Wholly in the other token.
     Other,
+    /// Neither yet: a range around the price, which starts in the middle.
+    Neither,
 }
 
 #[derive(Debug, Clone)]
@@ -510,10 +566,13 @@ struct OpenCampaign {
     gas: U256,
     passes: u32,
     flips: u32,
+    recentres: u32,
     seconds_beyond: u64,
     extreme: Extreme,
     /// Since when the position has been wholly in the other token.
     other_since: Option<u64>,
+    /// Since when the position has been wholly in one token, either one.
+    out_since: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -534,6 +593,12 @@ enum Action {
     /// Withdraw a position that is wholly in the value token.
     Withdraw {
         reason: &'static str,
+    },
+    /// Withdraw a position that price has left and put it in the range
+    /// around the price, swapping only what that range needs. `decision`
+    /// is the row of the decision it carries out.
+    Recenter {
+        decision: usize,
     },
 }
 
@@ -644,10 +709,32 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// (token0, token1) as (value token, other token). The same swap turns
+    /// (value token, other token) back into (token0, token1).
     fn split(&self, amount0: U256, amount1: U256) -> (U256, U256) {
         match self.s.value {
             Token::Zero => (amount0, amount1),
             Token::One => (amount1, amount0),
+        }
+    }
+
+    /// `amount` of the other token in value-token units at the pool price,
+    /// rounded down. Token1 is worth 2^192 / sqrtPrice² of token0.
+    fn other_in_value(&self, amount: U256) -> Result<U256, MathError> {
+        let sqrt = self.pool.sqrt_price_x96();
+        match self.s.value {
+            Token::Zero => mul_div(mul_div(amount, Q96, sqrt)?, Q96, sqrt),
+            Token::One => mul_div(mul_div(amount, sqrt, Q96)?, sqrt, Q96),
+        }
+    }
+
+    /// `amount` of the value token in units of the other token at the pool
+    /// price, rounded down.
+    fn value_in_other(&self, amount: U256) -> Result<U256, MathError> {
+        let sqrt = self.pool.sqrt_price_x96();
+        match self.s.value {
+            Token::Zero => mul_div(mul_div(amount, sqrt, Q96)?, sqrt, Q96),
+            Token::One => mul_div(mul_div(amount, Q96, sqrt)?, Q96, sqrt),
         }
     }
 
@@ -769,6 +856,127 @@ impl<'a> Engine<'a> {
         Ok(Some(Opened { used, capped }))
     }
 
+    /// Puts `value` and `other` into `[lower, upper)`, a range the price is
+    /// strictly inside. Whichever token is over the range's mix at the pool
+    /// price is swapped into the other one, against a copy of the pool as a
+    /// closing swap is, and the liquidity both amounts then buy is added.
+    /// The share cap is applied first, on the liquidity the whole amount
+    /// would buy, so what it holds back is not swapped. `None`, with
+    /// nothing changed, when the price is not strictly inside the range,
+    /// the amounts are worth less than `limits.min_used`, or they buy no
+    /// liquidity.
+    fn open_around(
+        &mut self,
+        value: U256,
+        other: U256,
+        lower: Tick,
+        upper: Tick,
+        limits: LegLimits,
+    ) -> Result<Option<Mixed>, SimError> {
+        let sqrt_lower = get_sqrt_ratio_at_tick(lower)?;
+        let sqrt_upper = get_sqrt_ratio_at_tick(upper)?;
+        let price = self.pool.sqrt_price_x96();
+        if price <= sqrt_lower || price >= sqrt_upper {
+            return Ok(None);
+        }
+        // The range's mix at the price, from what a reference liquidity
+        // holds, both sides counted in the value token.
+        const REFERENCE: u128 = 1 << 96;
+        let (ref0, ref1) = get_amounts_for_liquidity(price, sqrt_lower, sqrt_upper, REFERENCE)?;
+        let (ref_value, ref_other) = self.split(ref0, ref1);
+        let ref_other = self.other_in_value(ref_other)?;
+        let ref_total = ref_value + ref_other;
+        if ref_total.is_zero() {
+            return Ok(None);
+        }
+
+        let (mut value_in, mut other_in, mut capped) = (value, other, false);
+        if let Some(cap) = limits.cap {
+            let total = value + self.other_in_value(other)?;
+            let bought = u128::try_from(mul_div(U256::from(REFERENCE), total, ref_total)?)
+                .unwrap_or(u128::MAX);
+            let (allowed, shrunk) =
+                cap.shrink(bought, thinnest_liquidity(&self.pool, lower, upper));
+            if shrunk {
+                value_in = mul_div(value, U256::from(allowed), U256::from(bought))?;
+                other_in = mul_div(other, U256::from(allowed), U256::from(bought))?;
+                capped = true;
+            }
+        }
+        let held_other = self.other_in_value(other_in)?;
+        let total_in = value_in + held_other;
+        if total_in.is_zero() || total_in < limits.min_used {
+            return Ok(None);
+        }
+
+        // Swap whichever token is over the mix.
+        let target_other = mul_div(total_in, ref_other, ref_total)?;
+        let (mut value_have, mut other_have) = (value_in, other_in);
+        let mut swapped = false;
+        if held_other < target_other {
+            let sell = (target_other - held_other).min(value_have);
+            let got = self.swap_from(self.s.value, sell)?;
+            value_have -= sell;
+            other_have += got;
+            swapped = !sell.is_zero();
+        } else if held_other > target_other {
+            let sell = self
+                .value_in_other(held_other - target_other)?
+                .min(other_have);
+            let got = self.swap_from(self.s.value.other(), sell)?;
+            other_have -= sell;
+            value_have += got;
+            swapped = !sell.is_zero();
+        }
+
+        // The liquidity both amounts buy at the pool price. The pool rounds
+        // up what a mint takes, so where that asks for a unit more than
+        // there is, one unit less liquidity is added.
+        let (amount0, amount1) = self.split(value_have, other_have);
+        let mut liquidity =
+            get_liquidity_for_amounts(price, sqrt_lower, sqrt_upper, amount0, amount1)?;
+        let mut taken = None;
+        for _ in 0..4 {
+            if liquidity == 0 {
+                return Ok(None);
+            }
+            let take0 = get_amount0_delta(price, sqrt_upper, liquidity, true)?;
+            let take1 = get_amount1_delta(sqrt_lower, price, liquidity, true)?;
+            if take0 <= amount0 && take1 <= amount1 {
+                taken = Some((take0, take1));
+                break;
+            }
+            liquidity -= 1;
+        }
+        let Some((take0, take1)) = taken else {
+            return Ok(None);
+        };
+        if self.pool.watch_tick(lower).is_err() {
+            return Ok(None);
+        }
+        if self.pool.watch_tick(upper).is_err() {
+            self.pool.unwatch_tick(lower);
+            return Ok(None);
+        }
+        self.leg = Some(Leg {
+            flip: false,
+            lower,
+            upper,
+            sqrt_lower,
+            sqrt_upper,
+            liquidity,
+            growth0: U256::ZERO,
+            growth1: U256::ZERO,
+        });
+        let (took_value, took_other) = self.split(take0, take1);
+        Ok(Some(Mixed {
+            value_left: (value - value_in) + (value_have - took_value),
+            other_left: (other - other_in) + (other_have - took_other),
+            swapped,
+            capped,
+        }))
+    }
+
     /// Takes the position out: (value token, other token), fees included.
     fn withdraw(&mut self) -> Result<(U256, U256), MathError> {
         let Some(leg) = self.leg.take() else {
@@ -789,16 +997,22 @@ impl<'a> Engine<'a> {
     /// Swaps the other token into the value token against a copy of the
     /// pool, so the fee and the price impact are the real ones.
     fn swap_to_value(&self, amount_other: U256) -> Result<U256, SimError> {
-        if amount_other.is_zero() {
+        self.swap_from(self.s.value.other(), amount_other)
+    }
+
+    /// Swaps `amount` of `from` into the pool's other token against a copy
+    /// of the pool, and returns what comes out.
+    fn swap_from(&self, from: Token, amount: U256) -> Result<U256, SimError> {
+        if amount.is_zero() {
             return Ok(U256::ZERO);
         }
-        let zero_for_one = self.s.value == Token::One;
+        let zero_for_one = from == Token::Zero;
         let limit = if zero_for_one {
             MIN_SQRT_RATIO + U256::from(1u8)
         } else {
             MAX_SQRT_RATIO - U256::from(1u8)
         };
-        let amount = I256::try_from(amount_other)
+        let amount = I256::try_from(amount)
             .map_err(|_| SimError::Settings("an amount is too large to swap".into()))?;
         let amounts = self
             .pool
@@ -830,12 +1044,14 @@ impl<'a> Engine<'a> {
             closed_time: time,
             closed_block: block,
             exit_reason: reason.to_string(),
+            shape: self.s.shape.name().to_string(),
             amount_in: to_f64(campaign.amount_in) / unit,
             result: (to_f64(self.cash) - to_f64(campaign.cash_before)) / unit,
             fees: campaign.fees / unit,
             gas: to_f64(campaign.gas) / unit,
             passes: campaign.passes,
             flips: campaign.flips,
+            recentres: campaign.recentres,
             seconds_beyond,
         });
     }
@@ -846,8 +1062,11 @@ impl<'a> Engine<'a> {
                 if self.leg.is_some() || self.halted {
                     return Ok(());
                 }
-                // Gas comes out of the same capital, so it is set aside first.
-                let gas = self.gas.cost(self.s.gas.open_units);
+                let around = self.s.shape == Shape::AroundPrice;
+                // Gas comes out of the same capital, so it is set aside
+                // first. An entry around the price swaps as well as opens.
+                let swap_units = if around { self.s.gas.swap_units } else { 0 };
+                let gas = self.gas.cost(self.s.gas.open_units + swap_units);
                 if gas >= self.cash {
                     return Ok(());
                 }
@@ -864,17 +1083,28 @@ impl<'a> Engine<'a> {
                     cap: self.share_cap,
                     min_used,
                 };
-                let Some(opened) =
-                    self.open_leg(self.s.value, budget, lower, upper, false, limits)?
-                else {
-                    // Price moved onto the range in the meantime, or the
-                    // pool has no liquidity in part of it to take a share
-                    // of. Look again later.
-                    return Ok(());
+                // `None`: price moved onto (or, around the price, out of)
+                // the range in the meantime, or the pool has no liquidity in
+                // part of it to take a share of. Look again later.
+                let (used, capped, swapped) = if around {
+                    let Some(mixed) = self.open_around(budget, U256::ZERO, lower, upper, limits)?
+                    else {
+                        return Ok(());
+                    };
+                    // What the range could not take of the other token stays
+                    // in it, and goes back with the campaign's closing swap.
+                    self.loose_other += mixed.other_left;
+                    (budget - mixed.value_left, mixed.capped, mixed.swapped)
+                } else {
+                    let Some(opened) =
+                        self.open_leg(self.s.value, budget, lower, upper, false, limits)?
+                    else {
+                        return Ok(());
+                    };
+                    (opened.used, opened.capped, false)
                 };
                 // Whatever the cap left unused stays as cash.
-                let used = opened.used;
-                if opened.capped {
+                if capped {
                     self.out.summary.capped_entries += 1;
                 }
                 self.cash -= used;
@@ -891,11 +1121,83 @@ impl<'a> Engine<'a> {
                     gas: U256::ZERO,
                     passes: 0,
                     flips: 0,
+                    recentres: 0,
                     seconds_beyond: 0,
-                    extreme: Extreme::Value,
+                    extreme: if around {
+                        Extreme::Neither
+                    } else {
+                        Extreme::Value
+                    },
                     other_since: None,
+                    out_since: None,
                 });
-                self.charge_gas(self.s.gas.open_units);
+                let swap_units = if swapped { self.s.gas.swap_units } else { 0 };
+                self.charge_gas(self.s.gas.open_units + swap_units);
+            }
+            Action::Recenter { decision } => {
+                let Some(leg) = &self.leg else {
+                    return Ok(());
+                };
+                // Back in its range in the meantime: it stays.
+                let (held_value, held_other) = self.holdings(leg)?;
+                if !held_value.is_zero() && !held_other.is_zero() {
+                    return Ok(());
+                }
+                let Some((lower, upper)) =
+                    around_price(self.pool.tick(), self.pool.tick_spacing(), self.s.width)
+                else {
+                    return Ok(());
+                };
+                // A price exactly on a bound of the new range has no range
+                // around it yet: look again at the next decision.
+                let price = self.pool.sqrt_price_x96();
+                if (lower, upper) == (leg.lower, leg.upper)
+                    || price <= get_sqrt_ratio_at_tick(lower)?
+                    || price >= get_sqrt_ratio_at_tick(upper)?
+                {
+                    return Ok(());
+                }
+                if let Some(row) = self.out.decisions.get_mut(decision) {
+                    row.target_lower = Some(lower);
+                    row.target_upper = Some(upper);
+                }
+                let (value, other) = self.withdraw()?;
+                let other = other + std::mem::take(&mut self.loose_other);
+                let limits = LegLimits {
+                    cap: self.share_cap,
+                    min_used: U256::ZERO,
+                };
+                match self.open_around(value, other, lower, upper, limits)? {
+                    Some(mixed) => {
+                        self.cash += mixed.value_left;
+                        self.loose_other = mixed.other_left;
+                        let swap_units = if mixed.swapped {
+                            self.s.gas.swap_units
+                        } else {
+                            0
+                        };
+                        self.charge_gas(
+                            self.s.gas.close_units + self.s.gas.open_units + swap_units,
+                        );
+                        if let Some(campaign) = &mut self.campaign {
+                            campaign.recentres += 1;
+                            campaign.extreme = Extreme::Neither;
+                            campaign.out_since = None;
+                            if let Some(since) = campaign.other_since.take() {
+                                campaign.seconds_beyond += time.saturating_sub(since);
+                            }
+                        }
+                    }
+                    None => {
+                        // The new range could not open: everything goes back
+                        // to the value token and the campaign ends.
+                        self.cash += value;
+                        self.loose_other = other;
+                        self.charge_gas(self.s.gas.close_units);
+                        self.swap_loose_to_value()?;
+                        self.end_campaign("recenter_failed", time, block);
+                    }
+                }
             }
             Action::Withdraw { reason } => {
                 let Some(leg) = &self.leg else {
@@ -1048,7 +1350,18 @@ impl<'a> Engine<'a> {
         score
     }
 
+    /// The range to enter now. Around the price there is one, the range
+    /// centred on it; with history, it must have been crossed at least
+    /// `min_passes_per_day` times a day on the long lookback. One-sided,
+    /// the zone choice among the ranges on the entry side.
     fn best_entry(&mut self, now: u64) -> Option<(Tick, Tick)> {
+        if self.s.shape == Shape::AroundPrice {
+            let range = around_price(self.pool.tick(), self.pool.tick_spacing(), self.s.width)?;
+            let score = self.score(range.0, range.1, now);
+            return (score.observed_days < 1.0
+                || score.passes_per_day_long >= self.s.min_passes_per_day)
+                .then_some(range);
+        }
         let candidates = entry_candidates(
             self.pool.tick(),
             self.pool.tick_spacing(),
@@ -1194,32 +1507,40 @@ impl<'a> Engine<'a> {
         // Where the position stands, and the passes it has completed.
         let mut state = "flat";
         let mut stranded_since = None;
+        let mut out_since = None;
         let mut resting = false;
         if let Some(leg) = &self.leg {
             let (value, other) = self.holdings(leg)?;
             let flip = leg.flip;
             let campaign = self.campaign.as_mut().expect("a leg belongs to a campaign");
+            // A pass is counted from one side of the range to the other;
+            // leaving a range around the price for the first time is half
+            // of one.
             if value.is_zero() && !other.is_zero() {
                 if campaign.extreme == Extreme::Value {
-                    campaign.extreme = Extreme::Other;
                     campaign.passes += 1;
                 }
+                campaign.extreme = Extreme::Other;
                 campaign.other_since.get_or_insert(time);
+                campaign.out_since.get_or_insert(time);
                 stranded_since = campaign.other_since;
                 state = if flip { "flipped" } else { "beyond" };
             } else if other.is_zero() {
                 if campaign.extreme == Extreme::Other {
-                    campaign.extreme = Extreme::Value;
                     campaign.passes += 1;
                 }
+                campaign.extreme = Extreme::Value;
                 if let Some(since) = campaign.other_since.take() {
                     campaign.seconds_beyond += time.saturating_sub(since);
                 }
+                campaign.out_since.get_or_insert(time);
                 resting = true;
                 state = "resting";
             } else {
+                campaign.out_since = None;
                 state = "in_range";
             }
+            out_since = campaign.out_since;
         }
 
         // The loss limit is checked on every block, before anything else.
@@ -1294,6 +1615,32 @@ impl<'a> Engine<'a> {
             return Ok(());
         };
 
+        // An around-price position price has left for long enough moves
+        // to the range around the price, at the pace of the decisions.
+        if let (Some(after), Some(since), false) = (self.s.recenter_after, out_since, leg.flip) {
+            if time.saturating_sub(since) >= after && time >= self.next_decide {
+                self.next_decide = time + self.s.decide_every.max(1);
+                let target = around_price(tick, self.pool.tick_spacing(), self.s.width);
+                self.out.decisions.push(DecisionRow {
+                    campaign: self.campaign.as_ref().map_or(0, |c| c.id),
+                    time,
+                    block,
+                    tick,
+                    leg: "entry".to_string(),
+                    seconds_stranded: time.saturating_sub(since),
+                    action: "recenter".to_string(),
+                    target_lower: target.map(|t| t.0),
+                    target_upper: target.map(|t| t.1),
+                    expected_wait: None,
+                    expected_flip: None,
+                    expected_close: None,
+                });
+                let decision = self.out.decisions.len() - 1;
+                self.schedule(block, Action::Recenter { decision });
+                return Ok(());
+            }
+        }
+
         if resting {
             if leg.flip {
                 // The flip leg is back in the value token: the campaign is done.
@@ -1325,14 +1672,23 @@ impl<'a> Engine<'a> {
                     self.next_check = time;
                     return Ok(());
                 }
+                // Around the price with a time to move set, moving is that
+                // rule's alone.
+                if self.s.recenter_after.is_some() {
+                    return Ok(());
+                }
                 let own_gap = gap(tick, leg.lower, leg.upper, self.side());
                 let own = self.score(leg.lower, leg.upper, time);
                 let best = self.best_entry(time);
                 let move_to = match best {
                     Some(range) if range != (leg.lower, leg.upper) => {
+                        // A range around the price moves only once price is
+                        // far from it: a busier range there would take a
+                        // swap to reach.
                         let score = self.score(range.0, range.1, time);
-                        let busier = score.passes_per_day_long
-                            > own.passes_per_day_long * self.s.move_margin
+                        let busier = self.s.shape == Shape::OneSided
+                            && score.passes_per_day_long
+                                > own.passes_per_day_long * self.s.move_margin
                             && score.passes_per_day_long > 0.0;
                         (own_gap > self.s.max_gap.max(self.s.width) || busier).then_some(range)
                     }
@@ -1465,6 +1821,14 @@ pub fn run(
     }
     if settings.lookbacks_days.is_empty() {
         return Err(SimError::Settings("the zone lookbacks are empty".into()));
+    }
+    if settings.recenter_after.is_some() && settings.shape != Shape::AroundPrice {
+        return Err(SimError::Settings(
+            "exit.recenter_after moves a position to the range around the price, so it needs \
+             entry.shape: around_price; one-sided positions move with entry.move_margin and the \
+             patience rule. Set entry.shape: around_price or remove exit.recenter_after"
+                .into(),
+        ));
     }
     let value_decimals = match settings.value {
         Token::Zero => settings.decimals0,

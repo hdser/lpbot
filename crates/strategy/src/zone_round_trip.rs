@@ -77,6 +77,28 @@ pub fn entry_candidates(
     ranges
 }
 
+/// The range of `width` around the price: the one, on the tick spacing,
+/// that holds `tick` (`lower <= tick < upper`) and whose middle is nearest
+/// to it, the higher one on a tie. Such a range holds both tokens. `None`
+/// when `width` is not a positive multiple of `spacing`.
+pub fn around_price(tick: Tick, spacing: Tick, width: Tick) -> Option<(Tick, Tick)> {
+    if spacing <= 0 || width <= 0 || width % spacing != 0 {
+        return None;
+    }
+    // The lower bound of a range centred exactly on the tick, rounded to
+    // the nearest bound on the spacing, then moved one step if that range
+    // misses the tick.
+    let centred = tick - width / 2;
+    let mut lower = (centred + spacing / 2).div_euclid(spacing) * spacing;
+    if lower > tick {
+        lower -= spacing;
+    }
+    if lower + width <= tick {
+        lower += spacing;
+    }
+    Some((lower, lower + width))
+}
+
 /// Picks the range to enter from candidates listed nearest first.
 ///
 /// Without a day of history there is nothing to rank on, and the nearest
@@ -120,6 +142,46 @@ mod tests {
             passes_per_day_short: short,
             observed_days: days,
         }
+    }
+
+    #[test]
+    fn the_range_around_the_price_holds_the_tick_and_is_centred_on_it() {
+        // Centred exactly: the tick is the middle.
+        assert_eq!(around_price(0, 10, 20), Some((-10, 10)));
+        assert_eq!(around_price(180, 60, 120), Some((120, 240)));
+        assert_eq!(around_price(200, 60, 120), Some((120, 240)));
+        // Between two centred ranges the higher one wins the tie.
+        assert_eq!(around_price(5, 10, 20), Some((0, 20)));
+        assert_eq!(around_price(4, 10, 20), Some((-10, 10)));
+        // A width of one spacing has a single range holding the tick.
+        assert_eq!(around_price(7, 10, 10), Some((0, 10)));
+        assert_eq!(around_price(10, 10, 10), Some((10, 20)));
+        // Negative ticks, as for USDC/WETH, round the same way.
+        assert_eq!(around_price(-198_969, 10, 40), Some((-198_990, -198_950)));
+        assert_eq!(around_price(-7, 10, 10), Some((-10, 0)));
+        for tick in -200..200 {
+            for (spacing, width) in [(1, 1), (1, 7), (10, 10), (10, 20), (10, 50), (60, 120)] {
+                let (lower, upper) = around_price(tick, spacing, width).unwrap();
+                assert!(lower <= tick && tick < upper, "{tick} {spacing} {width}");
+                assert_eq!(upper - lower, width);
+                assert_eq!(lower.rem_euclid(spacing), 0);
+                // No other range on the spacing holding the tick is closer
+                // to centred.
+                let off = |l: Tick| (2 * (tick - l) - width).abs();
+                let mut other = lower - spacing;
+                while other + width > tick {
+                    assert!(off(other) >= off(lower), "{tick} {spacing} {width}");
+                    other -= spacing;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_width_off_the_spacing_has_no_range_around_the_price() {
+        assert_eq!(around_price(0, 10, 15), None);
+        assert_eq!(around_price(0, 10, 0), None);
+        assert_eq!(around_price(0, 0, 10), None);
     }
 
     #[test]

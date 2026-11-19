@@ -24,6 +24,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
 | Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
 | `lpbot run`: backtests of the zone round trip, written as the six result tables, with results in the value token and in dollars | |
+| Entries one-sided or around the price (`entry.shape`), with an optional move back around the price once price has left (`exit.recenter_after`) | |
 | Adaptive patience decision: wait, flip or close by expected result, from the pool's own history | |
 | `lpbot calibrate`: fits the adaptive decision walk-forward; it ships only if it beats the three fixed rules out of sample | |
 | Viewer: `lpbot load-results` puts the tables in Postgres; five Grafana dashboards read them (runs; run detail with the price, the range shaded by state, time in and out of range, APR and fee APR; compare, for runs and strategies side by side; pools and zones; pool) | |

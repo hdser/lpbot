@@ -58,7 +58,8 @@ strategies:
       lookbacks: [7d, 30d, 90d]
       rank_by: [passes_per_day, zone_implied_vol]
     entry:
-      shapes: [one_sided, around_price]
+      shape: one_sided               # or around_price: swap part into the other token and hold the range centred on the price
+      shapes: [one_sided, around_price]   # what the calibrator may choose from, once it searches shapes
       width_ticks: { min: 10, max: 80 }   # search space, not a choice
       max_gap_ticks: null            # how far from the price an entry may sit; null is one width
       move_margin: 1.5               # a resting range moves to one crossed this many times as often
@@ -73,6 +74,7 @@ strategies:
       max_wait: null                 # close a position stranded beyond its range this long, such as 72h
     exit:
       max_vol_to_width: null         # a resting range steps aside to cash while the day's volatility exceeds this many widths
+      recenter_after: null           # around the price only: move a position price has left this long (0: at once) to the range around the price, with one swap
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings
