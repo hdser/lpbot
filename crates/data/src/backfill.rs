@@ -36,6 +36,22 @@ pub trait ChainSource {
     fn block_times(&self, blocks: &[u64]) -> Result<Vec<u64>, ChainError>;
     /// Every log of the pool in a block range, in chain order.
     fn logs(&self, pool: Address, from_block: u64, to_block: u64) -> Result<Vec<Log>, ChainError>;
+    /// Every log of several pools in a block range, in chain order. A node
+    /// answers it with one request that reads each block once, however
+    /// many pools it asks about. This default asks pool by pool.
+    fn logs_many(
+        &self,
+        pools: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<Log>, ChainError> {
+        let mut logs = Vec::new();
+        for pool in pools {
+            logs.extend(self.logs(*pool, from_block, to_block)?);
+        }
+        logs.sort_by_key(|l| (l.block_number, l.log_index));
+        Ok(logs)
+    }
     /// The pool's full state after a block.
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError>;
     /// Whether a contract is deployed at `address` after `block`. A pool
@@ -81,6 +97,22 @@ impl ChainSource for NodeSource<'_> {
         )?)
     }
 
+    fn logs_many(
+        &self,
+        pools: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<Log>, ChainError> {
+        Ok(self.client.get_logs_chunked_many(
+            pools,
+            &[],
+            from_block,
+            to_block,
+            self.log_chunk,
+            |_, _| {},
+        )?)
+    }
+
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
         fetch_snapshot(self.client, pool, block)
     }
@@ -115,6 +147,15 @@ impl<S: ChainSource> ChainSource for AtHead<'_, S> {
 
     fn logs(&self, pool: Address, from_block: u64, to_block: u64) -> Result<Vec<Log>, ChainError> {
         self.source.logs(pool, from_block, to_block)
+    }
+
+    fn logs_many(
+        &self,
+        pools: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<Log>, ChainError> {
+        self.source.logs_many(pools, from_block, to_block)
     }
 
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
@@ -284,11 +325,12 @@ pub fn first_block_with_code(
     Ok(Some(with))
 }
 
-fn stored_logs(
+/// The time of every block the logs are in, each checked to fall on `day`.
+fn block_times_on(
     source: &impl ChainSource,
-    logs: Vec<Log>,
+    logs: &[Log],
     day: Day,
-) -> Result<Vec<StoredLog>, BackfillError> {
+) -> Result<BTreeMap<u64, u64>, BackfillError> {
     let mut times: BTreeMap<u64, u64> = logs.iter().map(|l| (l.block_number, 0)).collect();
     let blocks: Vec<u64> = times.keys().copied().collect();
     let answers = source.block_times(&blocks)?;
@@ -308,6 +350,14 @@ fn stored_logs(
         }
         times.insert(*block, time);
     }
+    Ok(times)
+}
+
+/// The logs as stored, with the times `block_times_on` found.
+fn stored_logs(
+    logs: Vec<Log>,
+    times: &BTreeMap<u64, u64>,
+) -> Result<Vec<StoredLog>, BackfillError> {
     logs.into_iter()
         .map(|log| {
             Ok(StoredLog {
@@ -350,6 +400,18 @@ pub fn usable_snapshot(
     Ok(Some(snapshot))
 }
 
+/// One pool's day as the backfill left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolDay {
+    pub pool: Address,
+    /// Logs written; 0 for a day that was already stored.
+    pub rows: usize,
+    pub state: DayState,
+    /// Whether this run fetched and wrote the day; false when it was
+    /// already stored complete.
+    pub fetched: bool,
+}
+
 /// Brings one pool's stored history up to the head, starting at `from`.
 /// `on_day` is told about every day as it is written or skipped.
 pub fn backfill_pool(
@@ -360,21 +422,163 @@ pub fn backfill_pool(
     from: Day,
     mut on_day: impl FnMut(Day, usize, DayState),
 ) -> Result<BackfillReport, BackfillError> {
+    let mut outcomes = backfill_pools(source, root, chain, &[pool], from, |day, pools| {
+        for pool in pools {
+            on_day(day, pool.rows, pool.state);
+        }
+    })?;
+    outcomes.pop().expect("one outcome for the one pool")
+}
+
+/// Brings several pools' stored histories up to the head, starting at
+/// `from`, day by day: every day's logs of all the pools that need it come
+/// from one request, so the node reads each block once rather than once
+/// per pool. `on_day` is told, once per day, about every pool that has
+/// the day, written or skipped.
+///
+/// The outcome of each pool is in the order asked. A pool that cannot
+/// start (its state unreadable, say) or whose day cannot be stored fails
+/// alone and the others go on; a failure of the node itself, or answers
+/// that do not fit together, stops the run, and a re-run carries on from
+/// what was stored.
+pub fn backfill_pools(
+    source: &impl ChainSource,
+    root: &std::path::Path,
+    chain: &str,
+    pools: &[PoolRef],
+    from: Day,
+    mut on_day: impl FnMut(Day, &[PoolDay]),
+) -> Result<Vec<Result<BackfillReport, BackfillError>>, BackfillError> {
     let events = EventStore::new(root);
-    let snapshots = SnapshotStore::new(root);
     let (head, head_time) = source.head()?;
-    let mut report = BackfillReport {
+    let empty = BackfillReport {
         head_block: head,
         head_time,
         ..Default::default()
     };
     let last_day = Day::of_time(head_time);
-    if from > last_day {
-        return Ok(report);
+    if from > last_day || pools.is_empty() {
+        return Ok(pools.iter().map(|_| Ok(empty.clone())).collect());
     }
 
+    let start = first_block_at_or_after(source, from.start(), 0, head)?;
+    let mut outcomes: Vec<Result<BackfillReport, BackfillError>> = pools
+        .iter()
+        .map(|pool| prepare(source, root, chain, *pool, from, start, empty.clone()))
+        .collect();
+
+    // Each pool's first day; pools with nothing to store are left out.
+    let firsts: Vec<Option<Day>> = outcomes
+        .iter()
+        .map(|outcome| outcome.as_ref().ok().and_then(|report| report.from))
+        .collect();
+    let Some(first) = firsts.iter().flatten().min().copied() else {
+        return Ok(outcomes);
+    };
+    let mut start = if first == from {
+        start
+    } else {
+        first_block_at_or_after(source, first.start(), start, head)?
+    };
+
+    let mut day = first;
+    while day <= last_day {
+        // The next day's first block closes this day. Past the head it does
+        // not exist yet, and the day is still in progress.
+        let next_start = first_block_at_or_after(source, day.end(), start, head)?;
+        let complete = next_start <= head;
+        let state = if complete {
+            DayState::Complete
+        } else {
+            DayState::Partial
+        };
+
+        let mut seen = Vec::new();
+        let mut wanted = Vec::new();
+        for (index, pool) in pools.iter().enumerate() {
+            let Ok(report) = &mut outcomes[index] else {
+                continue;
+            };
+            if firsts[index].is_none_or(|first| day < first) {
+                continue;
+            }
+            if events.day_state(chain, pool.address, day) == DayState::Complete {
+                report.skipped += 1;
+                seen.push(PoolDay {
+                    pool: pool.address,
+                    rows: 0,
+                    state: DayState::Complete,
+                    fetched: false,
+                });
+            } else {
+                wanted.push(index);
+            }
+        }
+
+        if !wanted.is_empty() {
+            let addresses: Vec<Address> = wanted.iter().map(|&i| pools[i].address).collect();
+            let logs = if start < next_start {
+                source.logs_many(&addresses, start, next_start - 1)?
+            } else {
+                Vec::new()
+            };
+            let times = block_times_on(source, &logs, day)?;
+            let mut by_pool: BTreeMap<Address, Vec<Log>> = BTreeMap::new();
+            for log in logs {
+                if !addresses.contains(&log.address) {
+                    return Err(BackfillError::Inconsistent(format!(
+                        "a log of {:#x} in block {} came back for pools it is not one of",
+                        log.address, log.block_number
+                    )));
+                }
+                by_pool.entry(log.address).or_default().push(log);
+            }
+            for index in wanted {
+                let address = pools[index].address;
+                let logs = by_pool.remove(&address).unwrap_or_default();
+                let written = stored_logs(logs, &times).and_then(|logs| {
+                    events.write_day(chain, address, day, &logs, complete)?;
+                    Ok(logs.len())
+                });
+                match (written, &mut outcomes[index]) {
+                    (Ok(rows), Ok(report)) => {
+                        report.written.push((day, rows, complete));
+                        seen.push(PoolDay {
+                            pool: address,
+                            rows,
+                            state,
+                            fetched: true,
+                        });
+                    }
+                    (Err(error), outcome) => *outcome = Err(error),
+                    (Ok(_), Err(_)) => unreachable!("a failed pool is not fetched"),
+                }
+            }
+        }
+        on_day(day, &seen);
+        start = next_start;
+        day = day.next();
+    }
+    Ok(outcomes)
+}
+
+/// Where one pool's history starts and the snapshot it replays from,
+/// written now when none stored is usable. `start` is the first block of
+/// `from`. The report's `from` is `None` when the pool has no whole day
+/// yet.
+fn prepare(
+    source: &impl ChainSource,
+    root: &std::path::Path,
+    chain: &str,
+    pool: PoolRef,
+    from: Day,
+    start: u64,
+    mut report: BackfillReport,
+) -> Result<BackfillReport, BackfillError> {
+    let snapshots = SnapshotStore::new(root);
+    let (head, last_day) = (report.head_block, Day::of_time(report.head_time));
     let mut from = from;
-    let mut start = first_block_at_or_after(source, from.start(), 0, head)?;
+    let mut start = start;
     let mut base = usable_snapshot(root, chain, pool.address, from)?;
     if base.is_none() {
         let Some(before) = start.checked_sub(1) else {
@@ -424,39 +628,6 @@ pub fn backfill_pool(
             (from, block)
         }
     });
-
-    let mut day = from;
-    while day <= last_day {
-        // The next day's first block closes this day. Past the head it does
-        // not exist yet, and the day is still in progress.
-        let next_start = first_block_at_or_after(source, day.end(), start, head)?;
-        let complete = next_start <= head;
-
-        if events.day_state(chain, pool.address, day) == DayState::Complete {
-            report.skipped += 1;
-            on_day(day, 0, DayState::Complete);
-        } else {
-            let logs = if start < next_start {
-                source.logs(pool.address, start, next_start - 1)?
-            } else {
-                Vec::new()
-            };
-            let logs = stored_logs(source, logs, day)?;
-            events.write_day(chain, pool.address, day, &logs, complete)?;
-            report.written.push((day, logs.len(), complete));
-            on_day(
-                day,
-                logs.len(),
-                if complete {
-                    DayState::Complete
-                } else {
-                    DayState::Partial
-                },
-            );
-        }
-        start = next_start;
-        day = day.next();
-    }
     Ok(report)
 }
 
@@ -540,8 +711,12 @@ pub(crate) mod testing {
         /// The block the pool was created in; before it there is no code
         /// and no state to read.
         pub created: Option<u64>,
+        /// Addresses with no code at any block: not pools at all.
+        pub no_code: Vec<Address>,
         pub time_reads: Cell<usize>,
         pub log_reads: RefCell<Vec<(u64, u64)>>,
+        /// The pools each log read asked about.
+        pub log_pools: RefCell<Vec<Vec<Address>>>,
         pub snapshot_reads: RefCell<Vec<u64>>,
     }
 
@@ -561,8 +736,10 @@ pub(crate) mod testing {
                 snapshot,
                 evolving: false,
                 created: None,
+                no_code: Vec::new(),
                 time_reads: Cell::new(0),
                 log_reads: RefCell::new(Vec::new()),
+                log_pools: RefCell::new(Vec::new()),
                 snapshot_reads: RefCell::new(Vec::new()),
             }
         }
@@ -595,12 +772,18 @@ pub(crate) mod testing {
         }
 
         fn logs(&self, pool: Address, from: u64, to: u64) -> Result<Vec<Log>, ChainError> {
+            self.logs_many(&[pool], from, to)
+        }
+
+        /// One read for all the pools, as a node answers it.
+        fn logs_many(&self, pools: &[Address], from: u64, to: u64) -> Result<Vec<Log>, ChainError> {
             assert!(to <= self.head.get(), "read past the head");
             self.log_reads.borrow_mut().push((from, to));
+            self.log_pools.borrow_mut().push(pools.to_vec());
             Ok(self
                 .logs
                 .iter()
-                .filter(|l| l.address == pool && (from..=to).contains(&l.block_number))
+                .filter(|l| pools.contains(&l.address) && (from..=to).contains(&l.block_number))
                 .cloned()
                 .collect())
         }
@@ -629,7 +812,10 @@ pub(crate) mod testing {
             Ok(replica.snapshot())
         }
 
-        fn has_code(&self, _address: Address, block: u64) -> Result<bool, ChainError> {
+        fn has_code(&self, address: Address, block: u64) -> Result<bool, ChainError> {
+            if self.no_code.contains(&address) {
+                return Ok(false);
+            }
             Ok(!matches!(self.created, Some(created) if block < created))
         }
     }
@@ -1271,5 +1457,196 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, BackfillError::Inconsistent(_)), "{error}");
+    }
+
+    /// The chain of `chain()` with two more pools, each with a log in
+    /// every 100th block at its own offset.
+    fn three_pools() -> (FakeChain, Vec<PoolRef>) {
+        let mut chain = chain();
+        let mut pools = vec![pool()];
+        for (n, byte) in [0xb1u8, 0xc2].into_iter().enumerate() {
+            let other = PoolRef {
+                address: Address::repeat_byte(byte),
+                ..pool()
+            };
+            for block in (0..25_000u64).step_by(100) {
+                let block = block + 10 * (n as u64 + 1);
+                chain.add_log(other.address, block, 1, block.to_be_bytes().to_vec());
+            }
+            pools.push(other);
+        }
+        (chain, pools)
+    }
+
+    /// Every file under `root`, by its path below `root`.
+    fn files_below(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        all_files(root)
+            .into_iter()
+            .map(|(path, bytes)| (path.strip_prefix(root).unwrap().to_path_buf(), bytes))
+            .collect()
+    }
+
+    #[test]
+    fn several_pools_store_what_one_at_a_time_does_with_one_log_read_a_day() {
+        let (chain, pools) = three_pools();
+        let from = day("2026-10-31");
+
+        let alone = TempDir::new("backfill");
+        for pool in &pools {
+            backfill_pool(&chain, alone.path(), "ethereum", *pool, from, |_, _, _| {}).unwrap();
+        }
+        // Four days, read once for each of the three pools.
+        assert_eq!(chain.log_reads.borrow().len(), 3 * 4);
+
+        chain.log_reads.borrow_mut().clear();
+        chain.log_pools.borrow_mut().clear();
+        let together = TempDir::new("backfill");
+        let mut days = Vec::new();
+        let outcomes = backfill_pools(
+            &chain,
+            together.path(),
+            "ethereum",
+            &pools,
+            from,
+            |d, seen| days.push((d, seen.to_vec())),
+        )
+        .unwrap();
+        // Four days, read once for all three pools.
+        assert_eq!(chain.log_reads.borrow().len(), 4);
+        assert!(chain
+            .log_pools
+            .borrow()
+            .iter()
+            .all(|asked| asked.len() == 3));
+        assert_eq!(days.len(), 4);
+        assert!(days
+            .iter()
+            .all(|(_, seen)| seen.len() == 3 && seen.iter().all(|p| p.fetched && p.rows > 0)));
+        assert!(days[3].1.iter().all(|p| p.state == DayState::Partial));
+        for outcome in &outcomes {
+            assert_eq!(outcome.as_ref().unwrap().written.len(), 4);
+        }
+        // The same files, byte for byte.
+        assert_eq!(files_below(alone.path()), files_below(together.path()));
+    }
+
+    #[test]
+    fn a_pool_stored_before_is_left_out_of_the_reads_of_its_stored_days() {
+        let (chain, pools) = three_pools();
+        let from = day("2026-10-31");
+        let dir = TempDir::new("backfill");
+        backfill_pool(&chain, dir.path(), "ethereum", pools[0], from, |_, _, _| {}).unwrap();
+        chain.log_pools.borrow_mut().clear();
+
+        let mut days = Vec::new();
+        let outcomes = backfill_pools(&chain, dir.path(), "ethereum", &pools, from, |d, seen| {
+            days.push((d, seen.to_vec()))
+        })
+        .unwrap();
+        let asked = chain.log_pools.borrow();
+        assert_eq!(asked.len(), 4);
+        // The first pool's three whole days are stored: only the others
+        // are asked for them. The open day is asked for again for all.
+        for asked in &asked[..3] {
+            assert_eq!(*asked, vec![pools[1].address, pools[2].address]);
+        }
+        assert_eq!(asked[3].len(), 3);
+        assert_eq!(outcomes[0].as_ref().unwrap().skipped, 3);
+        let first = days[0]
+            .1
+            .iter()
+            .find(|p| p.pool == pools[0].address)
+            .unwrap();
+        assert!(!first.fetched && first.rows == 0);
+    }
+
+    #[test]
+    fn a_pool_that_cannot_start_fails_alone() {
+        let (mut chain, pools) = three_pools();
+        chain.no_code = vec![pools[1].address];
+        let dir = TempDir::new("backfill");
+        let outcomes = backfill_pools(
+            &chain,
+            dir.path(),
+            "ethereum",
+            &pools,
+            day("2026-10-31"),
+            |_, seen| assert!(seen.iter().all(|p| p.pool != pools[1].address)),
+        )
+        .unwrap();
+        let error = outcomes[1].as_ref().unwrap_err();
+        assert!(error.to_string().contains("no code"), "{error}");
+        assert_eq!(outcomes[0].as_ref().unwrap().written.len(), 4);
+        assert_eq!(outcomes[2].as_ref().unwrap().written.len(), 4);
+        assert!(chain
+            .log_pools
+            .borrow()
+            .iter()
+            .all(|asked| !asked.contains(&pools[1].address)));
+    }
+
+    #[test]
+    fn a_log_of_a_pool_not_asked_for_stops_the_run() {
+        // A node that answers with every log in the range.
+        struct Stray(FakeChain);
+        impl ChainSource for Stray {
+            fn head(&self) -> Result<(u64, u64), ChainError> {
+                self.0.head()
+            }
+            fn block_time(&self, block: u64) -> Result<u64, ChainError> {
+                self.0.block_time(block)
+            }
+            fn block_times(&self, blocks: &[u64]) -> Result<Vec<u64>, ChainError> {
+                self.0.block_times(blocks)
+            }
+            fn logs(&self, pool: Address, from: u64, to: u64) -> Result<Vec<Log>, ChainError> {
+                self.0.logs(pool, from, to)
+            }
+            fn logs_many(&self, _: &[Address], from: u64, to: u64) -> Result<Vec<Log>, ChainError> {
+                let mut logs: Vec<Log> = self
+                    .0
+                    .logs
+                    .iter()
+                    .filter(|l| (from..=to).contains(&l.block_number))
+                    .cloned()
+                    .collect();
+                logs.sort_by_key(|l| (l.block_number, l.log_index));
+                Ok(logs)
+            }
+            fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError> {
+                self.0.snapshot(pool, block)
+            }
+        }
+        let (chain, pools) = three_pools();
+        let dir = TempDir::new("backfill");
+        let error = backfill_pools(
+            &Stray(chain),
+            dir.path(),
+            "ethereum",
+            &pools[..2],
+            day("2026-10-31"),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(matches!(error, BackfillError::Inconsistent(_)), "{error}");
+        assert!(error.to_string().contains("not one of"), "{error}");
+    }
+
+    #[test]
+    fn no_pools_means_nothing_read_or_written() {
+        let chain = chain();
+        let dir = TempDir::new("backfill");
+        let outcomes = backfill_pools(
+            &chain,
+            dir.path(),
+            "ethereum",
+            &[],
+            day("2026-10-31"),
+            |_, _| panic!("no day to report"),
+        )
+        .unwrap();
+        assert!(outcomes.is_empty());
+        assert!(chain.log_reads.borrow().is_empty());
+        assert!(all_files(dir.path()).is_empty());
     }
 }
