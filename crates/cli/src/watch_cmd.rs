@@ -1051,6 +1051,22 @@ fn rebuild(
     )?;
     let mut state = state;
     adopt_untouched(&mut state, chain, args.threads)?;
+    // What did not add up in the replay, by kind: the first thousand.
+    let (anomalies, count) = state.book.take_anomalies();
+    if count > 0 {
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for anomaly in &anomalies {
+            let kind = anomaly.what.rsplit(": ").next().unwrap_or("").to_string();
+            *kinds.entry(kind).or_default() += 1;
+        }
+        println!(
+            "  {count} position event(s) did not add up; of the first {}:",
+            anomalies.len()
+        );
+        for (kind, n) in kinds {
+            println!("    {n:>5}  {kind}");
+        }
+    }
     Ok(state)
 }
 

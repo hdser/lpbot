@@ -467,6 +467,30 @@ fn an_nft_emptied_and_collected_in_one_transaction_is_paid_and_let_go() {
         .unwrap();
     assert_eq!(nine.ledger.collected, owed);
     assert!(nine.ledger.is_empty());
+
+    // Collecting nothing from it later changes nothing, and does not
+    // write it again as a new, empty position.
+    s.logs.clear();
+    s.tx();
+    s.collect(MANAGER, -60, 60, (U256::ZERO, U256::ZERO));
+    s.manager_collect(9, (U256::ZERO, U256::ZERO));
+    s.collect(owner(0xC1), -60, 60, (U256::ZERO, U256::ZERO));
+    assert_eq!(
+        book.wanted(&s.logs, &|_| true).len(),
+        1,
+        "only the owner never seen"
+    );
+    book.stage([Seed::Pool {
+        key: key(owner(0xC1), -60, 60),
+        liquidity: 0,
+        last_inside: Default::default(),
+        owed: (0, 0),
+    }]);
+    feed(&mut book, &mut replica, &s.logs);
+    book.clear_staged();
+    assert_eq!(book.take_anomalies().1, 0);
+    assert_eq!(book.take_changes(), (vec![], vec![]));
+    assert!(!book.holds(&PositionId::Nft(9)));
 }
 
 #[test]

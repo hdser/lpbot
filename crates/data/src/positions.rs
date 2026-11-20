@@ -733,6 +733,29 @@ impl PositionBook {
         }
     }
 
+    /// Whether a position the book does not hold is known to hold nothing:
+    /// seen emptied, or read from the chain as empty.
+    fn known_empty(&self, id: &PositionId) -> bool {
+        if self.holds(id) {
+            return false;
+        }
+        let emptied = match id {
+            PositionId::Pool(key) => self.emptied.contains(key),
+            PositionId::Nft(token) => self.emptied_nfts.contains_key(token),
+        };
+        emptied
+            || match self.staged.get(id) {
+                Some(Seed::Pool {
+                    liquidity, owed, ..
+                }) => *liquidity == 0 && *owed == (0, 0),
+                Some(Seed::Nft { state: None, .. }) => true,
+                Some(Seed::Nft {
+                    state: Some(seed), ..
+                }) => seed.liquidity == 0 && seed.owed == (0, 0),
+                None => false,
+            }
+    }
+
     /// Forgets what was staged and not used. Call after each batch.
     pub fn clear_staged(&mut self) {
         self.staged.clear();
@@ -781,6 +804,16 @@ impl PositionBook {
     ) {
         self.tx.pool_event(tx, event, Some(inside));
         let key = event.key();
+        if let PoolPositionEvent::Collect { amounts, .. } = event {
+            if amounts.0.is_zero()
+                && amounts.1.is_zero()
+                && self.known_empty(&PositionId::Pool(key))
+            {
+                // Nothing moves and nothing was held: nothing to follow.
+                self.staged.remove(&PositionId::Pool(key));
+                return;
+            }
+        }
         let ledger = self.pool_ledger(key, inside, at);
         let ok = match *event {
             PoolPositionEvent::Mint {
@@ -841,6 +874,15 @@ impl PositionBook {
             return;
         };
         let token = manager_token(event);
+        if let ManagerEvent::Collect { amounts, .. } = event {
+            if amounts.0.is_zero()
+                && amounts.1.is_zero()
+                && self.known_empty(&PositionId::Nft(token))
+            {
+                self.staged.remove(&PositionId::Nft(token));
+                return;
+            }
+        }
         // The fee growth the manager reads: its pool position's, which its
         // mint or burn just before set. An NFT that holds no liquidity
         // earns nothing, and its own last reading does.
