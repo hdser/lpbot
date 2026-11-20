@@ -1918,7 +1918,7 @@
     },
     {
       "id": 402,
-      "title": "Value in dollars, against holding the volatile token and holding dollars",
+      "title": "Value in dollars, against holding the volatile token, half and half, and dollars",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1940,7 +1940,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(s.time) as time, s.equity_usd as value,\n  r.start_usd * case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end as \"holding the volatile token\",\n  r.start_usd as \"holding dollars\"\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
+          "rawSql": "select to_timestamp(s.time) as time, s.equity_usd as value,\n  r.start_usd * case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end as \"holding the volatile token\",\n  r.start_usd * (0.5 + 0.5 * case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end) as \"holding half and half\",\n  r.start_usd as \"holding dollars\"\nfrom series s join runs r using (run_id)\nwhere s.run_id = '$run'\norder by 1"
         }
       ],
       "fieldConfig": {
@@ -1953,7 +1953,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "A range around the price starts holding both tokens: its benchmark is the half and half it could have held instead, a one-sided range's the token it went in with."
     },
     {
       "id": 403,
@@ -2073,7 +2074,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  round(((c.closed_time - c.opened_time) / 3600.0)::numeric, 1) as hours,\n  (select count(*) from series s where s.run_id = c.run_id and s.time between c.opened_time and c.closed_time and s.state = 'in_range') as hours_in_range,\n  round((c.seconds_beyond / 3600.0)::numeric, 1) as hours_out_of_range,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  c.exit_reason, c.passes, c.flips, c.amount_in, c.result, round((c.result / nullif(c.amount_in, 0) * 100)::numeric, 3) as result_pct,\n  c.fees, c.gas\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
+          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  round(((c.closed_time - c.opened_time) / 3600.0)::numeric, 1) as hours,\n  (select count(*) from series s where s.run_id = c.run_id and s.time between c.opened_time and c.closed_time and s.state = 'in_range') as hours_in_range,\n  round((c.seconds_beyond / 3600.0)::numeric, 1) as hours_out_of_range,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  coalesce(c.shape, 'one_sided') as shape, c.exit_reason, c.passes, c.flips, coalesce(c.recentres, 0) as moves, c.amount_in, c.result, round((c.result / nullif(c.amount_in, 0) * 100)::numeric, 3) as result_pct,\n  c.fees, c.gas\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
         }
       ],
       "fieldConfig": {
