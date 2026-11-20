@@ -494,6 +494,59 @@ fn an_nft_emptied_and_collected_in_one_transaction_is_paid_and_let_go() {
 }
 
 #[test]
+fn what_was_read_for_a_position_outlives_a_collect_of_nothing() {
+    // NFT 12 was emptied before the book started. In the book's first
+    // batch its holder collects nothing, then puts liquidity in again.
+    let mut s = Script::new();
+    s.tx();
+    s.mint(owner(0xB0), -600, 600, 10u128.pow(18));
+    s.mint_nft(12, owner(0x12), -60, 60, 1_000);
+    s.tx();
+    let principal = s.burn(MANAGER, -60, 60, 1_000);
+    s.decrease(12, 1_000, principal);
+    s.collect(MANAGER, -60, 60, principal);
+    s.manager_collect(12, principal);
+    let mut replica = s.chain.clone();
+    s.logs.clear();
+
+    s.tx();
+    s.collect(MANAGER, -60, 60, (U256::ZERO, U256::ZERO));
+    s.manager_collect(12, (U256::ZERO, U256::ZERO));
+    s.tx();
+    let amounts = s.mint(MANAGER, -60, 60, 2_000);
+    s.increase(12, 2_000, amounts);
+
+    let mut book = PositionBook::new([pool_address()]);
+    let wanted = book.wanted(&s.logs, &|_| false);
+    assert_eq!(wanted.len(), 2, "{wanted:?}");
+    book.stage([
+        Seed::Pool {
+            key: key(MANAGER, -60, 60),
+            liquidity: 0,
+            last_inside: Default::default(),
+            owed: (0, 0),
+        },
+        Seed::Nft {
+            token: 12,
+            state: Some(NftSeed {
+                range: key(MANAGER, -60, 60).range,
+                holder: owner(0x12),
+                liquidity: 0,
+                last_inside: Default::default(),
+                owed: (0, 0),
+            }),
+        },
+    ]);
+    feed(&mut book, &mut replica, &s.logs);
+    book.clear_staged();
+    let (anomalies, count) = book.take_anomalies();
+    assert_eq!(count, 0, "{anomalies:?}");
+    let twelve = book.view(&PositionId::Nft(12)).unwrap();
+    assert_eq!(twelve.owner, owner(0x12));
+    assert_eq!(twelve.ledger.liquidity, 2_000);
+}
+
+#[test]
 fn positions_from_before_the_history_are_read_from_the_chain_once() {
     let mut s = Script::new();
     let lp = owner(0xA1);

@@ -810,7 +810,7 @@ impl PositionBook {
                 && self.known_empty(&PositionId::Pool(key))
             {
                 // Nothing moves and nothing was held: nothing to follow.
-                self.staged.remove(&PositionId::Pool(key));
+                // What was read for it stays staged for a later event.
                 return;
             }
         }
@@ -879,7 +879,6 @@ impl PositionBook {
                 && amounts.1.is_zero()
                 && self.known_empty(&PositionId::Nft(token))
             {
-                self.staged.remove(&PositionId::Nft(token));
                 return;
             }
         }
