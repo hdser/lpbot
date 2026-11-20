@@ -366,27 +366,21 @@ pub fn token_ids_received(
 }
 
 /// Requests for the events of `held`: up to `IDS_PER_REQUEST` NFTs each,
-/// over the blocks they were held in, an NFT joining the previous request
-/// only while that keeps it within `MAX_REQUEST_SPAN` blocks. A bot that
-/// opens a new NFT every day is read a few days at a time instead of over
-/// the whole range for every NFT.
+/// taken in the order they arrived, over the blocks from the first one's
+/// arrival to the last one's departure. NFTs are rarely burned when they
+/// are emptied, so most count as held to the end of the range; grouping by
+/// count keeps the requests few however long they were held.
 fn event_requests(held: &[Holding]) -> Vec<(Vec<U256>, u64, u64)> {
-    const MAX_REQUEST_SPAN: u64 = 100_000;
     let mut sorted = held.to_vec();
     sorted.sort_by_key(|h| (h.from_block, h.token_id));
-    let mut requests: Vec<(Vec<U256>, u64, u64)> = Vec::new();
-    for h in sorted {
-        if let Some((ids, start, end)) = requests.last_mut() {
-            let new_end = (*end).max(h.to_block);
-            if ids.len() < IDS_PER_REQUEST && new_end - *start <= MAX_REQUEST_SPAN {
-                ids.push(h.token_id);
-                *end = new_end;
-                continue;
-            }
-        }
-        requests.push((vec![h.token_id], h.from_block, h.to_block));
-    }
-    requests
+    sorted
+        .chunks(IDS_PER_REQUEST)
+        .map(|group| {
+            let start = group.iter().map(|h| h.from_block).min().unwrap_or(0);
+            let end = group.iter().map(|h| h.to_block).max().unwrap_or(0);
+            (group.iter().map(|h| h.token_id).collect(), start, end)
+        })
+        .collect()
 }
 
 /// The positions of the NFTs `owner` held, with their events while held,
@@ -696,20 +690,23 @@ mod tests {
         };
         let held = holdings(&chain, owner, 0, 1_000).unwrap();
         assert_eq!((held[0].from_block, held[0].to_block), (5, 50));
-        // NFTs held a day apart share a request; one held a year later
-        // gets its own.
+        // Requests take NFTs in the order they arrived, up to the most a
+        // request asks about, over the blocks they span.
         let h = |id: u64, from: u64, to: u64| Holding {
             token_id: U256::from(id),
             from_block: from,
             to_block: to,
         };
-        let requests = event_requests(&[
-            h(1, 0, 7_000),
-            h(2, 7_000, 14_000),
-            h(3, 2_600_000, 2_607_000),
-        ]);
+        let many: Vec<Holding> = (0..IDS_PER_REQUEST as u64 + 1)
+            .map(|i| h(1_000 - i, i * 10, 1_000_000))
+            .collect();
+        let requests = event_requests(&many);
         assert_eq!(requests.len(), 2);
-        assert_eq!((requests[0].1, requests[0].2), (0, 14_000));
-        assert_eq!(requests[1].0, vec![U256::from(3u8)]);
+        assert_eq!(requests[0].0.len(), IDS_PER_REQUEST);
+        assert_eq!((requests[0].1, requests[0].2), (0, 1_000_000));
+        assert_eq!(
+            requests[1].0,
+            vec![U256::from(1_000 - IDS_PER_REQUEST as u64)]
+        );
     }
 }
