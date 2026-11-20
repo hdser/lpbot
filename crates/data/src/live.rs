@@ -171,6 +171,9 @@ pub struct LiveState {
     pub record_from: u64,
     record: bool,
     out: Outbox,
+    /// The lowest and highest tick swaps took each pool to since the
+    /// writer last asked: every range in between earned fees.
+    swept: BTreeMap<Address, (i32, i32)>,
 }
 
 impl LiveState {
@@ -209,6 +212,7 @@ impl LiveState {
             record_from: 0,
             record: false,
             out: Outbox::default(),
+            swept: BTreeMap::new(),
         }
     }
 
@@ -421,7 +425,16 @@ impl LiveState {
             return Ok(());
         };
         let before = raw_price(&lp.pool);
+        let tick_before = lp.pool.tick();
         let event = apply_pool_log(&mut self.book, &mut lp.pool, log).map_err(replay_error)?;
+        if self.record && matches!(event, Some(PoolEvent::Swap(_))) {
+            let (low, high) = (
+                tick_before.min(lp.pool.tick()),
+                tick_before.max(lp.pool.tick()),
+            );
+            let swept = self.swept.entry(log.address).or_insert((low, high));
+            *swept = (swept.0.min(low), swept.1.max(high));
+        }
         if !self.record || log.time < self.record_from {
             return Ok(());
         }
@@ -491,6 +504,12 @@ impl LiveState {
                 lp.bars.pop_front();
             }
         }
+    }
+
+    /// The lowest and highest tick swaps took each pool to since the last
+    /// call.
+    pub fn take_swept(&mut self) -> BTreeMap<Address, (i32, i32)> {
+        std::mem::take(&mut self.swept)
     }
 
     /// What the writer has not seen yet.
@@ -1064,6 +1083,7 @@ pub fn load_checkpoint(
         record_from: 0,
         record: false,
         out: Outbox::default(),
+        swept: BTreeMap::new(),
     };
     Ok(Some((state, checkpoint.hash)))
 }

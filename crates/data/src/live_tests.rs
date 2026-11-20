@@ -209,6 +209,15 @@ fn the_follower_applies_new_blocks_and_finalizes_behind_the_head() {
     let out = follower.live.take_outbox();
     assert_eq!(out.swaps.len(), 2);
     assert!(out.swaps[0].amount0 > 0.0 && out.swaps[1].amount1 > 0.0);
+    // And every tick the swaps went through: down with the first, then up
+    // past the start with the second.
+    let swept = follower.live.take_swept();
+    let (low, high) = swept[&pool_address()];
+    assert_eq!(low, out.swaps[0].tick);
+    assert_eq!(high, out.swaps[1].tick);
+    assert!(low < 0 && high > 0, "{low} {high}");
+    assert!(follower.live.take_swept().is_empty());
+    assert!(follower.base.take_swept().is_empty());
     assert_eq!(out.pools.len(), 1);
     let flow = follower.live.flow(pool_address(), 0);
     assert_eq!(flow.swaps, 2);

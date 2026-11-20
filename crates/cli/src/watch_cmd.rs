@@ -9,7 +9,7 @@
 //! tables at a short cadence. A checkpoint of the finalized state is
 //! saved every few minutes, so a restart carries on from there.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -468,8 +468,6 @@ struct Writer {
     /// Rows of positions that finished, not yet written: they have left
     /// the book, so a full write would not find them again.
     pending_finished: Vec<LivePositionRow>,
-    /// The tick of each pool at the last refresh of positions in range.
-    last_ticks: HashMap<Address, i32>,
     last_refresh: Option<Instant>,
     /// Write everything at the next write: after a reorg, a failed write,
     /// or at the start.
@@ -484,7 +482,6 @@ impl Writer {
             client: None,
             pending_swaps: Vec::new(),
             pending_finished: Vec::new(),
-            last_ticks: HashMap::new(),
             last_refresh: None,
             full: true,
             last_retention: None,
@@ -580,6 +577,13 @@ impl Writer {
             || self
                 .last_refresh
                 .is_none_or(|t| t.elapsed() >= args.refresh);
+        // The ticks swaps went through since the last refresh: the fees of
+        // every range among them moved, even one the price has left again.
+        let swept = if refresh {
+            follower.live.take_swept()
+        } else {
+            BTreeMap::new()
+        };
         let state = &follower.live;
         let usd: BTreeMap<Address, Option<(f64, f64)>> = state
             .pools
@@ -592,7 +596,7 @@ impl Writer {
             ..Batch::default()
         };
         // Positions: those that changed or finished, and on a refresh every
-        // one whose range the price was in or passed through since the last.
+        // one whose range swaps went through since the last.
         let row_of = |view: &PositionView| {
             let pool = view.range.pool;
             position_row(
@@ -630,18 +634,15 @@ impl Writer {
             if written.contains(&view.id) {
                 continue;
             }
-            let last = self.last_ticks.get(&pool).copied().unwrap_or(tick);
-            let (low, high) = (last.min(tick), last.max(tick));
-            let passed = view.range.tick_lower <= high && low < view.range.tick_upper;
-            if full || (refresh && passed && view.ledger.liquidity > 0) {
+            let passed = swept.get(&pool).is_some_and(|(low, high)| {
+                view.range.tick_lower <= *high && *low < view.range.tick_upper
+            });
+            if full || (passed && view.ledger.liquidity > 0) {
                 batch.positions.push(row_of(&view));
             }
         }
         if refresh {
             self.last_refresh = Some(Instant::now());
-            for (address, lp) in &state.pools {
-                self.last_ticks.insert(*address, lp.pool.tick());
-            }
         }
 
         // Minute rows, swaps, the liquidity around the price.
