@@ -30,6 +30,21 @@
         "sort": 0,
         "multi": false,
         "includeAll": false
+      },
+      {
+        "name": "unit",
+        "label": "Price in",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select max(price_unit) from pool_series where pool = '$pool'",
+        "definition": "select max(price_unit) from pool_series where pool = '$pool'",
+        "refresh": 1,
+        "hide": 2,
+        "multi": false,
+        "includeAll": false
       }
     ]
   },
@@ -40,7 +55,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Now",
+      "title": "Price, ${unit}",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -49,7 +64,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 24,
+        "w": 4,
         "h": 4
       },
       "targets": [
@@ -62,56 +77,377 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "with s as (select * from pool_series where pool = '$pool'),\nlast as (select * from s where time = (select max(time) from pool_series where pool = '$pool')),\nday as (select sum(volume_usd) as volume, sum(fees_usd) as fees, sum(swaps) as swaps\n        from s where time > (select max(time) from pool_series where pool = '$pool') - 86400)\nselect last.price, last.price_unit as \"price in\", last.tvl_usd as \"value held by positions, $\",\n  day.volume as \"volume 24h, $\", day.fees as \"fees 24h, $\", day.swaps as \"swaps 24h\",\n  day.volume / nullif(last.tvl_usd, 0) * 100 as \"volume / value 24h %\",\n  day.fees * 365 / nullif(last.tvl_usd, 0) * 100 as \"fee yield on value, APR %\",\n  to_timestamp(last.time) as \"as of\"\nfrom last, day"
+          "rawSql": "select price as value from pool_series where pool = '$pool' and time = (select max(time) from pool_series where pool = '$pool')"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*, \\$"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "swaps 24h"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
+          "unit": "none",
+          "decimals": null,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
           }
-        ]
+        },
+        "overrides": []
       },
       "options": {
         "reduceOptions": {
-          "values": true,
-          "calcs": [],
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "/.*/"
         },
-        "textMode": "value_and_name",
-        "colorMode": "none",
+        "textMode": "value",
+        "colorMode": "value",
         "graphMode": "none",
-        "justifyMode": "center"
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
       },
-      "description": "The latest sample of the stored history. The value held by positions is what every position holds at the price; it leaves out fees earned but not collected, which sites that show the pool's token balances count in."
+      "description": "At the latest hourly sample: the dollar price of the pool's other token, or the quote token per base token without a dollar stable."
+    },
+    {
+      "id": 20,
+      "title": "Value held by positions",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select tvl_usd as value from pool_series where pool = '$pool' and time = (select max(time) from pool_series where pool = '$pool')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      },
+      "description": "What every position holds at the price, in dollars. It leaves out fees earned but not collected, which sites that show the pool's token balances count in."
+    },
+    {
+      "id": 21,
+      "title": "Volume, 24h",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(volume_usd) as value from pool_series where pool = '$pool' and time > (select max(time) from pool_series where pool = '$pool') - 86400"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "Fees swappers paid, 24h",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(fees_usd) as value from pool_series where pool = '$pool' and time > (select max(time) from pool_series where pool = '$pool') - 86400"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Swaps, 24h",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(swaps) as value from pool_series where pool = '$pool' and time > (select max(time) from pool_series where pool = '$pool') - 86400"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      }
+    },
+    {
+      "id": 24,
+      "title": "Volume over value held, 24h",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(volume_usd) / nullif((select tvl_usd from pool_series where pool = '$pool' and time = (select max(time) from pool_series where pool = '$pool')), 0) * 100 as value from pool_series where pool = '$pool' and time > (select max(time) from pool_series where pool = '$pool') - 86400"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3274d9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      },
+      "description": "How many times over the liquidity traded in the last day."
+    },
+    {
+      "id": 25,
+      "title": "Fee yield on value held, APR",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 0,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(fees_usd) * 365 / nullif((select tvl_usd from pool_series where pool = '$pool' and time = (select max(time) from pool_series where pool = '$pool')), 0) * 100 as value from pool_series where pool = '$pool' and time > (select max(time) from pool_series where pool = '$pool') - 86400"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#37872d"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 30
+        }
+      },
+      "description": "The last day's fees over the value held by positions, a year at that pace. Positions near the price earn more than this, those far from it nothing."
     },
     {
       "id": 2,
@@ -339,7 +675,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select round(price_mid::numeric, greatest(0, 5 - floor(log(abs(price_mid)))::int))::text as price, volatile_usd as \"held in the volatile token\", dollar_usd as \"held in dollars\"\nfrom pool_liquidity\nwhere pool = '$pool' and time = (select max(time) from pool_liquidity where pool = '$pool')\norder by price_mid"
+          "rawSql": "select round(price_mid::numeric, greatest(0, 5 - floor(log(abs(price_mid)))::int))::text as price, volatile_usd as \"held in the base token\", dollar_usd as \"held in the quote token\"\nfrom pool_liquidity\nwhere pool = '$pool' and time = (select max(time) from pool_liquidity where pool = '$pool')\norder by price_mid"
         }
       ],
       "fieldConfig": {
@@ -370,7 +706,7 @@
           "mode": "multi"
         }
       },
-      "description": "What positions hold in each bucket of prices at the latest daily sample. Below the price they hold the dollar side, above it the other token; the bucket with both colours holds the price."
+      "description": "What positions hold in each bucket of prices at the latest daily sample, in dollars. The price is quote token per base token: USDC per WETH, WETH per WBTC. Below the price positions hold the quote token, above it the base token; the bucket with both colours holds the price."
     },
     {
       "id": 8,

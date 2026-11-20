@@ -427,7 +427,9 @@ pub struct PoolLiquidityRow {
     /// What the positions hold inside the bucket, in whole tokens.
     pub amount0: f64,
     pub amount1: f64,
-    /// The same in dollars, in all and split by the token held.
+    /// The same in dollars, in all and split by the token held: the base
+    /// token (the one priced, such as WETH in USDC/WETH or WBTC in
+    /// WBTC/WETH) and the quote token (the dollar stable, or WETH there).
     pub value_usd: Option<f64>,
     pub volatile_usd: Option<f64>,
     pub dollar_usd: Option<f64>,
