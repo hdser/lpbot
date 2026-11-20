@@ -5,7 +5,9 @@
 #
 #   cargo run --release -p lpbot -- agent next experiments/agent-usdc-weth.yml
 #   cargo run --release -p lpbot -- agent decide experiments/agent-usdc-weth.yml \
-#       --action enter --lower -3 --upper -1 --next 4h --note "why"
+#       --action enter --lower -3 --upper -1 --next 4h --note "why" \
+#       --reasoning "what you saw and weighed"
+#   (the reasoning goes to data/agent/usdc-weth-2026-07.log.md, local only)
 #   cargo run --release -p lpbot -- run experiments/agent-usdc-weth.yml
 
 experiment: agent-usdc-weth

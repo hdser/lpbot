@@ -396,9 +396,14 @@ struct DecideArgs {
     /// When to look again, such as 30m, 4h or 2d.
     #[arg(long)]
     next: String,
-    /// Why, in a sentence.
+    /// Why, in a sentence. Kept with the decision in the decisions file.
     #[arg(long, default_value = "")]
     note: String,
+    /// The reasoning behind the decision, as long as it needs to be. It goes
+    /// to the reasoning log next to the decisions file (`<name>.log.md`,
+    /// local, not committed), with what the look showed; the run never reads it.
+    #[arg(long, default_value = "")]
+    reasoning: String,
 }
 
 #[derive(Args)]
@@ -830,6 +835,7 @@ fn real_main() -> Result<()> {
                         upper_pct: d.upper,
                         next: &d.next,
                         note: &d.note,
+                        reasoning: &d.reasoning,
                     },
                 ),
             }
