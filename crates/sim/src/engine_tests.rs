@@ -131,6 +131,9 @@ fn settings(rule: FixedRule) -> Settings {
         max_loss_pct: None,
         max_drawdown_pct: None,
         exit_on_return_ticks: None,
+        after_round_trips: None,
+        cooldown: None,
+        reposition: true,
         after_move_ticks: None,
         move_window: 4 * HOUR,
         move_direction: MoveDirection::Any,
@@ -160,6 +163,87 @@ fn assert_conserved(out: &Output) {
         (from_campaigns - total).abs() < 1e-12,
         "campaigns {from_campaigns} vs run {total}"
     );
+}
+
+#[test]
+fn a_campaign_can_close_once_back_in_the_value_token() {
+    // Down through the range (-20, 0) and back up above it: one round trip.
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let once = Settings {
+        after_round_trips: Some(1),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &once).unwrap();
+    let first = &out.campaigns[0];
+    assert_eq!((first.tick_lower, first.tick_upper), (-20, 0));
+    assert_eq!(first.exit_reason, "round_trip_exit");
+    assert_eq!(first.passes, 2);
+    // Back above the range at hour 5 (tick 30); out in the next block.
+    assert_eq!(first.closed_time, T0 + 6 * HOUR);
+    assert!(
+        first.result > 0.0,
+        "the value token back, with two passes of fees"
+    );
+    assert_conserved(&out);
+
+    // Two round trips asked: the one there is not enough.
+    let twice = Settings {
+        after_round_trips: Some(2),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &twice).unwrap();
+    assert_ne!(out.campaigns[0].exit_reason, "round_trip_exit");
+
+    let zero = Settings {
+        after_round_trips: Some(0),
+        ..settings(FixedRule::Wait)
+    };
+    assert!(run(snapshot, &events, &zero).is_err());
+}
+
+#[test]
+fn a_cooldown_keeps_the_run_out_after_a_campaign_ends() {
+    // Out after the first round trip at hour 6; without a cooldown the next
+    // campaign starts at the next look, with one it waits a day.
+    let (snapshot, events) = history(&[5, 6, -50, -52, 30, 31, 32, 33, 34, 35]);
+    let quick = Settings {
+        after_round_trips: Some(1),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &quick).unwrap();
+    assert_eq!(out.campaigns[0].closed_time, T0 + 6 * HOUR);
+    assert!(out.campaigns.len() >= 2, "entered again");
+    assert!(out.campaigns[1].opened_time <= T0 + 8 * HOUR);
+
+    let patient = Settings {
+        cooldown: Some(DAY),
+        ..quick
+    };
+    let out = run(snapshot, &events, &patient).unwrap();
+    assert_eq!(out.campaigns.len(), 1, "the history ends within the day");
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_resting_range_can_be_left_where_it_was_placed() {
+    // Price runs up away from the first range (-20, 0) and stays there.
+    let (snapshot, events) = history(&[5, 6, 60, 61, 62, 63, 64, 65]);
+    let moving = run(snapshot.clone(), &events, &settings(FixedRule::Wait)).unwrap();
+    assert_eq!(moving.campaigns[0].exit_reason, "repositioned");
+    assert!(moving.campaigns.len() >= 2);
+
+    let still = Settings {
+        reposition: false,
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &still).unwrap();
+    assert_eq!(out.campaigns.len(), 1);
+    assert_eq!(
+        (out.campaigns[0].tick_lower, out.campaigns[0].tick_upper),
+        (-20, 0)
+    );
+    assert_eq!(out.campaigns[0].exit_reason, "window_end");
+    assert_conserved(&out);
 }
 
 #[test]

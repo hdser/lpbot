@@ -316,6 +316,19 @@ pub struct Settings {
     /// token's side, the campaign is closed as soon as price is back in
     /// the range. `None`: never.
     pub exit_on_return_ticks: Option<Tick>,
+    /// Close a campaign once it has made this many round trips: back wholly
+    /// in the value token after being wholly in the other one, its fees on
+    /// top (`exit.after_round_trips`). `None` lets it rest for more.
+    pub after_round_trips: Option<u32>,
+    /// After a campaign ends, no new one starts for this many seconds
+    /// (`entry.cooldown`): one entry per move, not one per look while the
+    /// move signal still holds. `None`: at the next look.
+    pub cooldown: Option<u64>,
+    /// A resting range price has moved away from, or a much busier one
+    /// nearby, is moved to the range now chosen (`entry.reposition`, the
+    /// default). Off, it stays where it was placed until an exit takes it
+    /// out.
+    pub reposition: bool,
     /// Entry signal: a campaign starts only once price has moved at least
     /// this many ticks over the last `move_window` seconds, in
     /// `move_direction`. `None`: no signal.
@@ -384,6 +397,8 @@ pub struct CampaignRow {
     /// allowed), `stop_loss` (fell the most allowed below what went in),
     /// `trailing_stop` (fell the most allowed from its best),
     /// `return_exit` (closed as price came back after a deep excursion),
+    /// `round_trip_exit` (closed once back in the value token after the
+    /// round trips allowed),
     /// `loss_limit` or `window_end`.
     pub exit_reason: String,
     /// `one_sided` or `around_price`: how the campaign went in.
@@ -698,6 +713,9 @@ struct OpenCampaign {
     /// spent there before.
     in_range_since: Option<u64>,
     seconds_in_range: u64,
+    /// Times the position came back wholly into the value token after
+    /// being wholly in the other one.
+    round_trips: u32,
 }
 
 impl OpenCampaign {
@@ -786,6 +804,8 @@ struct Engine<'a> {
     /// Price of the value token in the other token on the first block of
     /// trading.
     start_price: Option<f64>,
+    /// When the last campaign ended, for the cooldown.
+    last_closed: Option<u64>,
 }
 
 impl<'a> Engine<'a> {
@@ -1262,6 +1282,7 @@ impl<'a> Engine<'a> {
             return;
         };
         campaign.left_range(time);
+        self.last_closed = Some(time);
         let unit = self.value_unit;
         let seconds_beyond = campaign.seconds_beyond
             + campaign
@@ -1383,6 +1404,7 @@ impl<'a> Engine<'a> {
                     far_beyond: false,
                     in_range_since: None,
                     seconds_in_range: 0,
+                    round_trips: 0,
                 });
                 let swap_units = if swapped { self.s.gas.swap_units } else { 0 };
                 self.charge_gas(self.s.gas.open_units + swap_units);
@@ -1846,6 +1868,14 @@ impl<'a> Engine<'a> {
         if campaign.far_beyond && (state == "in_range" || state == "resting") {
             return Some("return_exit");
         }
+        if state == "resting"
+            && self
+                .s
+                .after_round_trips
+                .is_some_and(|n| campaign.round_trips >= n)
+        {
+            return Some("round_trip_exit");
+        }
         None
     }
 
@@ -1902,6 +1932,7 @@ impl<'a> Engine<'a> {
             } else if other.is_zero() {
                 if campaign.extreme == Extreme::Other {
                     campaign.passes += 1;
+                    campaign.round_trips += 1;
                 }
                 campaign.extreme = Extreme::Value;
                 if let Some(since) = campaign.other_since.take() {
@@ -1990,7 +2021,12 @@ impl<'a> Engine<'a> {
 
         let Some(leg) = self.leg.clone() else {
             // Flat: look for a range to enter.
-            if time >= self.next_check {
+            let cooling = self
+                .s
+                .cooldown
+                .zip(self.last_closed)
+                .is_some_and(|(wait, closed)| time < closed.saturating_add(wait));
+            if time >= self.next_check && !cooling {
                 self.next_check = time + self.s.check_every.max(1);
                 if self.calm_enough(time) && self.moved_enough(time) {
                     if let Some((lower, upper)) = self.best_entry(time) {
@@ -2073,8 +2109,8 @@ impl<'a> Engine<'a> {
                     return Ok(());
                 }
                 // Around the price with a time to move set, moving is that
-                // rule's alone.
-                if self.s.recenter_after.is_some() {
+                // rule's alone; with moves off, nothing moves it.
+                if self.s.recenter_after.is_some() || !self.s.reposition {
                     return Ok(());
                 }
                 let own_gap = gap(tick, leg.lower, leg.upper, self.side());
@@ -2251,6 +2287,11 @@ pub fn run(
                 .into(),
         ));
     }
+    if settings.after_round_trips == Some(0) {
+        return Err(SimError::Settings(
+            "exit.after_round_trips must be at least 1, or left out".into(),
+        ));
+    }
     if settings
         .exit_on_return_ticks
         .is_some_and(|ticks| ticks <= 0)
@@ -2338,6 +2379,7 @@ pub fn run(
         peak: to_f64(settings.capital),
         value_unit: 10f64.powi(i32::from(value_decimals)),
         start_price: None,
+        last_closed: None,
     };
 
     let mut last = (settings.trade_from, 0u64);

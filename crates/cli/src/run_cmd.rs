@@ -711,6 +711,12 @@ fn settings(
         max_drawdown_pct: number(&strategy.extra, &["exit", "max_drawdown_pct"]),
         exit_on_return_ticks: number(&strategy.extra, &["exit", "exit_on_return_pct"])
             .map(pct_to_ticks),
+        after_round_trips: number(&strategy.extra, &["exit", "after_round_trips"])
+            .map(|n| n.max(0.0) as u32),
+        cooldown: optional_duration(&strategy.extra, &["entry", "cooldown"])?,
+        reposition: lookup(&strategy.extra, &["entry", "reposition"])
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         after_move_ticks: number(&strategy.extra, &["entry", "after_move_pct"]).map(pct_to_ticks),
         move_window: duration(&strategy.extra, &["entry", "move_window"], 4 * 3_600)?,
         move_direction: move_direction(strategy)?,

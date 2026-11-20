@@ -73,6 +73,8 @@ strategies:
       move_window: 4h
       move_direction: any            # any | up | down, as the volatile token's dollar price
       vol_window: 1d                 # how far back the volatility gates and width_vol_multiple measure; per day whatever the window
+      cooldown: null                 # after a campaign ends, no new one for this long, such as 12h: one entry per move
+      reposition: true               # move a resting range price has left, or for a much busier one; false leaves it until an exit
       width_vol_multiple: null       # ranges this many times the day's volatility wide, instead of width_ticks
     patience:
       mode: adaptive                 # or a fixed rule: wait | flip | close
@@ -86,6 +88,7 @@ strategies:
       max_loss_pct: null             # close a campaign that fell this many percent below what went in, back to the value token
       max_drawdown_pct: null         # close a campaign that fell this many percent of what went in from its best
       exit_on_return_pct: null       # once price ran this many percent past the range, close as soon as it is back in the range
+      after_round_trips: null        # close once back wholly in the value token, fees on top, after this many round trips (1: the first)
     follow:                          # copy a provider's positions instead of choosing ranges
       file: null                     # positions written by `lpbot lp-positions`, such as data/follow/x.csv
       owner: null                    # one owner of the file, "0x..."; null follows every owner in it
