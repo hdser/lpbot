@@ -6,6 +6,7 @@
 //!
 //! See `docs/DESIGN.md`, "Simulation and backtesting".
 
+pub mod agent;
 pub mod engine;
 pub mod live_db;
 pub mod live_tables;

@@ -93,6 +93,8 @@ strategies:
       file: null                     # positions written by `lpbot lp-positions`, such as data/follow/x.csv
       owner: null                    # one owner of the file, "0x..."; null follows every owner in it
       join_within: 1h                # a position is copied only this soon after the provider opened it
+    agent:                           # entries and exits decided at each look by a person or a session: `lpbot agent next` / `decide`
+      decisions: null                # the decisions file, such as data/agent/x.jsonl; null runs the strategy's own rules
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings

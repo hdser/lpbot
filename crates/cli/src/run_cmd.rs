@@ -17,6 +17,7 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
+use lpbot_sim::agent::{AgentAction, AgentDecision, AgentPlan};
 use lpbot_sim::engine::{
     self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Settings, Shape, Token,
     DEFAULT_SIGNAL_STEP,
@@ -148,6 +149,114 @@ pub fn owner_address(text: &str) -> Result<Address> {
     } else {
         checked_address("strategy.follow.owner", text)
     }
+}
+
+/// The decisions file of an agent run (`strategy.agent.decisions`), if the
+/// strategy has one.
+pub fn agent_file(strategy: &StrategyConfig) -> Option<String> {
+    text(&strategy.extra, &["agent", "decisions"])
+}
+
+/// The agent mode's decisions, read from `strategy.agent.decisions`: one
+/// JSON object a line, as `lpbot agent decide` writes them. A file not yet
+/// written is a run with no decisions, which stops at its first look.
+pub fn agent_plan(strategy: &StrategyConfig) -> Result<Option<AgentPlan>> {
+    let Some(file) = agent_file(strategy) else {
+        return Ok(None);
+    };
+    let content = match std::fs::read_to_string(&file) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading strategy.agent.decisions {file}"))
+        }
+    };
+    let decisions =
+        parse_decisions(&content).with_context(|| format!("strategy.agent.decisions {file}"))?;
+    Ok(Some(AgentPlan { decisions }))
+}
+
+/// Decisions, one JSON object a line: `look` (the look's time), `action`
+/// (`stay_out`, `hold`, `exit` or `enter`), `lower_pct` and `upper_pct`
+/// for an entry, `next` (a duration) and `note`.
+pub fn parse_decisions(content: &str) -> Result<Vec<AgentDecision>> {
+    let mut decisions = Vec::new();
+    for (i, line) in content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+    {
+        let row: serde_json::Value =
+            serde_json::from_str(line).with_context(|| format!("line {} is not JSON", i + 1))?;
+        let field = |name: &str| row.get(name);
+        let look = field("look")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow!("line {}: `look` must be the look's time", i + 1))?;
+        let next = field("next")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_duration)
+            .ok_or_else(|| anyhow!("line {}: `next` must be a duration such as 4h", i + 1))?;
+        let pct = |name: &str| {
+            field(name)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| anyhow!("line {}: an entry needs `{name}`, in percent", i + 1))
+        };
+        let action = match field("action").and_then(serde_json::Value::as_str) {
+            Some("stay_out") => AgentAction::StayOut,
+            Some("hold") => AgentAction::Hold,
+            Some("exit") => AgentAction::Exit,
+            Some("enter") => AgentAction::Enter {
+                lower_pct: pct("lower_pct")?,
+                upper_pct: pct("upper_pct")?,
+            },
+            other => bail!(
+                "line {}: `action` is {other:?}; it must be stay_out, hold, exit or enter",
+                i + 1
+            ),
+        };
+        decisions.push(AgentDecision {
+            look,
+            action,
+            next_look: next,
+            note: field("note")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    Ok(decisions)
+}
+
+/// One run of an experiment, without writing tables: what `lpbot agent`
+/// replays at every step. Returns the engine's output and the pool's name.
+pub fn simulate_one(
+    run: &ResolvedRun,
+    root: &Path,
+    chain: &str,
+) -> Result<(engine::Output, String)> {
+    let config = &run.config;
+    let strategy = config
+        .strategies
+        .first()
+        .ok_or_else(|| anyhow!("the run has no strategy"))?;
+    let policy = policy(strategy)?;
+    let (from, to) = window(config)?;
+    let (_, tokens) = chain_addresses(config, chain)?;
+    let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
+    let history = load_history(root, chain, pool, from, to, history_days(strategy)?)?;
+    let (mut settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+    settings.block_fees = block_fees(
+        config,
+        root,
+        chain,
+        &history.events,
+        &settings,
+        from,
+        &mut FeeCache::new(),
+    )?;
+    let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
+        .with_context(|| format!("run {} failed", run.run_id))?;
+    Ok((out, pool_name))
 }
 
 /// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.
@@ -723,6 +832,7 @@ fn settings(
         width_vol_multiple: number(&strategy.extra, &["entry", "width_vol_multiple"]),
         follow: follow_spans(strategy, history.snapshot.pool)?,
         follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
+        agent: agent_plan(strategy)?,
         gas,
         block_fees: None,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
@@ -855,6 +965,12 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             config_yaml: run.config_yaml.clone(),
         };
         write_run(results, &info, &out, rank_rows)?;
+        if let Some(pending) = &out.pending {
+            println!(
+                "  {} stopped at look {} for want of a decision; `lpbot agent next` shows it",
+                run.run_id, pending.look
+            );
+        }
 
         let s = &out.summary;
         println!(

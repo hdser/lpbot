@@ -17,6 +17,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::agent::{
+    pct_to_ticks, ticks_to_pct, AgentAction, AgentDecision, AgentPlan, Observation, PositionView,
+    ScaleView, SCALES,
+};
 use alloy_primitives::{I256, U256};
 use lpbot_core::{Campaign, EntrySide, PoolId, Tick};
 use lpbot_data::gas::BlockFees;
@@ -348,6 +352,12 @@ pub struct Settings {
     /// A followed position is joined only this many seconds after the
     /// provider opened it, or not at all: what is copied is the entry.
     pub follow_join_within: u64,
+    /// The agent mode: entries and exits come from these decisions, one
+    /// per look, and the run stops at the first look without one, leaving
+    /// its observation in `Output::pending`. The patience rule, moves and
+    /// the entry signals do not apply; the campaign exits and the loss
+    /// limit do.
+    pub agent: Option<AgentPlan>,
     pub gas: GasModel,
     /// Each block's base fee and median priority fee. `None` charges
     /// `gas.gas_price_gwei` on every block. When given it must cover every
@@ -426,7 +436,8 @@ pub struct DecisionRow {
     pub time: u64,
     pub block: u64,
     pub tick: Tick,
-    /// `entry` or `flip`: which leg of the campaign was stranded.
+    /// `entry` or `flip`: which leg of the campaign was stranded; `agent`
+    /// for a decision of the agent mode.
     pub leg: String,
     pub seconds_stranded: u64,
     /// `wait`, `flip`, `close` or `recenter`. What came of it is in the
@@ -532,6 +543,11 @@ pub struct Output {
     pub series: Vec<SeriesRow>,
     pub zones: Vec<ZoneLook>,
     pub summary: Summary,
+    /// In the agent mode, the look the run stopped at for want of a
+    /// decision, and how the pool looked then.
+    pub pending: Option<Observation>,
+    /// In the agent mode, decisions left over that no look asked for.
+    pub unused_decisions: usize,
 }
 
 /// What may hold a new leg back: the cap on its share of the liquidity in
@@ -806,6 +822,13 @@ struct Engine<'a> {
     start_price: Option<f64>,
     /// When the last campaign ended, for the cooldown.
     last_closed: Option<u64>,
+    /// The agent mode: when the next look is due, how many decisions are
+    /// used, the range to enter once the position being moved is closed,
+    /// and whether the run stopped at a look without a decision.
+    agent_next: u64,
+    agent_used: usize,
+    agent_reenter: Option<(Tick, Tick)>,
+    stopped: bool,
 }
 
 impl<'a> Engine<'a> {
@@ -1328,7 +1351,7 @@ impl<'a> Engine<'a> {
                 let around = self.s.shape == Shape::AroundPrice;
                 // A followed range is entered wherever the price is, in
                 // its mix; it may hold either token or both.
-                let mixed = around || follow.is_some();
+                let mixed = around || follow.is_some() || self.s.agent.is_some();
                 // Gas comes out of the same capital, so it is set aside
                 // first. An entry around the price swaps as well as opens.
                 let swap_units = if mixed { self.s.gas.swap_units } else { 0 };
@@ -1379,6 +1402,24 @@ impl<'a> Engine<'a> {
                 }
                 self.cash -= used;
                 self.campaigns_opened += 1;
+                // Where the new position starts, for counting passes. An
+                // agent's range may hold either token or both.
+                let start_extreme = if self.s.agent.is_some() {
+                    match self
+                        .leg
+                        .as_ref()
+                        .map(|leg| self.holdings(leg))
+                        .transpose()?
+                    {
+                        Some((_, other)) if other.is_zero() => Extreme::Value,
+                        Some((value, _)) if value.is_zero() => Extreme::Other,
+                        _ => Extreme::Neither,
+                    }
+                } else if mixed {
+                    Extreme::Neither
+                } else {
+                    Extreme::Value
+                };
                 self.campaign = Some(OpenCampaign {
                     id: self.campaigns_opened,
                     tick_lower: lower,
@@ -1393,11 +1434,7 @@ impl<'a> Engine<'a> {
                     flips: 0,
                     recentres: 0,
                     seconds_beyond: 0,
-                    extreme: if mixed {
-                        Extreme::Neither
-                    } else {
-                        Extreme::Value
-                    },
+                    extreme: start_extreme,
                     other_since: None,
                     out_since: None,
                     best: to_f64(cash_before),
@@ -1841,6 +1878,262 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// +1 when the volatile token's price rises with the tick, -1 when it
+    /// falls with it.
+    fn rise_sign(&self) -> Tick {
+        let dollar = match self.s.dollar {
+            Dollar::Value => self.s.value,
+            Dollar::Other => self.s.value.other(),
+        };
+        if dollar == Token::One {
+            1
+        } else {
+            -1
+        }
+    }
+
+    /// The volatile token's price at `tick`, in percent from its price now.
+    fn pct_from_now(&self, tick: Tick) -> f64 {
+        ticks_to_pct(f64::from(self.rise_sign() * (tick - self.pool.tick())))
+    }
+
+    /// The agent mode at the end of a block: the campaign exits, then the
+    /// look if one is due, with its decision or, without one, a stop.
+    fn agent_step(
+        &mut self,
+        plan: &AgentPlan,
+        time: u64,
+        block: u64,
+        equity: f64,
+        state: &str,
+    ) -> Result<(), SimError> {
+        if self.leg.is_some() {
+            if let Some(reason) = self.campaign_exit(time, equity, state) {
+                self.agent_reenter = None;
+                self.schedule(block, Action::Close { reason });
+                return Ok(());
+            }
+        } else if let Some((lower, upper)) = self.agent_reenter.take() {
+            // The second half of a move: the old range is closed.
+            self.schedule(
+                block,
+                Action::Open {
+                    lower,
+                    upper,
+                    follow: None,
+                },
+            );
+            return Ok(());
+        }
+        if time < self.agent_next {
+            return Ok(());
+        }
+        let look = self.agent_next;
+        let Some(decision) = plan
+            .decisions
+            .get(self.agent_used)
+            .filter(|d| d.look == look)
+        else {
+            self.out.pending = Some(self.observe(look, time, block, equity, state)?);
+            self.stopped = true;
+            return Ok(());
+        };
+        self.agent_used += 1;
+        self.agent_next = time + decision.next_look.max(60);
+        self.apply_agent(decision, time, block)
+    }
+
+    fn apply_agent(
+        &mut self,
+        decision: &AgentDecision,
+        time: u64,
+        block: u64,
+    ) -> Result<(), SimError> {
+        let tick = self.pool.tick();
+        let target = match decision.action {
+            AgentAction::Enter {
+                lower_pct,
+                upper_pct,
+            } => self.agent_range(lower_pct, upper_pct),
+            _ => None,
+        };
+        self.out.decisions.push(DecisionRow {
+            campaign: self.campaign.as_ref().map_or(0, |c| c.id),
+            time,
+            block,
+            tick,
+            leg: "agent".to_string(),
+            seconds_stranded: 0,
+            action: decision.action.name().to_string(),
+            target_lower: target.map(|t| t.0),
+            target_upper: target.map(|t| t.1),
+            expected_wait: None,
+            expected_flip: None,
+            expected_close: None,
+        });
+        match decision.action {
+            AgentAction::StayOut | AgentAction::Hold => {}
+            AgentAction::Exit => {
+                if self.leg.is_some() {
+                    self.schedule(
+                        block,
+                        Action::Close {
+                            reason: "agent_exit",
+                        },
+                    );
+                }
+            }
+            AgentAction::Enter { .. } => {
+                let Some((lower, upper)) = target else {
+                    return Ok(());
+                };
+                match &self.leg {
+                    Some(leg) if (leg.lower, leg.upper) == (lower, upper) => {}
+                    Some(_) => {
+                        self.agent_reenter = Some((lower, upper));
+                        self.schedule(
+                            block,
+                            Action::Close {
+                                reason: "agent_move",
+                            },
+                        );
+                    }
+                    None => self.schedule(
+                        block,
+                        Action::Open {
+                            lower,
+                            upper,
+                            follow: None,
+                        },
+                    ),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The range between two volatile-token prices given in percent from
+    /// the price now, widened out to the tick spacing. `None` for prices
+    /// that are not prices.
+    fn agent_range(&self, lower_pct: f64, upper_pct: f64) -> Option<(Tick, Tick)> {
+        if !(lower_pct.is_finite() && upper_pct.is_finite())
+            || lower_pct <= -100.0
+            || upper_pct <= -100.0
+        {
+            return None;
+        }
+        let tick = self.pool.tick();
+        let sign = self.rise_sign();
+        let to_tick = |pct: f64| tick + sign * pct_to_ticks(pct).round() as Tick;
+        let (a, b) = (to_tick(lower_pct), to_tick(upper_pct));
+        let spacing = self.pool.tick_spacing().max(1);
+        let lower = a.min(b).div_euclid(spacing) * spacing;
+        let mut upper = (a.max(b) + spacing - 1).div_euclid(spacing) * spacing;
+        if upper <= lower {
+            upper = lower + spacing;
+        }
+        Some((lower, upper))
+    }
+
+    /// How the pool and the position look now, for a look at `look`.
+    fn observe(
+        &self,
+        look: u64,
+        time: u64,
+        block: u64,
+        equity: f64,
+        state: &str,
+    ) -> Result<Observation, SimError> {
+        let tick_now = self.pool.tick();
+        let sign = self.rise_sign();
+        let rise = |tick: Tick| sign * (tick - tick_now);
+        let month = 30 * DAY;
+        let month_from = self
+            .path
+            .partition_point(|p| p.time <= time.saturating_sub(month));
+        let month_volume: f64 = self.path[month_from..].iter().map(|p| p.volume1).sum();
+        let month_seconds = time
+            .saturating_sub(self.path.first().map_or(time, |p| p.time))
+            .clamp(1, month);
+        let mut scales = Vec::new();
+        for (label, seconds) in SCALES {
+            let from = time.saturating_sub(seconds);
+            let first = self.path.partition_point(|p| p.time <= from);
+            let start_tick = if first > 0 {
+                self.path[first - 1].tick
+            } else {
+                self.path.first().map_or(tick_now, |p| p.tick)
+            };
+            let window = &self.path[first..];
+            let (mut high, mut low) = (rise(start_tick), rise(start_tick));
+            for point in window {
+                high = high.max(rise(point.tick));
+                low = low.min(rise(point.tick));
+            }
+            high = high.max(0);
+            low = low.min(0);
+            let volume: f64 = window.iter().map(|p| p.volume1).sum();
+            let pace = volume / seconds as f64;
+            let month_pace = month_volume / month_seconds as f64;
+            scales.push(ScaleView {
+                label,
+                seconds,
+                change_pct: -ticks_to_pct(f64::from(rise(start_tick)))
+                    / (1.0 + ticks_to_pct(f64::from(rise(start_tick))) / 100.0),
+                high_pct: ticks_to_pct(f64::from(high)),
+                low_pct: ticks_to_pct(f64::from(low)),
+                vol_pct_per_day: self
+                    .buckets
+                    .daily_vol_ticks(time, seconds)
+                    .map(ticks_to_pct),
+                swaps: window.len(),
+                volume_vs_30d: (month_pace > 0.0).then(|| pace / month_pace),
+            });
+        }
+        let round_trip =
+            self.gas_cost(self.s.gas.open_units + self.s.gas.close_units + self.s.gas.swap_units);
+        let position = match (&self.leg, &self.campaign) {
+            (Some(leg), Some(campaign)) => {
+                let (value, other) = self.holdings(leg)?;
+                let (fee_value, fee_other) = self.leg_fees(leg);
+                let per_other = self.value_per_other();
+                let amount = to_f64(campaign.amount_in).max(1.0);
+                let held_value = to_f64(value);
+                let held_total = held_value + to_f64(other) * per_other;
+                let (a, b) = (self.pct_from_now(leg.lower), self.pct_from_now(leg.upper));
+                Some(PositionView {
+                    lower_pct: a.min(b),
+                    upper_pct: a.max(b),
+                    state: state.to_string(),
+                    held_seconds: time.saturating_sub(campaign.opened_time),
+                    result_pct: (equity - to_f64(campaign.cash_before)) / amount * 100.0,
+                    fees_pct: (to_f64(fee_value) + to_f64(fee_other) * per_other) / amount * 100.0,
+                    value_share_pct: if held_total > 0.0 {
+                        held_value / held_total * 100.0
+                    } else {
+                        100.0
+                    },
+                })
+            }
+            _ => None,
+        };
+        Ok(Observation {
+            look,
+            looks_before: self.agent_used,
+            day: time.saturating_sub(self.s.trade_from) as f64 / DAY as f64,
+            block,
+            scales,
+            fee_pct: f64::from(self.pool.fee_pips()) / 10_000.0,
+            spacing_pct: ticks_to_pct(f64::from(self.pool.tick_spacing())),
+            gas_gwei: to_f64(self.wei_per_gas()) / WEI_PER_GWEI,
+            round_trip_gas_pct: to_f64(round_trip) / equity.max(1.0) * 100.0,
+            result_pct: (equity / to_f64(self.s.capital) - 1.0) * 100.0,
+            campaigns: self.campaigns_opened,
+            since_last_close: self.last_closed.map(|closed| time.saturating_sub(closed)),
+            position,
+        })
+    }
+
     /// The exit rule, if any, that ends the open campaign now, given the
     /// run's equity and the position's state.
     fn campaign_exit(&self, time: u64, equity: f64, state: &str) -> Option<&'static str> {
@@ -2017,6 +2310,10 @@ impl<'a> Engine<'a> {
         if let Some(spans) = &settings.follow {
             self.follow_step(spans, time, block, equity, state);
             return Ok(());
+        }
+        // So do an agent's decisions.
+        if let Some(plan) = &settings.agent {
+            return self.agent_step(plan, time, block, equity, state);
         }
 
         let Some(leg) = self.leg.clone() else {
@@ -2287,6 +2584,13 @@ pub fn run(
                 .into(),
         ));
     }
+    if settings.agent.is_some() && settings.follow.is_some() {
+        return Err(SimError::Settings(
+            "a run follows a provider or an agent's decisions, not both; remove strategy.follow \
+             or strategy.agent.decisions"
+                .into(),
+        ));
+    }
     if settings.after_round_trips == Some(0) {
         return Err(SimError::Settings(
             "exit.after_round_trips must be at least 1, or left out".into(),
@@ -2380,6 +2684,10 @@ pub fn run(
         value_unit: 10f64.powi(i32::from(value_decimals)),
         start_price: None,
         last_closed: None,
+        agent_next: settings.trade_from,
+        agent_used: 0,
+        agent_reenter: None,
+        stopped: false,
     };
 
     let mut last = (settings.trade_from, 0u64);
@@ -2469,15 +2777,25 @@ pub fn run(
             .is_none_or(|next| next.block != event.block);
         if block_ends {
             engine.on_block_end(event.time, event.block)?;
+            if engine.stopped {
+                break;
+            }
         }
     }
 
     // The run is over: whatever is open is closed on the last state.
     engine.pending = None;
+    if let Some(plan) = &settings.agent {
+        engine.out.unused_decisions = plan.decisions.len().saturating_sub(engine.agent_used);
+    }
     if engine.leg.is_some() {
         engine.execute(
             Action::Close {
-                reason: "window_end",
+                reason: if engine.stopped {
+                    "agent_pending"
+                } else {
+                    "window_end"
+                },
             },
             last.0,
             last.1,

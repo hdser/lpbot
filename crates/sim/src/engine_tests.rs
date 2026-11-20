@@ -12,6 +12,7 @@ use lpbot_venues::uniswap_v3::liquidity_amounts::get_liquidity_for_amount1;
 use lpbot_venues::uniswap_v3::pool::{fees_earned, Pool, PoolSnapshot, Replay, SwapEvent};
 use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
+use crate::agent::{AgentAction, AgentDecision, AgentPlan};
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
     FollowSpan, GasModel, MoveDirection, Output, Policy, Settings, Shape, SimError, Token,
@@ -140,6 +141,7 @@ fn settings(rule: FixedRule) -> Settings {
         width_vol_multiple: None,
         follow: None,
         follow_join_within: HOUR,
+        agent: None,
         gas: GasModel::free(),
         block_fees: None,
         series_every: HOUR,
@@ -243,6 +245,111 @@ fn a_resting_range_can_be_left_where_it_was_placed() {
         (-20, 0)
     );
     assert_eq!(out.campaigns[0].exit_reason, "window_end");
+    assert_conserved(&out);
+}
+
+fn decision(look: u64, action: AgentAction, next_look: u64) -> AgentDecision {
+    AgentDecision {
+        look,
+        action,
+        next_look,
+        note: String::new(),
+    }
+}
+
+fn agent(decisions: Vec<AgentDecision>) -> Settings {
+    Settings {
+        agent: Some(AgentPlan { decisions }),
+        ..settings(FixedRule::Wait)
+    }
+}
+
+#[test]
+fn an_agent_run_stops_at_the_first_look_without_a_decision() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let out = run(snapshot, &events, &agent(vec![])).unwrap();
+    let pending = out.pending.expect("the first look asks");
+    assert_eq!(pending.look, T0, "trading starts at T0");
+    assert_eq!(pending.looks_before, 0);
+    assert!(pending.position.is_none());
+    assert_eq!(pending.scales.len(), 7);
+    assert!(out.campaigns.is_empty());
+    assert_eq!(out.summary.events, 1, "stopped at the first block");
+}
+
+#[test]
+fn an_agent_enters_where_it_says_and_exits_when_it_says() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    // A range 0.1% to 1% above the volatile token's price: the value
+    // token's side, so one-sided. Looked at again two hours later, at the
+    // block of hour 3, where it exits.
+    let enter = AgentAction::Enter {
+        lower_pct: 0.1,
+        upper_pct: 1.0,
+    };
+    let first = agent(vec![decision(T0, enter, 2 * HOUR)]);
+    let out = run(snapshot.clone(), &events, &first).unwrap();
+    let pending = out.pending.expect("the second look asks");
+    assert_eq!(pending.look, T0 + 3 * HOUR);
+    assert_eq!(pending.looks_before, 1);
+    let position = pending.position.expect("a position is open");
+    assert!(position.lower_pct < position.upper_pct);
+    assert_eq!(out.campaigns.len(), 1);
+    assert_eq!(out.campaigns[0].exit_reason, "agent_pending");
+    assert_eq!(
+        (out.campaigns[0].tick_lower, out.campaigns[0].tick_upper),
+        (-100, 0)
+    );
+    assert_eq!(out.decisions[0].leg, "agent");
+    assert_eq!(out.decisions[0].action, "enter");
+
+    let both = agent(vec![
+        decision(T0, enter, 2 * HOUR),
+        decision(T0 + 3 * HOUR, AgentAction::Exit, 30 * DAY),
+    ]);
+    let out = run(snapshot.clone(), &events, &both).unwrap();
+    assert!(
+        out.pending.is_none(),
+        "the history ends before the next look"
+    );
+    assert_eq!(out.campaigns.len(), 1);
+    assert_eq!(out.campaigns[0].exit_reason, "agent_exit");
+    assert_eq!(out.campaigns[0].closed_time, T0 + 4 * HOUR);
+    assert_conserved(&out);
+
+    // A decision for a look that is not the one asked is not used.
+    let stale = agent(vec![decision(T0 + 1, enter, HOUR)]);
+    let out = run(snapshot, &events, &stale).unwrap();
+    assert_eq!(out.pending.map(|p| p.look), Some(T0));
+    assert_eq!(out.unused_decisions, 1);
+}
+
+#[test]
+fn an_agent_moves_a_position_by_entering_another_range() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let first = AgentAction::Enter {
+        lower_pct: 0.1,
+        upper_pct: 1.0,
+    };
+    let second = AgentAction::Enter {
+        lower_pct: 2.0,
+        upper_pct: 3.0,
+    };
+    let out = run(
+        snapshot,
+        &events,
+        &agent(vec![
+            decision(T0, first, 2 * HOUR),
+            decision(T0 + 3 * HOUR, second, 30 * DAY),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(out.campaigns.len(), 2);
+    assert_eq!(out.campaigns[0].exit_reason, "agent_move");
+    assert_ne!(
+        (out.campaigns[1].tick_lower, out.campaigns[1].tick_upper),
+        (out.campaigns[0].tick_lower, out.campaigns[0].tick_upper)
+    );
     assert_conserved(&out);
 }
 

@@ -804,6 +804,8 @@ mod tests {
                 events: 8,
                 ..Default::default()
             },
+            pending: None,
+            unused_decisions: 0,
         }
     }
 

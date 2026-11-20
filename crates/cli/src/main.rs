@@ -10,6 +10,7 @@
 //! backtest, the load and the calibration). `watch-pools` keeps the live
 //! tables current from the node, block by block.
 
+mod agent_cmd;
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
@@ -86,6 +87,12 @@ enum Command {
     /// fee history, so backtests charge gas at the price of the block an
     /// action lands in.
     GasHistory(GasHistoryArgs),
+    /// Decide a run look by look, as a person or a session would: `next`
+    /// shows the pool at the first look without a decision, `decide`
+    /// writes one. The experiment's strategy names the decisions file
+    /// (`agent.decisions`).
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Follow the stored pools live from the node, block by block, and keep
     /// the live tables in Postgres current: price, liquidity, swaps, minute
     /// rows and every position. Runs until stopped.
@@ -347,6 +354,51 @@ struct LpPositionsCli {
     /// Blocks per log request; the node refuses more than 100,000.
     #[arg(long, default_value_t = 100_000)]
     log_chunk: u64,
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Replay the run to its first look without a decision and show the
+    /// pool there.
+    Next(AgentArgs),
+    /// Write the decision for the look `next` showed, then show the next.
+    Decide(DecideArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Which of the experiment's runs, by index, when it has several.
+    #[arg(long)]
+    run: Option<usize>,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder for the pool history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct DecideArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// stay_out, hold, exit or enter.
+    #[arg(long)]
+    action: String,
+    /// For an entry: the range's lower price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    lower: Option<f64>,
+    /// For an entry: the range's upper price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    upper: Option<f64>,
+    /// When to look again, such as 30m, 4h or 2d.
+    #[arg(long)]
+    next: String,
+    /// Why, in a sentence.
+    #[arg(long, default_value = "")]
+    note: String,
 }
 
 #[derive(Args)]
@@ -751,6 +803,36 @@ fn real_main() -> Result<()> {
                 done.chunks, done.kept
             );
             Ok(())
+        }
+        Command::Agent(command) => {
+            let args = match &command {
+                AgentCommand::Next(args) => args,
+                AgentCommand::Decide(args) => &args.agent,
+            };
+            let runs = resolve(&args.experiment)?;
+            let run = match (args.run, runs.len()) {
+                (Some(i), _) => runs.get(i).ok_or_else(|| {
+                    anyhow::anyhow!("--run {i}: the experiment has {} run(s)", runs.len())
+                })?,
+                (None, 1) => &runs[0],
+                (None, n) => bail!("the experiment has {n} runs; say which with --run <index>"),
+            };
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            match &command {
+                AgentCommand::Next(_) => agent_cmd::next(run, &root, &args.chain).map(|_| ()),
+                AgentCommand::Decide(d) => agent_cmd::decide(
+                    run,
+                    &root,
+                    &args.chain,
+                    &agent_cmd::Decision {
+                        action: &d.action,
+                        lower_pct: d.lower,
+                        upper_pct: d.upper,
+                        next: &d.next,
+                        note: &d.note,
+                    },
+                ),
+            }
         }
         Command::PoolStats(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
