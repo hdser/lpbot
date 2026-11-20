@@ -97,6 +97,19 @@ impl TickBuckets {
         Some(variance.sqrt() * (86_400.0 / self.step as f64).sqrt())
     }
 
+    /// How far the price moved over the `window` seconds before `now`, in
+    /// ticks: the close of the last bucket that ended by `now` less the
+    /// close `window` earlier. `None` without that much history.
+    pub fn move_ticks(&self, now: u64, window: u64) -> Option<Tick> {
+        let start = self.start?;
+        let end = ((now.checked_sub(start)? / self.step) as usize).min(self.close.len());
+        let back = (window / self.step) as usize;
+        if end < back + 1 {
+            return None;
+        }
+        Some(self.close[end - 1] - self.close[end - 1 - back])
+    }
+
     /// Odds of a move of `delta` ticks (up when positive, down when
     /// negative) within `horizon` seconds, over starting points in the
     /// `lookback` seconds before `now`. `None` when the history holds no
@@ -159,6 +172,23 @@ mod tests {
             buckets.push(i as u64 * HOUR + 10, *tick);
         }
         buckets
+    }
+
+    #[test]
+    fn the_move_over_a_window_is_close_to_close() {
+        let mut buckets = TickBuckets::new(600);
+        assert_eq!(buckets.move_ticks(10_000, 1_200), None);
+        // Closes 0, 10, 30, 60 in the buckets starting at 0, 600, 1200, 1800.
+        for (time, tick) in [(0, 0), (700, 10), (1_300, 30), (1_900, 60)] {
+            buckets.push(time, tick);
+        }
+        // At 2400 the bucket from 1800 has ended: 60 against 30 and 0.
+        assert_eq!(buckets.move_ticks(2_400, 600), Some(30));
+        assert_eq!(buckets.move_ticks(2_400, 1_800), Some(60));
+        // Only buckets that ended count: at 2399 the last one is still open.
+        assert_eq!(buckets.move_ticks(2_399, 600), Some(20));
+        // Not that much history.
+        assert_eq!(buckets.move_ticks(2_400, 2_400), None);
     }
 
     #[test]

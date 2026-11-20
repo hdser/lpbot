@@ -21,10 +21,10 @@ use lpbot_data::snapshot::SnapshotStore;
 use lpbot_sim::engine::Policy;
 
 use crate::chain_cmd::{self, chain_addresses, Chain, HEAD_MARGIN};
-use crate::{backfill_cmd, fees_cmd, load_cmd, rank_cmd, run_cmd};
+use crate::{backfill_cmd, fees_cmd, gas_history_cmd, load_cmd, rank_cmd, run_cmd};
 
 /// The steps in the order they run, each with what it shows.
-pub const STEPS: [(&str, &str); 8] = [
+pub const STEPS: [(&str, &str); 9] = [
     ("node", "the node answers, is synced and follows the chain"),
     ("pools", "the universe's pools, from the Uniswap v3 factory"),
     (
@@ -34,6 +34,10 @@ pub const STEPS: [(&str, &str); 8] = [
     (
         "history",
         "pool history stored and replayed against the chain (gate 3)",
+    ),
+    (
+        "gas",
+        "each block's gas price stored, for the backtest to charge",
     ),
     (
         "fees",
@@ -292,7 +296,7 @@ pub fn span(runs: &[ResolvedRun]) -> Result<(Day, Day)> {
             .first()
             .ok_or_else(|| anyhow!("the run has no strategy"))?;
         let (from, to) = run_cmd::window(&run.config)?;
-        let longest = run_cmd::lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let longest = run_cmd::history_days(strategy)?;
         let start = from.minus(longest);
         span = Some(match span {
             None => (start, to),
@@ -608,6 +612,29 @@ impl Gates {
         )))
     }
 
+    fn gas(&mut self) -> Result<Outcome> {
+        let from = self.history_start()?;
+        let (root, chain_name) = (self.options.root.clone(), self.options.chain_name.clone());
+        let log_chunk = self.options.log_chunk;
+        let chain = self.chain()?;
+        let client = &chain.client;
+        let to = match client.finalized_block()? {
+            Some((block, _)) => block,
+            None => client.block_number()?.saturating_sub(64),
+        };
+        let source = lpbot_data::backfill::NodeSource {
+            client,
+            head_margin: 0,
+            log_chunk,
+        };
+        let first = lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
+        let done = gas_history_cmd::run(client, &root, &chain_name, first, to, 2)?;
+        Ok(Outcome::Pass(format!(
+            "gas prices of blocks {first} to {to} stored ({} chunk(s) read, {} already stored)",
+            done.chunks, done.kept
+        )))
+    }
+
     fn fees(&mut self) -> Result<Outcome> {
         let mut outcomes = Vec::new();
         let root = self.options.root.clone();
@@ -696,11 +723,12 @@ impl Gates {
 
     /// The steps, in the order of `STEPS`.
     pub fn steps<'a>() -> Vec<Step<'a, Gates>> {
-        let run: [fn(&mut Gates) -> Result<Outcome>; 8] = [
+        let run: [fn(&mut Gates) -> Result<Outcome>; 9] = [
             Gates::node,
             Gates::pools,
             Gates::replica,
             Gates::history,
+            Gates::gas,
             Gates::fees,
             Gates::backtest,
             Gates::load,

@@ -22,8 +22,13 @@ Backtests, and the pools followed live. The bot reads pools from a node, replays
 | Fee check: the replica's fees against what real positions collected, confirmed with the node's position records (`lpbot verify-fees`) | |
 | One command for every check against real chain data, then the backtest, the load and the calibration (`make gates`) | |
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
-| Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
+| Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit, decided and counted block by block | |
+| `lpbot gas-history`: each block's base fee and priority fee from the node; backtests charge every action the gas of its block | |
 | `lpbot run`: backtests of the zone round trip, written as the six result tables, with results in the value token and in dollars | |
+| Entries one-sided or around the price (`entry.shape`), with an optional move back around the price once price has left (`exit.recenter_after`) | |
+| Per-campaign exits (time limit, stop from entry, stop from the best, leaving on the return after a deep excursion), an entry signal on fast moves, ranges sized by volatility | |
+| `lpbot lp-positions`: a provider's positions from the node's position manager records; backtests that follow them (`strategy.follow`) | |
+| The agent mode: a run decided look by look by a person or a session (`lpbot agent next`, `lpbot agent decide`), replayed from its decisions | Agent runs at the head of the chain (paper) |
 | Adaptive patience decision: wait, flip or close by expected result, from the pool's own history | |
 | `lpbot calibrate`: fits the adaptive decision walk-forward; it ships only if it beats the three fixed rules out of sample | |
 | Viewer: `lpbot load-results` puts the tables in Postgres; five Grafana dashboards read them (runs; run detail with the price, the range shaded by state, time in and out of range, APR and fee APR; compare, for runs and strategies side by side; pools and zones; pool) | |

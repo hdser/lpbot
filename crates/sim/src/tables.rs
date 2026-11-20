@@ -146,6 +146,11 @@ pub struct RunInfo {
     pub value_token: String,
     pub fee_pips: u32,
     pub width_ticks: i32,
+    /// `one_sided` or `around_price`.
+    pub entry_shape: String,
+    /// How gas was priced: `chain` (each block's base fee and priority
+    /// fee) or `fixed` (`costs.gas_price_gwei` on every block).
+    pub gas_prices: String,
     /// The swept settings of this run, as `path=value` joined by `; `.
     pub sweep: String,
     pub config_yaml: String,
@@ -196,6 +201,7 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                 ("value_token", text([info.value_token.as_str()])),
                 ("fee_pips", int([i64::from(info.fee_pips)])),
                 ("width_ticks", int([i64::from(info.width_ticks)])),
+                ("entry_shape", text([info.entry_shape.as_str()])),
                 ("sweep", text([info.sweep.as_str()])),
                 ("start_capital", float([s.start_capital])),
                 ("end_capital", float([s.end_capital])),
@@ -208,6 +214,8 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                 ("hold_value_pct_usd", float([s.hold_value_pct_usd])),
                 ("fees", float([s.fees])),
                 ("gas", float([s.gas])),
+                ("gas_prices", text([info.gas_prices.as_str()])),
+                ("gas_gwei", float([s.gas_gwei])),
                 ("campaigns", int([i64::from(s.campaigns)])),
                 ("passes", int([i64::from(s.passes)])),
                 ("max_drawdown_pct", float([s.max_drawdown_pct])),
@@ -216,6 +224,9 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                     Column::Flag(vec![Some(s.halted_by_loss_limit)]),
                 ),
                 ("events", int([s.events as i64])),
+                ("seconds_in_range", int([s.seconds_in_range as i64])),
+                ("seconds_out_of_range", int([s.seconds_out_of_range as i64])),
+                ("seconds_flat", int([s.seconds_flat as i64])),
                 ("config_yaml", text([info.config_yaml.as_str()])),
             ],
         ),
@@ -241,12 +252,14 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                     "exit_reason",
                     text(c.iter().map(|r| r.exit_reason.as_str())),
                 ),
+                ("shape", text(c.iter().map(|r| r.shape.as_str()))),
                 ("amount_in", float(c.iter().map(|r| r.amount_in))),
                 ("result", float(c.iter().map(|r| r.result))),
                 ("fees", float(c.iter().map(|r| r.fees))),
                 ("gas", float(c.iter().map(|r| r.gas))),
                 ("passes", int(c.iter().map(|r| i64::from(r.passes)))),
                 ("flips", int(c.iter().map(|r| i64::from(r.flips)))),
+                ("recentres", int(c.iter().map(|r| i64::from(r.recentres)))),
                 (
                     "seconds_held",
                     int(c.iter().map(|r| (r.closed_time - r.opened_time) as i64)),
@@ -254,6 +267,10 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
                 (
                     "seconds_beyond",
                     int(c.iter().map(|r| r.seconds_beyond as i64)),
+                ),
+                (
+                    "seconds_in_range",
+                    int(c.iter().map(|r| r.seconds_in_range as i64)),
                 ),
             ],
         ),
@@ -369,10 +386,7 @@ pub fn result_tables(info: &RunInfo, out: &Output, pool_rank: &[PoolRankRow]) ->
             vec![
                 ("pool", text(z.iter().map(|_| info.pool.as_str()))),
                 ("time", int(z.iter().map(|r| r.time as i64))),
-                (
-                    "lookback_days",
-                    int(z.iter().map(|r| i64::from(r.lookback_days))),
-                ),
+                ("lookback_days", float(z.iter().map(|r| r.lookback_days))),
                 ("tick_lower", int(z.iter().map(|r| i64::from(r.tick_lower)))),
                 ("tick_upper", int(z.iter().map(|r| i64::from(r.tick_upper)))),
                 ("observed_days", float(z.iter().map(|r| r.observed_days))),
@@ -695,6 +709,8 @@ mod tests {
             value_token: "WETH".into(),
             fee_pips: 500,
             width_ticks: 20,
+            entry_shape: "one_sided".into(),
+            gas_prices: "fixed".into(),
             sweep: "entry.width_ticks=20; patience.mode=wait".into(),
             config_yaml: "mode: backtest\n".into(),
         }
@@ -711,13 +727,16 @@ mod tests {
                 closed_time: 400,
                 closed_block: 40,
                 exit_reason: "round_trip_complete".into(),
+                shape: "one_sided".into(),
                 amount_in: 5.0,
                 result: 0.005,
                 fees: 0.005,
                 gas: 0.0,
                 passes: 2,
                 flips: 0,
+                recentres: 0,
                 seconds_beyond: 120,
+                seconds_in_range: 60,
             }],
             decisions: vec![
                 DecisionRow {
@@ -767,7 +786,7 @@ mod tests {
             }],
             zones: vec![ZoneLook {
                 time: 100,
-                lookback_days: 7,
+                lookback_days: 7.0,
                 tick_lower: -20,
                 tick_upper: 0,
                 observed_days: 6.5,
@@ -785,6 +804,8 @@ mod tests {
                 events: 8,
                 ..Default::default()
             },
+            pending: None,
+            unused_decisions: 0,
         }
     }
 

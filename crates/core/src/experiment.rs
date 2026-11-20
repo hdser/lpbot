@@ -35,6 +35,10 @@ pub struct ExperimentFile {
     /// Dotted setting path (relative to the strategy) to the values to try.
     #[serde(default)]
     pub sweep: BTreeMap<String, Vec<Value>>,
+    /// Settings of the base config outside the strategies, by dotted path,
+    /// such as `sim.series_every` or `costs.gas`, set for every run.
+    #[serde(default)]
+    pub set: BTreeMap<String, Value>,
 }
 
 /// Run inputs given on the command line. They win over the files.
@@ -116,6 +120,19 @@ pub fn resolve(
     }
     if let Some(a) = overrides.autonomy {
         set_path(&mut base, "run.autonomy", serde_yaml::to_value(a)?)?;
+    }
+
+    for (path, value) in &exp.set {
+        let top = path.split('.').next().unwrap_or_default();
+        if ["run", "mode", "window", "strategies"].contains(&top) || path.trim().is_empty() {
+            bail!(
+                "`set: {path}` cannot be set this way; `run`, `mode` and `window` have their own \
+                 blocks in the experiment file, and strategy settings go under `sweep`"
+            );
+        }
+        check_base_path(&base, path)?;
+        set_path(&mut base, path, value.clone())
+            .with_context(|| format!("cannot apply `set: {path}`"))?;
     }
 
     // Approval cannot be simulated on history, so backtests always run as auto.
@@ -243,6 +260,23 @@ fn check_run_keys(run: &Mapping, source: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses a `set` path whose top-level block the base config lacks: a
+/// misspelt block would be set where nothing reads it.
+fn check_base_path(base: &Value, dotted: &str) -> Result<()> {
+    let top = dotted.split('.').next().unwrap_or_default();
+    if base.get(top).is_none() {
+        let known: Vec<&str> = base
+            .as_mapping()
+            .map(|m| m.keys().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        bail!(
+            "`set: {dotted}`: the base config has no `{top}` block; it has {}",
+            known.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Refuses a sweep path the strategy does not have. Setting it would add a
 /// new key that nothing reads, and every run of the sweep would run the
 /// same settings under different labels.
@@ -356,8 +390,15 @@ fn child_mapping<'a>(value: &'a mut Value, dotted: &str) -> Result<&'a mut Mappi
         .ok_or_else(|| anyhow!("`{dotted}` passes through a setting that is not a mapping"))
 }
 
+/// A swept value as one line: a list as `[a, b]`.
 fn display_value(v: &Value) -> Result<String> {
-    Ok(serde_yaml::to_string(v)?.trim().to_string())
+    match v {
+        Value::Sequence(items) => {
+            let items: Vec<String> = items.iter().map(display_value).collect::<Result<_>>()?;
+            Ok(format!("[{}]", items.join(", ")))
+        }
+        _ => Ok(serde_yaml::to_string(v)?.trim().to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -428,6 +469,38 @@ sweep:
             assert_eq!(x.run_id, y.run_id);
             assert_eq!(x.config_hash, y.config_hash);
         }
+    }
+
+    #[test]
+    fn an_experiment_sets_base_settings_outside_the_strategy() {
+        let with_sim = |experiment: &str| -> Result<Vec<ResolvedRun>> {
+            let exp: ExperimentFile = serde_yaml::from_str(experiment)?;
+            let base = format!("{BASE}sim: {{ series_every: 1h }}\n");
+            resolve(&exp, serde_yaml::from_str(&base)?, &RunOverrides::default())
+        };
+        let with = format!("{EXPERIMENT}set:\n  sim.series_every: 5m\n");
+        let set = with_sim(&with).unwrap();
+        let sim = set[0].config.extra.get("sim").unwrap();
+        assert_eq!(sim.get("series_every"), Some(&Value::String("5m".into())));
+        // The setting is part of the config, so of the run id.
+        let plain = with_sim(EXPERIMENT).unwrap();
+        assert_ne!(set[0].config_hash, plain[0].config_hash);
+
+        for bad in [
+            "run.capital_usd: 5",
+            "window.from: 2026-01-01",
+            "simm.series_every: 5m",
+        ] {
+            let wrong = format!("{EXPERIMENT}set:\n  {bad}\n");
+            assert!(with_sim(&wrong).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_swept_list_reads_as_one_line() {
+        let list: Value = serde_yaml::from_str("[1h, [2, 3]]").unwrap();
+        assert_eq!(display_value(&list).unwrap(), "[1h, [2, 3]]");
+        assert_eq!(display_value(&Value::from(5)).unwrap(), "5");
     }
 
     #[test]

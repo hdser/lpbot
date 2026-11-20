@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,11 +12,16 @@ use lpbot_core::config::{Mode, StrategyConfig};
 use lpbot_core::experiment::ResolvedRun;
 use lpbot_core::{Config, Tick};
 use lpbot_data::day::Day;
+use lpbot_data::gas::{BlockFees, GasStore};
 use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, Dollar, GasModel, Policy, Settings, Token};
+use lpbot_sim::agent::{AgentAction, AgentDecision, AgentPlan};
+use lpbot_sim::engine::{
+    self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Settings, Shape, Token,
+    DEFAULT_SIGNAL_STEP,
+};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
@@ -55,6 +61,22 @@ fn number(map: &BTreeMap<String, Value>, path: &[&str]) -> Option<f64> {
     lookup(map, path).and_then(Value::as_f64)
 }
 
+fn text(map: &BTreeMap<String, Value>, path: &[&str]) -> Option<String> {
+    lookup(map, path)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// A wait that may be left out or null (`None`), or 0 (at once), or a
+/// duration.
+fn optional_wait(map: &BTreeMap<String, Value>, path: &[&str]) -> Result<Option<u64>> {
+    match lookup(map, path) {
+        Some(value) if value.as_f64() == Some(0.0) => Ok(Some(0)),
+        Some(value) if value.as_str().and_then(parse_duration) == Some(0) => Ok(Some(0)),
+        _ => optional_duration(map, path),
+    }
+}
+
 /// A duration that may be left out or null: `None` then.
 fn optional_duration(map: &BTreeMap<String, Value>, path: &[&str]) -> Result<Option<u64>> {
     match lookup(map, path) {
@@ -79,6 +101,224 @@ fn duration(map: &BTreeMap<String, Value>, path: &[&str], default: u64) -> Resul
     }
 }
 
+/// Ticks a price move of `pct` percent spans, rounded. A move of 0 or
+/// less, or not a number, is 0 ticks, which the engine refuses with the
+/// setting's name.
+pub fn pct_to_ticks(pct: f64) -> Tick {
+    let ticks = (1.0 + pct / 100.0).ln() / 1.0001f64.ln();
+    if ticks.is_finite() && ticks > 0.0 {
+        ticks.round() as Tick
+    } else {
+        0
+    }
+}
+
+/// The positions a run follows: `strategy.follow.file`, a file written by
+/// `lpbot lp-positions`, cut to the run's pool and, with
+/// `strategy.follow.owner`, to one owner; sorted by when they opened.
+/// `None` without a file.
+pub fn follow_spans(strategy: &StrategyConfig, pool: Address) -> Result<Option<Vec<FollowSpan>>> {
+    let Some(file) = text(&strategy.extra, &["follow", "file"]) else {
+        return Ok(None);
+    };
+    let owner = text(&strategy.extra, &["follow", "owner"])
+        .map(|o| owner_address(&o))
+        .transpose()?;
+    let content = std::fs::read_to_string(&file).with_context(|| {
+        format!("reading strategy.follow.file {file}; write it with `lpbot lp-positions`")
+    })?;
+    let spans = parse_follow(&content, pool, owner)
+        .with_context(|| format!("strategy.follow.file {file}"))?;
+    if spans.is_empty() {
+        bail!(
+            "strategy.follow.file {file} has no positions{} on the run's pool {pool:#x}; pick \
+             the pool the provider trades, or another provider",
+            owner.map(|o| format!(" of {o:#x}")).unwrap_or_default()
+        );
+    }
+    Ok(Some(spans))
+}
+
+/// A followed owner's address: all lowercase, as `lpbot lp-positions`
+/// writes it, or checksummed. A mixed case that fails its checksum is a
+/// typo and refused.
+pub fn owner_address(text: &str) -> Result<Address> {
+    if text == text.to_lowercase() {
+        text.parse()
+            .map_err(|e| anyhow!("strategy.follow.owner `{text}` is not an address: {e}"))
+    } else {
+        checked_address("strategy.follow.owner", text)
+    }
+}
+
+/// The decisions file of an agent run (`strategy.agent.decisions`), if the
+/// strategy has one.
+pub fn agent_file(strategy: &StrategyConfig) -> Option<String> {
+    text(&strategy.extra, &["agent", "decisions"])
+}
+
+/// The agent mode's decisions, read from `strategy.agent.decisions`: one
+/// JSON object a line, as `lpbot agent decide` writes them. A file not yet
+/// written is a run with no decisions, which stops at its first look.
+pub fn agent_plan(strategy: &StrategyConfig) -> Result<Option<AgentPlan>> {
+    let Some(file) = agent_file(strategy) else {
+        return Ok(None);
+    };
+    let content = match std::fs::read_to_string(&file) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading strategy.agent.decisions {file}"))
+        }
+    };
+    let decisions =
+        parse_decisions(&content).with_context(|| format!("strategy.agent.decisions {file}"))?;
+    Ok(Some(AgentPlan { decisions }))
+}
+
+/// Decisions, one JSON object a line: `look` (the look's time), `action`
+/// (`stay_out`, `hold`, `exit` or `enter`), `lower_pct` and `upper_pct`
+/// for an entry, `next` (a duration) and `note`.
+pub fn parse_decisions(content: &str) -> Result<Vec<AgentDecision>> {
+    let mut decisions = Vec::new();
+    for (i, line) in content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+    {
+        let row: serde_json::Value =
+            serde_json::from_str(line).with_context(|| format!("line {} is not JSON", i + 1))?;
+        let field = |name: &str| row.get(name);
+        let look = field("look")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow!("line {}: `look` must be the look's time", i + 1))?;
+        let next = field("next")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_duration)
+            .ok_or_else(|| anyhow!("line {}: `next` must be a duration such as 4h", i + 1))?;
+        let pct = |name: &str| {
+            field(name)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| anyhow!("line {}: an entry needs `{name}`, in percent", i + 1))
+        };
+        let action = match field("action").and_then(serde_json::Value::as_str) {
+            Some("stay_out") => AgentAction::StayOut,
+            Some("hold") => AgentAction::Hold,
+            Some("exit") => AgentAction::Exit,
+            Some("enter") => AgentAction::Enter {
+                lower_pct: pct("lower_pct")?,
+                upper_pct: pct("upper_pct")?,
+            },
+            other => bail!(
+                "line {}: `action` is {other:?}; it must be stay_out, hold, exit or enter",
+                i + 1
+            ),
+        };
+        decisions.push(AgentDecision {
+            look,
+            action,
+            next_look: next,
+            note: field("note")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    Ok(decisions)
+}
+
+/// One run of an experiment, without writing tables: what `lpbot agent`
+/// replays at every step. Returns the engine's output and the pool's name.
+pub fn simulate_one(
+    run: &ResolvedRun,
+    root: &Path,
+    chain: &str,
+) -> Result<(engine::Output, String)> {
+    let config = &run.config;
+    let strategy = config
+        .strategies
+        .first()
+        .ok_or_else(|| anyhow!("the run has no strategy"))?;
+    let policy = policy(strategy)?;
+    let (from, to) = window(config)?;
+    let (_, tokens) = chain_addresses(config, chain)?;
+    let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
+    let history = load_history(root, chain, pool, from, to, history_days(strategy)?)?;
+    let (mut settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+    settings.block_fees = block_fees(
+        config,
+        root,
+        chain,
+        &history.events,
+        &settings,
+        from,
+        &mut FeeCache::new(),
+    )?;
+    let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
+        .with_context(|| format!("run {} failed", run.run_id))?;
+    Ok((out, pool_name))
+}
+
+/// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.
+pub fn parse_follow(
+    content: &str,
+    pool: Address,
+    owner: Option<Address>,
+) -> Result<Vec<FollowSpan>> {
+    let mut lines = content.lines();
+    if lines.next() != Some(crate::lp_positions_cmd::HEADER) {
+        bail!("its first line is not the header `lpbot lp-positions` writes");
+    }
+    let mut spans = Vec::new();
+    for (number, line) in lines.enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let bad = || anyhow!("line {} is not a position row", number + 2);
+        if fields.len() != crate::lp_positions_cmd::HEADER.split(',').count() {
+            return Err(bad());
+        }
+        let row_owner: Address = fields[0].parse().map_err(|_| bad())?;
+        let row_pool: Address = fields[2].parse().map_err(|_| bad())?;
+        if row_pool != pool || owner.is_some_and(|o| o != row_owner) {
+            continue;
+        }
+        let number = |i: usize| fields[i].parse::<i64>().map_err(|_| bad());
+        spans.push(FollowSpan {
+            open_time: number(7)? as u64,
+            close_time: if fields[9].is_empty() {
+                None
+            } else {
+                Some(number(9)? as u64)
+            },
+            lower: number(4)? as Tick,
+            upper: number(5)? as Tick,
+        });
+    }
+    spans.sort_by_key(|s| s.open_time);
+    Ok(spans)
+}
+
+/// Which way price must have moved for the entry signal:
+/// `entry.move_direction`, either way unless set.
+pub fn move_direction(strategy: &StrategyConfig) -> Result<MoveDirection> {
+    match text(&strategy.extra, &["entry", "move_direction"]).as_deref() {
+        None | Some("any") => Ok(MoveDirection::Any),
+        Some("up") => Ok(MoveDirection::Up),
+        Some("down") => Ok(MoveDirection::Down),
+        Some(other) => bail!("entry.move_direction `{other}` is not one of any, up or down"),
+    }
+}
+
+/// How the run's campaigns go in: `entry.shape`, one-sided unless set.
+pub fn entry_shape(strategy: &StrategyConfig) -> Result<Shape> {
+    match text(&strategy.extra, &["entry", "shape"]).as_deref() {
+        None | Some("one_sided") => Ok(Shape::OneSided),
+        Some("around_price") => Ok(Shape::AroundPrice),
+        Some(other) => {
+            bail!("entry.shape `{other}` is not built; set it to one_sided or around_price")
+        }
+    }
+}
+
 /// The range width of a run, in ticks. A sweep sets one number; the base
 /// config's search space counts as its smallest width.
 pub fn width_ticks(strategy: &StrategyConfig) -> Result<Tick> {
@@ -94,22 +334,105 @@ pub fn width_ticks(strategy: &StrategyConfig) -> Result<Tick> {
         .ok_or_else(|| anyhow!("entry.width_ticks must be greater than zero"))
 }
 
-/// The zone lookbacks of a strategy, in days.
-pub fn lookbacks(strategy: &StrategyConfig) -> Result<Vec<u32>> {
+/// The zone lookbacks of a strategy, in seconds.
+pub fn lookbacks(strategy: &StrategyConfig) -> Result<Vec<u64>> {
     let Some(list) = lookup(&strategy.extra, &["zone", "lookbacks"]) else {
-        return Ok(vec![7, 30, 90]);
+        return Ok(vec![7 * DAY, 30 * DAY, 90 * DAY]);
     };
-    let days: Option<Vec<u32>> = list.as_sequence().and_then(|items| {
+    let seconds: Option<Vec<u64>> = list.as_sequence().and_then(|items| {
         items
             .iter()
-            .map(|item| {
-                let seconds = parse_duration(item.as_str()?)?;
-                (seconds >= DAY && seconds % DAY == 0).then_some((seconds / DAY) as u32)
-            })
+            .map(|item| parse_duration(item.as_str()?).filter(|s| *s > 0))
             .collect()
     });
-    days.filter(|d| !d.is_empty())
-        .ok_or_else(|| anyhow!("zone.lookbacks must be a list of whole days, such as [7d, 30d]"))
+    seconds
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| anyhow!("zone.lookbacks must be a list of durations, such as [6h, 7d, 30d]"))
+}
+
+/// Whether a run charges each block's own gas price (`costs.gas: chain`,
+/// the default) or `costs.gas_price_gwei` on every block (`fixed`).
+pub fn gas_from_chain(config: &Config) -> Result<bool> {
+    match text(&config.extra, &["costs", "gas"]).as_deref() {
+        None | Some("chain") => Ok(true),
+        Some("fixed") => Ok(false),
+        Some(other) => bail!(
+            "costs.gas is `{other}`; set it to `chain` (each block's price, stored by `lpbot \
+             gas-history`) or `fixed` (costs.gas_price_gwei on every block)"
+        ),
+    }
+}
+
+/// The priority fee a run pays on top of a block's base fee
+/// (`costs.priority_fee_gwei`); `None`, or `median`, pays the median tip of
+/// the last `TIP_BLOCKS` blocks, as a wallet sets it.
+pub fn priority_fee(config: &Config) -> Result<Option<f64>> {
+    match lookup(&config.extra, &["costs", "priority_fee_gwei"]) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s == "median" => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|gwei| gwei.is_finite() && *gwei >= 0.0)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow!(
+                    "costs.priority_fee_gwei must be a number of gwei of at least 0, or `median`"
+                )
+            }),
+    }
+}
+
+/// Blocks over which the median priority fee is taken.
+pub const TIP_BLOCKS: usize = 20;
+
+/// Gas prices already read, by the first and last block they cover.
+pub type FeeCache = HashMap<(u64, u64), Arc<BlockFees>>;
+
+/// The gas price of every block a run trades, when it charges each block's
+/// own (`costs.gas: chain`). Refuses with what to run when they are not
+/// stored.
+pub fn block_fees(
+    config: &Config,
+    root: &Path,
+    chain: &str,
+    events: &[TimedEvent],
+    settings: &Settings,
+    from: Day,
+    cache: &mut FeeCache,
+) -> Result<Option<Arc<BlockFees>>> {
+    if !gas_from_chain(config)? {
+        return Ok(None);
+    }
+    let mut traded = events
+        .iter()
+        .filter(|e| e.time >= settings.trade_from && e.time < settings.trade_to);
+    let Some(first) = traded.next().map(|e| e.block) else {
+        return Ok(None);
+    };
+    let last = traded.next_back().map_or(first, |e| e.block);
+    if let Some(fees) = cache.get(&(first, last)) {
+        return Ok(Some(Arc::clone(fees)));
+    }
+    // The priority fee a sender would set: the median of recent blocks'.
+    let fees = GasStore::new(root)
+        .read_with_recent_tips(chain, first, last, TIP_BLOCKS)?
+        .ok_or_else(|| {
+            anyhow!(
+                "no gas prices are stored for blocks {first} to {last}, which the run trades; \
+                 run `lpbot gas-history --from {from}` to read them from the node, or set \
+                 costs.gas: fixed to charge costs.gas_price_gwei on every block"
+            )
+        })?;
+    let fees = Arc::new(fees);
+    cache.insert((first, last), Arc::clone(&fees));
+    Ok(Some(fees))
+}
+
+/// Whole days of history a run needs before its window: its longest zone
+/// lookback, rounded up.
+pub fn history_days(strategy: &StrategyConfig) -> Result<u32> {
+    let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+    Ok(longest.div_ceil(DAY) as u32)
 }
 
 /// How a run decides when price has left a position behind: a fixed rule,
@@ -436,6 +759,14 @@ fn settings(
         close_units: units("close", 300_000),
         swap_units: units("swap", 180_000),
         gas_price_gwei: costs("gas_price_gwei").unwrap_or(1.0),
+        tip_gwei: priority_fee(config)?,
+        weth: if symbol0 == "WETH" {
+            Some(Token::Zero)
+        } else if symbol1 == "WETH" {
+            Some(Token::One)
+        } else {
+            None
+        },
         value_raw_per_eth: value_per_eth * unit,
     };
 
@@ -450,6 +781,7 @@ fn settings(
 
     let settings = Settings {
         value,
+        shape: entry_shape(strategy)?,
         dollar: if stables.contains(value_symbol) {
             Dollar::Value
         } else {
@@ -470,7 +802,9 @@ fn settings(
         decide_every: duration(&strategy.patience.extra, &["decide_every"], 3_600)?,
         check_every: duration(&strategy.extra, &["entry", "check_every"], 3_600)?,
         latency_blocks: number(&config.extra, &["sim", "latency_blocks"]).map_or(1, |v| v as u64),
-        lookbacks_days: lookbacks(strategy)?,
+        lookbacks: lookbacks(strategy)?,
+        signal_step: duration(&strategy.extra, &["signal_step"], DEFAULT_SIGNAL_STEP)?,
+        vol_window: duration(&strategy.extra, &["entry", "vol_window"], DAY)?,
         move_margin: number(&strategy.extra, &["entry", "move_margin"]).unwrap_or(1.5),
         min_passes_per_day: number(&strategy.extra, &["entry", "min_passes_per_day"])
             .unwrap_or(0.0),
@@ -480,7 +814,27 @@ fn settings(
         min_gas_multiple: number(&strategy.extra, &["entry", "min_gas_multiple"]),
         max_seconds_beyond: optional_duration(&strategy.patience.extra, &["max_wait"])?,
         exit_vol_to_width: number(&strategy.extra, &["exit", "max_vol_to_width"]),
+        recenter_after: optional_wait(&strategy.extra, &["exit", "recenter_after"])?,
+        max_hold: optional_duration(&strategy.extra, &["exit", "max_hold"])?,
+        max_loss_pct: number(&strategy.extra, &["exit", "max_loss_pct"]),
+        max_drawdown_pct: number(&strategy.extra, &["exit", "max_drawdown_pct"]),
+        exit_on_return_ticks: number(&strategy.extra, &["exit", "exit_on_return_pct"])
+            .map(pct_to_ticks),
+        after_round_trips: number(&strategy.extra, &["exit", "after_round_trips"])
+            .map(|n| n.max(0.0) as u32),
+        cooldown: optional_duration(&strategy.extra, &["entry", "cooldown"])?,
+        reposition: lookup(&strategy.extra, &["entry", "reposition"])
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        after_move_ticks: number(&strategy.extra, &["entry", "after_move_pct"]).map(pct_to_ticks),
+        move_window: duration(&strategy.extra, &["entry", "move_window"], 4 * 3_600)?,
+        move_direction: move_direction(strategy)?,
+        width_vol_multiple: number(&strategy.extra, &["entry", "width_vol_multiple"]),
+        follow: follow_spans(strategy, history.snapshot.pool)?,
+        follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
+        agent: agent_plan(strategy)?,
         gas,
+        block_fees: None,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
         trade_to: to.end(),
@@ -508,10 +862,11 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
     // looks; a pool on what `pool_key` holds. Runs share what they agree on.
     let mut histories: HashMap<(Address, Day, Day, u32), Rc<History>> = HashMap::new();
     let mut pools: HashMap<PoolKey, (Address, Vec<PoolRankRow>)> = HashMap::new();
+    let mut fee_cache = FeeCache::new();
     let mut done = 0;
 
     println!(
-        "{:<44} {:<16} {:>8} {:>9} {:>8} {:>10} {:>9} {:>9} {:>6} {:>7} {:>7}",
+        "{:<44} {:<16} {:>8} {:>9} {:>8} {:>10} {:>9} {:>9} {:>6} {:>6} {:>7} {:>7}",
         "run",
         "pool",
         "rule",
@@ -520,6 +875,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         "hold USD %",
         "fees",
         "gas",
+        "gwei",
         "camps",
         "passes",
         "max dd"
@@ -547,7 +903,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         }
         let (pool, rank_rows) = &pools[&key];
 
-        let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let longest = history_days(strategy)?;
         let history_key = (*pool, from, to, longest);
         let history = match histories.get(&history_key) {
             Some(history) => Rc::clone(history),
@@ -558,7 +914,17 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             }
         };
 
-        let (settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+        let (mut settings, pool_name) =
+            settings(run, strategy, policy, &history, &tokens, from, to)?;
+        settings.block_fees = block_fees(
+            config,
+            root,
+            chain,
+            &history.events,
+            &settings,
+            from,
+            &mut fee_cache,
+        )?;
         let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
             .with_context(|| format!("run {} failed", run.run_id))?;
 
@@ -580,6 +946,16 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             value_token: strategy.value_token.clone(),
             fee_pips: history.snapshot.state.fee_pips,
             width_ticks: settings.width,
+            entry_shape: if settings.follow.is_some() {
+                "followed".to_string()
+            } else {
+                settings.shape.name().to_string()
+            },
+            gas_prices: if settings.block_fees.is_some() {
+                "chain".to_string()
+            } else {
+                "fixed".to_string()
+            },
             sweep: run
                 .sweep_point
                 .iter()
@@ -589,10 +965,16 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             config_yaml: run.config_yaml.clone(),
         };
         write_run(results, &info, &out, rank_rows)?;
+        if let Some(pending) = &out.pending {
+            println!(
+                "  {} stopped at look {} for want of a decision; `lpbot agent next` shows it",
+                run.run_id, pending.look
+            );
+        }
 
         let s = &out.summary;
         println!(
-            "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
+            "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6.3} {:>6} {:>7} {:>6.2}%{}",
             run.run_id,
             pool_name,
             info.patience,
@@ -601,6 +983,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             s.hold_value_pct_usd,
             s.fees,
             s.gas,
+            s.gas_gwei,
             s.campaigns,
             s.passes,
             s.max_drawdown_pct,
@@ -777,9 +1160,9 @@ pub fn calibrate(
         }
         let (_, tokens) = chain_addresses(config, chain)?;
         let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
-        let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let longest = history_days(strategy)?;
         let history = load_history(root, chain, pool, from, to, longest)?;
-        let (base_settings, pool_name) = settings(
+        let (mut base_settings, pool_name) = settings(
             run,
             strategy,
             Policy::Adaptive(base),
@@ -787,6 +1170,15 @@ pub fn calibrate(
             &tokens,
             from,
             to,
+        )?;
+        base_settings.block_fees = block_fees(
+            config,
+            root,
+            chain,
+            &history.events,
+            &base_settings,
+            from,
+            &mut FeeCache::new(),
         )?;
         let result = |policy: Policy, first: Day, last: Day| -> Result<f64> {
             let settings = Settings {
@@ -1374,6 +1766,79 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_entry_shape_is_one_sided_unless_set() {
+        assert_eq!(entry_shape(&strategy(BASE)).unwrap(), Shape::OneSided);
+        let around = strategy(&format!("{BASE}entry: {{ shape: around_price }}\n"));
+        assert_eq!(entry_shape(&around).unwrap(), Shape::AroundPrice);
+        let one = strategy(&format!("{BASE}entry: {{ shape: one_sided }}\n"));
+        assert_eq!(entry_shape(&one).unwrap(), Shape::OneSided);
+        let ladder = strategy(&format!("{BASE}entry: {{ shape: ladder }}\n"));
+        let error = entry_shape(&ladder).unwrap_err().to_string();
+        assert!(error.contains("one_sided or around_price"), "{error}");
+    }
+
+    #[test]
+    fn a_move_in_percent_becomes_ticks_and_a_direction_is_named() {
+        assert_eq!(pct_to_ticks(1.0), 100);
+        assert_eq!(pct_to_ticks(5.0), 488);
+        assert_eq!(pct_to_ticks(0.0), 0);
+        assert_eq!(pct_to_ticks(-3.0), 0);
+        assert_eq!(pct_to_ticks(f64::NAN), 0);
+        assert_eq!(move_direction(&strategy(BASE)).unwrap(), MoveDirection::Any);
+        let up = strategy(&format!("{BASE}entry: {{ move_direction: up }}\n"));
+        assert_eq!(move_direction(&up).unwrap(), MoveDirection::Up);
+        let down = strategy(&format!("{BASE}entry: {{ move_direction: down }}\n"));
+        assert_eq!(move_direction(&down).unwrap(), MoveDirection::Down);
+        let odd = strategy(&format!("{BASE}entry: {{ move_direction: sideways }}\n"));
+        assert!(move_direction(&odd)
+            .unwrap_err()
+            .to_string()
+            .contains("any, up or down"));
+    }
+
+    #[test]
+    fn a_follow_file_is_cut_to_the_pool_and_owner() {
+        let header = crate::lp_positions_cmd::HEADER;
+        let pool = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+        let other_pool = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let a = "0x00000000000000000000000000000000000000aa";
+        let b = "0x00000000000000000000000000000000000000bb";
+        let content = format!(
+            "{header}\n\
+             {a},7,{pool},USDC/WETH 0.05,-10,10,100,2000,120,3000,1,1,1,1,1,1\n\
+             {a},8,{other_pool},USDC/WETH 0.3,-60,60,100,1500,,,1,1,0,0,0,0\n\
+             {b},9,{pool},USDC/WETH 0.05,-20,20,90,1000,,,1,1,0,0,0,0\n"
+        );
+        let pool: Address = pool.parse().unwrap();
+        let all = parse_follow(&content, pool, None).unwrap();
+        // Both owners on the pool, by when they opened.
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].open_time, all[0].close_time), (1_000, None));
+        assert_eq!(
+            (all[1].lower, all[1].upper, all[1].close_time),
+            (-10, 10, Some(3_000))
+        );
+        let only_a = parse_follow(&content, pool, Some(a.parse().unwrap())).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert!(parse_follow("owner,pool\n", pool, None).is_err());
+        assert!(parse_follow(&format!("{header}\nnot,a,row\n"), pool, None).is_err());
+    }
+
+    #[test]
+    fn a_wait_is_left_out_null_zero_or_a_duration() {
+        let wait = |yaml: &str| {
+            let map: BTreeMap<String, Value> = serde_yaml::from_str(yaml).unwrap();
+            optional_wait(&map, &["exit", "recenter_after"])
+        };
+        assert_eq!(wait("exit: {}").unwrap(), None);
+        assert_eq!(wait("exit: { recenter_after: null }").unwrap(), None);
+        assert_eq!(wait("exit: { recenter_after: 0 }").unwrap(), Some(0));
+        assert_eq!(wait("exit: { recenter_after: 0m }").unwrap(), Some(0));
+        assert_eq!(wait("exit: { recenter_after: 6h }").unwrap(), Some(21_600));
+        assert!(wait("exit: { recenter_after: soon }").is_err());
+    }
+
+    #[test]
     fn the_width_is_a_number_or_the_low_end_of_the_search_space() {
         let swept = strategy(&format!("{BASE}entry: {{ width_ticks: 40 }}\n"));
         assert_eq!(width_ticks(&swept).unwrap(), 40);
@@ -1395,11 +1860,50 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lookbacks_are_whole_days_with_a_default() {
-        assert_eq!(lookbacks(&strategy(BASE)).unwrap(), vec![7, 30, 90]);
-        let two = strategy(&format!("{BASE}zone: {{ lookbacks: [1d, 14d] }}\n"));
-        assert_eq!(lookbacks(&two).unwrap(), vec![1, 14]);
-        for bad in ["[12h]", "[]", "[7]", "weekly"] {
+    fn a_followed_owner_may_be_lowercase_or_checksummed() {
+        let lower = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+        let checksummed = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640";
+        assert_eq!(
+            owner_address(lower).unwrap(),
+            owner_address(checksummed).unwrap()
+        );
+        assert!(owner_address("0x88E6a0c2ddd26feeb64f039a2c41296fcb3f5640").is_err());
+        assert!(owner_address("0x88e6").is_err());
+    }
+
+    #[test]
+    fn gas_is_priced_from_the_chain_unless_fixed() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/mainnet.yml");
+        let mut config = crate::chain_cmd::load_base_config(&path).unwrap();
+        assert!(gas_from_chain(&config).unwrap());
+        assert_eq!(priority_fee(&config).unwrap(), None, "the block's median");
+        let costs = |yaml: &str| serde_yaml::from_str::<Value>(yaml).unwrap();
+        config.extra.insert(
+            "costs".into(),
+            costs("{ gas: fixed, priority_fee_gwei: 0.05 }"),
+        );
+        assert!(!gas_from_chain(&config).unwrap());
+        assert_eq!(priority_fee(&config).unwrap(), Some(0.05));
+        config.extra.insert(
+            "costs".into(),
+            costs("{ gas: blocks, priority_fee_gwei: -1 }"),
+        );
+        assert!(gas_from_chain(&config).is_err());
+        assert!(priority_fee(&config).is_err());
+    }
+
+    #[test]
+    fn lookbacks_are_durations_with_a_default() {
+        assert_eq!(
+            lookbacks(&strategy(BASE)).unwrap(),
+            vec![7 * DAY, 30 * DAY, 90 * DAY]
+        );
+        let two = strategy(&format!("{BASE}zone: {{ lookbacks: [6h, 14d] }}\n"));
+        assert_eq!(lookbacks(&two).unwrap(), vec![6 * 3_600, 14 * DAY]);
+        assert_eq!(history_days(&two).unwrap(), 14);
+        let short = strategy(&format!("{BASE}zone: {{ lookbacks: [1h, 30h] }}\n"));
+        assert_eq!(history_days(&short).unwrap(), 2, "rounded up to whole days");
+        for bad in ["[0s]", "[]", "[7]", "weekly"] {
             let s = strategy(&format!("{BASE}zone: {{ lookbacks: {bad} }}\n"));
             assert!(lookbacks(&s).is_err(), "{bad}");
         }

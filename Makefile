@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history rank backtest calibrate load pool-stats watch watch-build watch-start watch-stop watch-logs
+.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -87,7 +87,7 @@ demo:
 ##   make gates STEP=fees                  carry on from a step
 ##   make gates SKIP=fees,calibrate        leave steps out
 ##   make gates ARGS="--blocks 7200"       other options of `lpbot gates`
-## Steps: node, pools, replica, history, fees, backtest, load, calibrate.
+## Steps: node, pools, replica, history, gas, fees, backtest, load, calibrate.
 STEP ?=
 SKIP ?=
 ARGS ?=
@@ -100,6 +100,12 @@ gates:
 FROM ?= 2026-01-31
 history:
 	cargo run --release -p lpbot -- backfill --from $(FROM) --verify
+
+## Store each block's base fee and priority fee from FROM on, for the
+## backtests to charge gas at each block's price. Safe to run again; only the
+## newest chunk of 100,000 blocks is read again.
+gas-history:
+	cargo run --release -p lpbot -- gas-history --from $(FROM)
 
 ## Rank the stored pools by implied volatility.
 rank:

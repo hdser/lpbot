@@ -10,12 +10,15 @@
 //! backtest, the load and the calibration). `watch-pools` keeps the live
 //! tables current from the node, block by block.
 
+mod agent_cmd;
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
 mod fees_cmd;
+mod gas_history_cmd;
 mod gates_cmd;
 mod load_cmd;
+mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
@@ -76,6 +79,20 @@ enum Command {
     /// fees over time, and the liquidity around the price, as the two pool
     /// tables for the pool dashboard.
     PoolStats(PoolStatsArgs),
+    /// A liquidity provider's positions on the stored pools, from the
+    /// node's position manager records, one row per stretch with liquidity
+    /// in place: what a backtest can follow (`strategy.follow`).
+    LpPositions(LpPositionsCli),
+    /// Store each block's base fee and median priority fee from the node's
+    /// fee history, so backtests charge gas at the price of the block an
+    /// action lands in.
+    GasHistory(GasHistoryArgs),
+    /// Decide a run look by look, as a person or a session would: `next`
+    /// shows the pool at the first look without a decision, `decide`
+    /// writes one. The experiment's strategy names the decisions file
+    /// (`agent.decisions`).
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Follow the stored pools live from the node, block by block, and keep
     /// the live tables in Postgres current: price, liquidity, swaps, minute
     /// rows and every position. Runs until stopped.
@@ -311,6 +328,92 @@ struct PoolStatsArgs {
     /// Folder the pool tables are written to, beside the run tables.
     #[arg(long, default_value = "runs")]
     results_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct LpPositionsCli {
+    /// A position's NFT id, such as one seen on revert.finance; its owner's
+    /// positions are read. Repeat for several.
+    #[arg(long = "nft")]
+    nfts: Vec<String>,
+    /// An owner's address. Repeat for several.
+    #[arg(long = "account")]
+    accounts: Vec<String>,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to read, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder with the stored pools. Defaults to LPBOT_DATA_DIR, then
+    /// data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// File the positions are written to, as CSV.
+    #[arg(long, default_value = "data/follow/positions.csv")]
+    out: PathBuf,
+    /// Blocks per log request; the node refuses more than 100,000.
+    #[arg(long, default_value_t = 100_000)]
+    log_chunk: u64,
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Replay the run to its first look without a decision and show the
+    /// pool there.
+    Next(AgentArgs),
+    /// Write the decision for the look `next` showed, then show the next.
+    Decide(DecideArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Which of the experiment's runs, by index, when it has several.
+    #[arg(long)]
+    run: Option<usize>,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder for the pool history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct DecideArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// stay_out, hold, exit or enter.
+    #[arg(long)]
+    action: String,
+    /// For an entry: the range's lower price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    lower: Option<f64>,
+    /// For an entry: the range's upper price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    upper: Option<f64>,
+    /// When to look again, such as 30m, 4h or 2d.
+    #[arg(long)]
+    next: String,
+    /// Why, in a sentence.
+    #[arg(long, default_value = "")]
+    note: String,
+}
+
+#[derive(Args)]
+struct GasHistoryArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to store, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Requests sent at the same time.
+    #[arg(long, default_value_t = 2)]
+    threads: usize,
 }
 
 #[derive(Args)]
@@ -612,6 +715,124 @@ fn real_main() -> Result<()> {
                 },
             )
             .map(|_| ())
+        }
+        Command::LpPositions(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let nfts = args
+                .nfts
+                .iter()
+                .map(|text| {
+                    text.parse::<alloy_primitives::U256>()
+                        .map_err(|_| anyhow::anyhow!("--nft {text}: give the NFT id as a number"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let accounts = args
+                .accounts
+                .iter()
+                .map(|a| chain_cmd::checked_address("account", a))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            if nfts.is_empty() && accounts.is_empty() {
+                anyhow::bail!("say whose positions to read: --nft <id> or --account <address>");
+            }
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let written = lp_positions_cmd::run(
+                &config,
+                &chain.client,
+                &lp_positions_cmd::LpPositionsArgs {
+                    nfts: &nfts,
+                    accounts: &accounts,
+                    from,
+                    root: &root,
+                    out: &args.out,
+                    chain: &args.chain.chain,
+                    log_chunk: args.log_chunk,
+                },
+            )?;
+            println!("{written} stretch(es) written to {}", args.out.display());
+            Ok(())
+        }
+        Command::GasHistory(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let client = &chain.client;
+            let source = lpbot_data::backfill::NodeSource {
+                client,
+                head_margin: 0,
+                log_chunk: 2_000,
+            };
+            // Up to the newest block no reorg can change.
+            let to = match client.finalized_block()? {
+                Some((block, _)) => block,
+                None => client.block_number()?.saturating_sub(64),
+            };
+            let first =
+                lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            println!(
+                "  gas prices of blocks {first} to {to} into {}",
+                root.display()
+            );
+            let done =
+                gas_history_cmd::run(client, &root, &args.chain.chain, first, to, args.threads)?;
+            let stored =
+                lpbot_data::gas::GasStore::new(&root).read(&args.chain.chain, first, to)?;
+            let average = stored
+                .as_ref()
+                .and_then(|fees| fees.summary())
+                .map_or(String::new(), |(_, wei)| {
+                    format!(", {:.3} gwei a block on average", wei / 1e9)
+                });
+            println!(
+                "{} chunk(s) read from the node, {} already stored{average}",
+                done.chunks, done.kept
+            );
+            Ok(())
+        }
+        Command::Agent(command) => {
+            let args = match &command {
+                AgentCommand::Next(args) => args,
+                AgentCommand::Decide(args) => &args.agent,
+            };
+            let runs = resolve(&args.experiment)?;
+            let run = match (args.run, runs.len()) {
+                (Some(i), _) => runs.get(i).ok_or_else(|| {
+                    anyhow::anyhow!("--run {i}: the experiment has {} run(s)", runs.len())
+                })?,
+                (None, 1) => &runs[0],
+                (None, n) => bail!("the experiment has {n} runs; say which with --run <index>"),
+            };
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            match &command {
+                AgentCommand::Next(_) => agent_cmd::next(run, &root, &args.chain).map(|_| ()),
+                AgentCommand::Decide(d) => agent_cmd::decide(
+                    run,
+                    &root,
+                    &args.chain,
+                    &agent_cmd::Decision {
+                        action: &d.action,
+                        lower_pct: d.lower,
+                        upper_pct: d.upper,
+                        next: &d.next,
+                        note: &d.note,
+                    },
+                ),
+            }
         }
         Command::PoolStats(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;

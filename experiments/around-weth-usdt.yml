@@ -1,0 +1,31 @@
+# Entries around the price on the WETH/USDT pools, May 2025 to October 2026:
+# the range centred on the price, part of the value token swapped into the
+# other one at entry. Three ways to handle price leaving the range: the
+# one-sided rules (wait while stranded, enter again around the price once
+# price is a width away from a resting range), moving back around the
+# price at the first hourly decision, or after a day out. Against
+# one-sided entries over the same window: one-sided-weth-usdt.yml.
+# Expands into 36 runs, each counted in ETH and in USD.
+#
+# Research settings: all capital in each campaign, a 50% loss limit so
+# every run sees the whole window, gas at 1 gwei.
+#
+#   cargo run --release -p lpbot -- run experiments/around-weth-usdt.yml
+
+experiment: around-weth-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0x11b815efB8f581194ae79006d24E0d814B7697F6"   # WETH/USDT 0.05%
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  entry.shape: [around_price]
+  entry.width_ticks: [120, 600, 2000]
+  entry.min_gas_multiple: [100]
+  patience.mode: [wait]
+  exit.recenter_after: [null, 0, 1d]

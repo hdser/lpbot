@@ -69,6 +69,10 @@ pub fn key_column(table: &str) -> &'static str {
     }
 }
 
+/// Columns that were whole numbers before and are fractions now: their
+/// type is changed in place in an older database.
+const WIDENED: &[(&str, &str)] = &[("zone_map", "lookback_days")];
+
 /// Statements that make sure the table exists with every column of `table`.
 pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     let name = identifier(&table.name)?;
@@ -82,6 +86,14 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
             "ALTER TABLE {name} ADD COLUMN IF NOT EXISTS {column} {}",
             sql_type(values)
         ));
+        // A column that held whole numbers in older databases and holds
+        // fractions now.
+        if WIDENED.contains(&(name, column)) {
+            statements.push(format!(
+                "ALTER TABLE {name} ALTER COLUMN {column} TYPE {}",
+                sql_type(values)
+            ));
+        }
     }
     statements.push(format!(
         "CREATE INDEX IF NOT EXISTS {name}_{key} ON {name} ({key})"

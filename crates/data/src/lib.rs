@@ -6,8 +6,10 @@
 pub mod backfill;
 pub mod day;
 pub mod fee_check;
+pub mod gas;
 pub mod lake;
 pub mod live;
+pub mod lp_history;
 pub mod manager;
 pub mod odds;
 pub mod pool_stats;

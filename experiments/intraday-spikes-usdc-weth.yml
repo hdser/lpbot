@@ -1,0 +1,32 @@
+# Intraday fast moves on USDC/WETH 0.05%, May 2025 to October 2026, decided and
+# measured block by block: enter one-sided once ETH moved 1% or 2% within
+# 15 minutes or an hour, up or down, in a range 30 or 100 ticks wide next to
+# the price; close back to the value token after an hour or four, or at a 1%
+# loss. Signals on one-minute steps, looked at every minute; gas at each
+# block's own price. Expands into 64 runs, each counted in ETH and in USD.
+#
+#   cargo run --release -p lpbot -- run experiments/intraday-spikes-usdc-weth.yml
+
+experiment: intraday-spikes-usdc-weth
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"]   # USDC/WETH 0.05%
+  value_token: [WETH, USDC]
+  capital_share: [1.0]
+  signal_step: [1m]
+  zone.lookbacks: [[1h, 1d]]
+  entry.check_every: [1m]
+  patience.mode: [wait]
+  patience.decide_every: [1m]
+  entry.after_move_pct: [1, 2]
+  entry.move_window: [15m, 1h]
+  entry.move_direction: [up, down]
+  entry.width_ticks: [30, 100]
+  exit.max_hold: [1h, 4h]
+  exit.max_loss_pct: [1]
