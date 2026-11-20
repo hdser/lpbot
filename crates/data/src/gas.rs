@@ -229,6 +229,26 @@ impl GasStore {
         Ok(())
     }
 
+    /// The fees of the blocks `from` to `to` with each tip the median of
+    /// the last `window` blocks' (`BlockFees::with_recent_median_tip`),
+    /// counted over the blocks before `from` too when they are stored, so
+    /// the first blocks see a whole window. `None` when any block from
+    /// `from` to `to` is not stored.
+    pub fn read_with_recent_tips(
+        &self,
+        chain: &str,
+        from: u64,
+        to: u64,
+        window: usize,
+    ) -> StoreResult<Option<BlockFees>> {
+        let before = from.saturating_sub(window.saturating_sub(1) as u64);
+        let read = match self.read(chain, before, to)? {
+            Some(fees) => Some(fees),
+            None => self.read(chain, from, to)?,
+        };
+        Ok(read.map(|fees| fees.with_recent_median_tip(window).range(from, to)))
+    }
+
     /// The fees of the blocks `from` to `to`, both included, or `None`
     /// when any of them is not stored.
     pub fn read(&self, chain: &str, from: u64, to: u64) -> StoreResult<Option<BlockFees>> {
@@ -397,6 +417,33 @@ mod tests {
         assert_eq!(s.base, f.base);
         assert_eq!(s.first(), 10);
         assert_eq!(f.with_recent_median_tip(1), f);
+    }
+
+    #[test]
+    fn the_first_blocks_read_count_their_tips_over_the_blocks_before() {
+        let dir = TempDir::new("gas-recent");
+        let store = GasStore::new(dir.path());
+        // Tips 0, 1, 2, ...: the median of three ending at block b is b - 1.
+        let tips: Vec<u64> = (0..10).collect();
+        let fees = BlockFees::new(CHUNK, vec![7; 10], tips).unwrap();
+        store.write_chunk("ethereum", &fees).unwrap();
+        let read = store
+            .read_with_recent_tips("ethereum", CHUNK + 5, CHUNK + 8, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!((read.first(), read.len()), (CHUNK + 5, 4));
+        assert_eq!(read.at(CHUNK + 5), Some((7, 4)), "blocks 3 to 5 counted");
+        // At the first stored block there is nothing before it to count.
+        let start = store
+            .read_with_recent_tips("ethereum", CHUNK, CHUNK + 1, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(start.at(CHUNK), Some((7, 0)));
+        assert_eq!(start.at(CHUNK + 1), Some((7, 1)));
+        assert!(store
+            .read_with_recent_tips("ethereum", CHUNK + 5, CHUNK + 20, 3)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -304,8 +304,9 @@ pub fn block_fees(
     if let Some(fees) = cache.get(&(first, last)) {
         return Ok(Some(Arc::clone(fees)));
     }
+    // The priority fee a sender would set: the median of recent blocks'.
     let fees = GasStore::new(root)
-        .read(chain, first, last)?
+        .read_with_recent_tips(chain, first, last, TIP_BLOCKS)?
         .ok_or_else(|| {
             anyhow!(
                 "no gas prices are stored for blocks {first} to {last}, which the run trades; \
@@ -313,8 +314,7 @@ pub fn block_fees(
                  costs.gas: fixed to charge costs.gas_price_gwei on every block"
             )
         })?;
-    // The priority fee a sender would set: the median of recent blocks'.
-    let fees = Arc::new(fees.with_recent_median_tip(TIP_BLOCKS));
+    let fees = Arc::new(fees);
     cache.insert((first, last), Arc::clone(&fees));
     Ok(Some(fees))
 }
