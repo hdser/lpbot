@@ -17,3 +17,7 @@ parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# The mock JSON-RPC node, for the reads the live state makes.
+lpbot-chain = { workspace = true, features = ["testing"] }

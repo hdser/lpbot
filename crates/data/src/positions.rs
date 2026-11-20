@@ -435,6 +435,10 @@ struct TxContext {
     last: Option<Call>,
     /// Tokens minted in this transaction, with their first holder.
     minted: Vec<(u64, Address)>,
+    /// The fee growth inside each range at the manager's last mint or burn
+    /// there in this transaction: what it reads for its NFTs. Its pool
+    /// position may be gone by the NFT's own event, emptied by a collect.
+    insides: Vec<(Range, (U256, U256))>,
 }
 
 impl TxContext {
@@ -447,12 +451,17 @@ impl TxContext {
         }
     }
 
-    fn pool_event(&mut self, tx: B256, event: &PoolPositionEvent) {
+    fn pool_event(&mut self, tx: B256, event: &PoolPositionEvent, inside: Option<(U256, U256)>) {
         self.enter(tx);
         if event.key().owner != MANAGER {
             return;
         }
         let range = event.key().range;
+        if let (Some(inside), false) = (inside, matches!(event, PoolPositionEvent::Collect { .. }))
+        {
+            self.insides.retain(|(r, _)| *r != range);
+            self.insides.push((range, inside));
+        }
         self.last = Some(match *event {
             PoolPositionEvent::Mint { amount, .. } => Call::Mint {
                 range,
@@ -496,6 +505,13 @@ impl TxContext {
         };
         self.last = None;
         Some(range)
+    }
+
+    fn inside(&self, range: &Range) -> Option<(U256, U256)> {
+        self.insides
+            .iter()
+            .find(|(r, _)| r == range)
+            .map(|(_, inside)| *inside)
     }
 
     fn minted_holder(&self, token: u64) -> Option<Address> {
@@ -590,6 +606,9 @@ pub struct PositionBook {
     emptied_nfts: HashMap<u64, Address>,
     tx: TxContext,
     staged: HashMap<PositionId, Seed>,
+    /// The highest token id of any position manager event seen: how far
+    /// a scan for NFTs nobody touched has to read.
+    max_token: u64,
     /// Whether to collect what changed for the caller to write.
     pub record: bool,
     touched: BTreeSet<PositionId>,
@@ -607,6 +626,8 @@ pub struct BookState {
     pub nfts: Vec<(u64, Nft)>,
     pub emptied: Vec<PoolKey>,
     pub emptied_nfts: Vec<(u64, Address)>,
+    #[serde(default)]
+    pub max_token: u64,
     pub anomaly_count: u64,
 }
 
@@ -682,7 +703,7 @@ impl PositionBook {
                 else {
                     continue;
                 };
-                tx.pool_event(log.tx_hash, &event);
+                tx.pool_event(log.tx_hash, &event, None);
                 let id = PositionId::Pool(event.key());
                 let fresh = matches!(event, PoolPositionEvent::Mint { .. })
                     && !initialized(&event.key().range);
@@ -758,7 +779,7 @@ impl PositionBook {
         at: Stamp,
         tx: B256,
     ) {
-        self.tx.pool_event(tx, event);
+        self.tx.pool_event(tx, event, Some(inside));
         let key = event.key();
         let ledger = self.pool_ledger(key, inside, at);
         let ok = match *event {
@@ -793,6 +814,7 @@ impl PositionBook {
     /// Applies a position manager event. NFT events of pools not followed
     /// pair with no pool event and are passed over.
     pub fn manager_event(&mut self, event: &ManagerEvent, at: Stamp, tx: B256) {
+        self.max_token = self.max_token.max(manager_token(event));
         if let ManagerEvent::Transfer { token, to, .. } = *event {
             self.tx.pair(tx, event);
             if to == Address::ZERO {
@@ -819,19 +841,40 @@ impl PositionBook {
             return;
         };
         let token = manager_token(event);
-        // The fee growth the manager reads: its pool position's, which the
-        // pool event just before updated.
+        // The fee growth the manager reads: its pool position's, which its
+        // mint or burn just before set. An NFT that holds no liquidity
+        // earns nothing, and its own last reading does.
+        let own = || {
+            let nft = self
+                .nfts
+                .get(&token)
+                .map(|n| (n.ledger.liquidity, n.ledger.last_inside));
+            let staged = match self.staged.get(&PositionId::Nft(token)) {
+                Some(Seed::Nft {
+                    state: Some(seed), ..
+                }) => Some((seed.liquidity, seed.last_inside)),
+                _ => None,
+            };
+            nft.or(staged)
+                .filter(|(liquidity, _)| *liquidity == 0)
+                .map(|(_, last)| last)
+        };
         let inside = self
-            .positions
-            .get(&PoolKey {
-                owner: MANAGER,
-                range,
+            .tx
+            .inside(&range)
+            .or_else(|| {
+                self.positions
+                    .get(&PoolKey {
+                        owner: MANAGER,
+                        range,
+                    })
+                    .map(|ledger| ledger.last_inside)
             })
-            .map(|ledger| ledger.last_inside);
+            .or_else(own);
         let Some(inside) = inside else {
             self.anomaly(
                 at,
-                format!("NFT {token}: the manager holds nothing in its range"),
+                format!("NFT {token}: no fee growth to read for its range"),
             );
             return;
         };
@@ -974,6 +1017,53 @@ impl PositionBook {
         }
     }
 
+    /// The highest token id of any position manager event seen.
+    pub fn max_token(&self) -> u64 {
+        self.max_token
+    }
+
+    /// Whether the book has met an NFT: it holds it, or saw it emptied.
+    pub fn knows_nft(&self, token: u64) -> bool {
+        self.nfts.contains_key(&token) || self.emptied_nfts.contains_key(&token)
+    }
+
+    /// Takes in an NFT the book has not met, as the chain holds it now:
+    /// one that nobody touched since the book started. `mark` is the fee
+    /// growth inside its range now, from which fees count as earned while
+    /// followed. False, and nothing changes, when the book knows it or it
+    /// holds nothing.
+    pub fn adopt_nft(&mut self, token: u64, seed: NftSeed, mark: (U256, U256), at: Stamp) -> bool {
+        if self.knows_nft(token) || (seed.liquidity == 0 && seed.owed == (0, 0)) {
+            return false;
+        }
+        let ledger = Ledger {
+            liquidity: seed.liquidity,
+            last_inside: seed.last_inside,
+            owed: (U256::from(seed.owed.0), U256::from(seed.owed.1)),
+            mark: if seed.liquidity > 0 {
+                mark
+            } else {
+                seed.last_inside
+            },
+            since: at,
+            changed: at,
+            ..Ledger::default()
+        };
+        self.max_token = self.max_token.max(token);
+        self.nfts.insert(
+            token,
+            Nft {
+                range: seed.range,
+                holder: seed.holder,
+                ledger,
+            },
+        );
+        if self.record {
+            self.touched.insert(PositionId::Nft(token));
+        }
+        true
+    }
+
     /// One position as the caller shows it.
     pub fn view(&self, id: &PositionId) -> Option<PositionView> {
         match id {
@@ -1094,6 +1184,7 @@ impl PositionBook {
             nfts: nfts.into_iter().collect(),
             emptied,
             emptied_nfts,
+            max_token: self.max_token,
             anomaly_count: self.anomaly_count,
         }
     }
@@ -1106,6 +1197,7 @@ impl PositionBook {
             nfts: state.nfts.into_iter().collect(),
             emptied: state.emptied.into_iter().collect(),
             emptied_nfts: state.emptied_nfts.into_iter().collect(),
+            max_token: state.max_token,
             anomaly_count: state.anomaly_count,
             ..Self::default()
         }

@@ -689,6 +689,10 @@ fn position_nfts_and_their_holders_are_read_and_a_burned_token_is_none() {
     // Each read at a block of its own, position and holder together.
     let both = read_nfts_at(&client, POSITION_MANAGER, &[(9, 42), (7, 42)]).unwrap();
     assert_eq!(both, vec![None, Some((read[0].unwrap(), holder))]);
+    assert_eq!(
+        read_nft_positions_at(&client, POSITION_MANAGER, &[(7, 42), (9, 42)]).unwrap(),
+        read
+    );
     // A refusal that is not about the token stops the read.
     assert!(fetch_nft_positions(&client, POSITION_MANAGER, &[7, 13], 42).is_err());
     assert!(fetch_nft_owners(&client, POSITION_MANAGER, &[13], 42).is_err());

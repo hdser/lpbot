@@ -447,6 +447,85 @@ fn the_stored_history_replays_into_the_state_a_follower_starts_from() {
 }
 
 #[test]
+fn nfts_nobody_touched_are_found_on_the_node_and_adopted() {
+    use alloy_primitives::{hex, U256};
+    use lpbot_chain::testing::MockNode;
+    use serde_json::json;
+
+    let mut state = LiveState::from_snapshots(&[snapshot()], 60);
+    let (token0, token1) = (snapshot().token0, snapshot().token1);
+    // Token 5 the book has met; tokens 1 to 4 it has not.
+    let range = key(MANAGER, -60, 60).range;
+    let held = |liquidity: u128| NftSeed {
+        range,
+        holder: owner(0x55),
+        liquidity,
+        last_inside: Default::default(),
+        owed: (0, 0),
+    };
+    assert!(state
+        .book
+        .adopt_nft(5, held(7), Default::default(), state.at));
+    assert!(!state
+        .book
+        .adopt_nft(5, held(7), Default::default(), state.at));
+    assert_eq!(state.book.max_token(), 5);
+
+    let word = |v: U256| hex::encode(v.to_be_bytes::<32>());
+    let addr = |a: Address| U256::from_be_slice(a.as_slice());
+    let signed = |t: i32| alloy_primitives::I256::try_from(t).unwrap().into_raw();
+    let node = MockNode::start(move |method, params| {
+        assert_eq!(method, "eth_call");
+        assert_eq!(params[1], "0x64", "read at the state's block");
+        let data = hex::decode(params[0]["data"].as_str().unwrap()).unwrap();
+        let id = U256::from_be_slice(&data[4..36]).to::<u64>();
+        let positions = hex::encode(&keccak256("positions(uint256)")[..4]);
+        if hex::encode(&data[..4]) != positions {
+            return Ok(json!(format!("0x{}", word(addr(owner(0x40 + id as u8))))));
+        }
+        let (t0, liquidity) = match id {
+            1 => (Address::repeat_byte(0x01), 9u64),
+            2 => (token0, 1_000),
+            3 => return Err((3, "execution reverted: Invalid token ID".into())),
+            4 => (token0, 0),
+            other => panic!("token {other} is known and should not be read"),
+        };
+        let words = [
+            U256::ZERO,
+            U256::ZERO,
+            addr(t0),
+            addr(token1),
+            U256::from(3_000u32),
+            signed(-60),
+            signed(60),
+            U256::from(liquidity),
+            U256::from(3u8),
+            U256::from(4u8),
+            U256::ZERO,
+            U256::ZERO,
+        ];
+        Ok(json!(format!(
+            "0x{}",
+            words.iter().map(|w| word(*w)).collect::<String>()
+        )))
+    });
+    let client = RpcClient::new(node.url());
+    let found = state.untouched_nfts(&client, 2, |_| {}).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (token, seed) = &found[0];
+    assert_eq!(*token, 2);
+    assert_eq!(seed.holder, owner(0x42));
+    assert_eq!(seed.range, range);
+    assert_eq!(seed.liquidity, 1_000);
+    assert_eq!(state.adopt_nfts(found), 1);
+    let two = state.book.view(&PositionId::Nft(2)).unwrap();
+    assert_eq!(two.owner, owner(0x42));
+    assert_eq!(two.ledger.opened, None);
+    assert_eq!(two.ledger.since, state.at);
+    assert_eq!(state.book.active_liquidity(pool_address(), 0), 1_007);
+}
+
+#[test]
 fn a_checkpoint_gives_back_the_base_state() {
     let head = FakeHead::new();
     let s = opening();

@@ -360,6 +360,30 @@ fn decode_owner(reply: Result<Vec<u8>, RpcError>) -> ChainResult<Option<Address>
     }
 }
 
+/// Reads position NFTs, each after a block of its own, in the order asked:
+/// `(token, block)`. A token that does not exist at its block is `None`.
+pub fn read_nft_positions_at(
+    client: &RpcClient,
+    manager: Address,
+    reads: &[(u64, u64)],
+) -> ChainResult<Vec<Option<NftInfo>>> {
+    let calls: Vec<(Address, Vec<u8>, u64)> = reads
+        .iter()
+        .map(|(token, block)| {
+            (
+                manager,
+                call_data("positions(uint256)", &[U256::from(*token)]),
+                *block,
+            )
+        })
+        .collect();
+    client
+        .eth_call_each_at(&calls, CALL_BATCH)?
+        .into_iter()
+        .map(decode_nft)
+        .collect()
+}
+
 /// Reads position NFTs and their holders, each after a block of its own,
 /// in the order asked: `(token, block)`. A token that does not exist at
 /// its block is `None`.

@@ -207,7 +207,10 @@ pub fn position_row(
 ) -> LivePositionRow {
     let ledger = &view.ledger;
     let (lower, upper) = (view.range.tick_lower, view.range.tick_upper);
-    let (pending_owed, pending_fees) = if ledger.liquidity > 0 {
+    // Ticks of a range that holds liquidity are initialized; where they
+    // are not, the book is missing an event and the reading means nothing.
+    let readable = pool.tick_info(lower).is_some() && pool.tick_info(upper).is_some();
+    let (pending_owed, pending_fees) = if ledger.liquidity > 0 && readable {
         ledger.pending(pool.fee_growth_inside(lower, upper))
     } else {
         Default::default()
@@ -1046,7 +1049,36 @@ fn rebuild(
             Ok(())
         },
     )?;
+    let mut state = state;
+    adopt_untouched(&mut state, chain, args.threads)?;
     Ok(state)
+}
+
+/// Finds the position NFTs of the followed pools that nobody touched since
+/// the history began, on the node, and takes them into the book. Without
+/// this the long-held NFTs would stay unattributed.
+fn adopt_untouched(state: &mut LiveState, chain: &Chain, threads: usize) -> Result<()> {
+    let max = state.book.max_token();
+    println!(
+        "reading every position NFT up to token {max} at block {}, for the ones nobody \
+         touched since the history began",
+        state.at.block
+    );
+    let started = Instant::now();
+    let step = std::sync::atomic::AtomicU64::new(0);
+    let found = state.untouched_nfts(&chain.client, threads, |done| {
+        let tenth = done * 10 / max.max(1);
+        if step.fetch_max(tenth, std::sync::atomic::Ordering::Relaxed) < tenth {
+            println!("  {done} of {max} read ({:.0?})", started.elapsed());
+        }
+    })?;
+    let adopted = state.adopt_nfts(found);
+    let (direct, nfts) = state.book.len();
+    println!(
+        "  {adopted} NFT(s) taken in ({:.0?}); {direct} pool positions and {nfts} NFTs held",
+        started.elapsed()
+    );
+    Ok(())
 }
 
 // --- running ------------------------------------------------------------------
@@ -1164,7 +1196,7 @@ pub fn run(config: &Config, chain: &Chain, args: &WatchArgs) -> Result<()> {
             checkpoint_block = follower.base.at.block;
             last_checkpoint = Instant::now();
         }
-        if last_status.elapsed() >= Duration::from_secs(60) || (args.once && caught_up) {
+        if last_status.elapsed() >= Duration::from_secs(60) || (args.once && wrote_at_head) {
             let (direct, nfts) = follower.live.book.len();
             println!(
                 "  block {} ({} behind the head, {} past the finalized), {direct} pool \

@@ -24,7 +24,9 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, I256};
 use lpbot_chain::eth::{BlockHeader, HashedLog};
-use lpbot_chain::uniswap_v3::{read_nfts_at, read_positions_at, ChainError};
+use lpbot_chain::uniswap_v3::{
+    fetch_nft_owners, read_nft_positions_at, read_nfts_at, read_positions_at, ChainError,
+};
 use lpbot_chain::RpcClient;
 use lpbot_venues::uniswap_v3::events::PoolEvent;
 use lpbot_venues::uniswap_v3::pool::Pool;
@@ -235,6 +237,146 @@ impl LiveState {
             p.pool.tick_info(range.tick_lower).is_some()
                 && p.pool.tick_info(range.tick_upper).is_some()
         })
+    }
+
+    /// The followed pool of two tokens and a fee tier, if any.
+    pub fn pool_of(&self, token0: Address, token1: Address, fee_pips: u32) -> Option<Address> {
+        self.pools
+            .values()
+            .find(|lp| lp.token0 == token0 && lp.token1 == token1 && lp.pool.fee_pips() == fee_pips)
+            .map(|lp| lp.address)
+    }
+
+    /// Takes NFTs nobody touched since the book started into it, as the
+    /// chain holds them at the state's block. Returns how many it took.
+    pub fn adopt_nfts(&mut self, found: Vec<(u64, NftSeed)>) -> usize {
+        let at = self.at;
+        let mut adopted = 0;
+        for (token, seed) in found {
+            let range = seed.range;
+            let mark = match self.pools.get(&range.pool) {
+                Some(lp) if self.initialized(&range) => lp
+                    .pool
+                    .fee_growth_inside(range.tick_lower, range.tick_upper),
+                _ => seed.last_inside,
+            };
+            if self.book.adopt_nft(token, seed, mark, at) {
+                adopted += 1;
+            }
+        }
+        adopted
+    }
+
+    /// Every position NFT of the followed pools that the book has not met
+    /// and that holds something, read from the node at the state's block:
+    /// token ids from 1 to the highest the book has seen, `threads` reads
+    /// at once. `progress` hears how many ids are read so far.
+    pub fn untouched_nfts(
+        &self,
+        client: &RpcClient,
+        threads: usize,
+        progress: impl Fn(u64) + Sync,
+    ) -> Result<Vec<(u64, NftSeed)>, ChainError> {
+        const CHUNK: u64 = 2_000;
+        let block = self.at.block;
+        let max = self.book.max_token();
+        let chunks: Vec<(u64, u64)> = (0..max.div_ceil(CHUNK))
+            .map(|i| (i * CHUNK + 1, ((i + 1) * CHUNK).min(max)))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let read = std::sync::atomic::AtomicU64::new(0);
+        let found: std::sync::Mutex<Vec<(u64, NftSeed)>> = std::sync::Mutex::new(Vec::new());
+        let errors: std::sync::Mutex<Vec<ChainError>> = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..threads.max(1) {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((first, last)) = chunks.get(index).copied() else {
+                        return;
+                    };
+                    if !errors.lock().expect("not poisoned").is_empty() {
+                        return;
+                    }
+                    match self.untouched_in(client, first, last, block) {
+                        Ok(mut part) => {
+                            found.lock().expect("not poisoned").append(&mut part);
+                            let done = read
+                                .fetch_add(last + 1 - first, std::sync::atomic::Ordering::Relaxed)
+                                + last
+                                + 1
+                                - first;
+                            progress(done);
+                        }
+                        Err(error) => {
+                            errors.lock().expect("not poisoned").push(error);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(error) = errors
+            .into_inner()
+            .expect("not poisoned")
+            .into_iter()
+            .next()
+        {
+            return Err(error);
+        }
+        let mut found = found.into_inner().expect("not poisoned");
+        found.sort_by_key(|(token, _)| *token);
+        Ok(found)
+    }
+
+    /// `untouched_nfts` for the ids `first` to `last`.
+    fn untouched_in(
+        &self,
+        client: &RpcClient,
+        first: u64,
+        last: u64,
+        block: u64,
+    ) -> Result<Vec<(u64, NftSeed)>, ChainError> {
+        let ids: Vec<u64> = (first..=last)
+            .filter(|id| !self.book.knows_nft(*id))
+            .collect();
+        let reads: Vec<(u64, u64)> = ids.iter().map(|id| (*id, block)).collect();
+        let infos = read_nft_positions_at(client, MANAGER, &reads)?;
+        let mut wanted = Vec::new();
+        for (id, info) in ids.iter().zip(infos) {
+            let Some(info) = info else { continue };
+            if info.liquidity == 0 && info.tokens_owed0 == 0 && info.tokens_owed1 == 0 {
+                continue;
+            }
+            let Some(pool) = self.pool_of(info.token0, info.token1, info.fee_pips) else {
+                continue;
+            };
+            wanted.push((*id, pool, info));
+        }
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tokens: Vec<u64> = wanted.iter().map(|(id, _, _)| *id).collect();
+        let owners = fetch_nft_owners(client, MANAGER, &tokens, block)?;
+        Ok(wanted
+            .into_iter()
+            .zip(owners)
+            .filter_map(|((id, pool, info), owner)| {
+                Some((
+                    id,
+                    NftSeed {
+                        range: Range {
+                            pool,
+                            tick_lower: info.tick_lower,
+                            tick_upper: info.tick_upper,
+                        },
+                        holder: owner?,
+                        liquidity: info.liquidity,
+                        last_inside: (info.fee_growth_inside0_last, info.fee_growth_inside1_last),
+                        owed: (info.tokens_owed0, info.tokens_owed1),
+                    },
+                ))
+            })
+            .collect())
     }
 
     /// The positions in `logs` the book has not met, to read from the chain.

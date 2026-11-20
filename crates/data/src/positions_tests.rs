@@ -422,6 +422,54 @@ fn nfts_get_their_share_of_the_managers_pool_position() {
 }
 
 #[test]
+fn an_nft_emptied_and_collected_in_one_transaction_is_paid_and_let_go() {
+    // The only NFT of its range: taking it out and collecting in one
+    // transaction empties the manager's pool position before the NFT's
+    // own collect, which must still be paid.
+    let mut s = Script::new();
+    s.tx();
+    s.mint(owner(0xB0), -600, 600, 10u128.pow(18));
+    s.mint_nft(9, owner(0x99), -60, 60, 3 * 10u128.pow(17));
+    s.tx();
+    s.swap(true, 10u64.pow(15));
+    s.tx();
+    s.swap(false, 2 * 10u64.pow(15));
+    s.tx();
+    let principal = s.burn(MANAGER, -60, 60, 3 * 10u128.pow(17));
+    s.decrease(9, 3 * 10u128.pow(17), principal);
+
+    let mut book = PositionBook::new([pool_address()]);
+    book.record = true;
+    let mut replica = Script::replica();
+    feed(&mut book, &mut replica, &s.logs);
+    let owed = book.view(&PositionId::Nft(9)).unwrap().ledger.owed;
+    let manager_owed = book
+        .view(&PositionId::Pool(key(MANAGER, -60, 60)))
+        .unwrap()
+        .ledger
+        .owed;
+    assert_eq!(owed, manager_owed, "one NFT: its share is the whole");
+
+    // The same transaction goes on: the pool pays the manager, the manager
+    // pays the NFT.
+    s.logs.clear();
+    s.collect(MANAGER, -60, 60, manager_owed);
+    s.manager_collect(9, owed);
+    feed(&mut book, &mut replica, &s.logs);
+    let (anomalies, count) = book.take_anomalies();
+    assert_eq!(count, 0, "{anomalies:?}");
+    assert!(!book.holds(&PositionId::Nft(9)));
+    assert!(!book.holds(&PositionId::Pool(key(MANAGER, -60, 60))));
+    let (_, finished) = book.take_changes();
+    let nine = finished
+        .iter()
+        .find(|v| v.id == PositionId::Nft(9))
+        .unwrap();
+    assert_eq!(nine.ledger.collected, owed);
+    assert!(nine.ledger.is_empty());
+}
+
+#[test]
 fn positions_from_before_the_history_are_read_from_the_chain_once() {
     let mut s = Script::new();
     let lp = owner(0xA1);
