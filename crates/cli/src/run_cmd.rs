@@ -121,7 +121,7 @@ pub fn follow_spans(strategy: &StrategyConfig, pool: Address) -> Result<Option<V
         return Ok(None);
     };
     let owner = text(&strategy.extra, &["follow", "owner"])
-        .map(|o| checked_address("strategy.follow.owner", &o))
+        .map(|o| owner_address(&o))
         .transpose()?;
     let content = std::fs::read_to_string(&file).with_context(|| {
         format!("reading strategy.follow.file {file}; write it with `lpbot lp-positions`")
@@ -136,6 +136,18 @@ pub fn follow_spans(strategy: &StrategyConfig, pool: Address) -> Result<Option<V
         );
     }
     Ok(Some(spans))
+}
+
+/// A followed owner's address: all lowercase, as `lpbot lp-positions`
+/// writes it, or checksummed. A mixed case that fails its checksum is a
+/// typo and refused.
+pub fn owner_address(text: &str) -> Result<Address> {
+    if text == text.to_lowercase() {
+        text.parse()
+            .map_err(|e| anyhow!("strategy.follow.owner `{text}` is not an address: {e}"))
+    } else {
+        checked_address("strategy.follow.owner", text)
+    }
 }
 
 /// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.
@@ -1723,6 +1735,18 @@ pub(crate) mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_followed_owner_may_be_lowercase_or_checksummed() {
+        let lower = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+        let checksummed = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640";
+        assert_eq!(
+            owner_address(lower).unwrap(),
+            owner_address(checksummed).unwrap()
+        );
+        assert!(owner_address("0x88E6a0c2ddd26feeb64f039a2c41296fcb3f5640").is_err());
+        assert!(owner_address("0x88e6").is_err());
     }
 
     #[test]
