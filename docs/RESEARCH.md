@@ -2,6 +2,63 @@
 
 What backtests on real history have shown, newest first. Each entry names the experiment files, so every figure can be rerun: `cargo run --release -p lpbot -- run <file>`, then `lpbot load-results` to see the runs in Grafana. All results here are in-sample unless an entry says otherwise.
 
+## 20 November 2026: eighteen months, 520 runs, every way in and out
+
+**Data.** The store now starts on 31 January 2025: a year more of the 24 pools, and every pool replays to its state on the chain. The runs trade May 2025 to October 2026 (zones look back up to 90 days before that). ETH went from about $1,800 at the start to a monthly average of $4,342 in September 2025, down to $1,695 in June 2026 and back to $2,252: holding ETH made +25.9% in dollars over the window, +66.1% to the end of December 2025 and −24.2% after. Holding half ETH and half dollars made +12.9%.
+
+**Settings.** As in the first round: all capital in each campaign, a 50% loss limit so every run sees the window (a run that hits it shows −50% in its value token; with ETH as the value token that is −37.2% in dollars), gas at 1 gwei, the plain `wait` rule. Around the price and one-sided ran on four pools (USDC/WETH and WETH/USDT, 0.05% and 0.3%); the other families on USDC/WETH 0.05% and WETH/USDT 0.3%. Each family is one experiment file per pair: `around-*`, `one-sided-*`, `horizons-*`, `stops-*`, `return-exit-*`, `spikes-*`, `vol-width-*`.
+
+| Family | Value token | Runs | Average, USD | Median, USD | Best | At the loss limit |
+| --- | --- | --- | --- | --- | --- | --- |
+| After a fast move (`spikes`) | ETH | 48 | +14.7% | +20.5% | +33.0% | 0 |
+| One-sided, plain | ETH | 16 | +8.1% | +26.0% | +73.7% | 7 |
+| Leave on the return (`return-exit`) | ETH | 32 | −24.1% | −37.2% | +73.7% | 27 |
+| Holding horizons | ETH | 40 | −25.5% | −37.1% | +73.7% | 31 |
+| Width from volatility | ETH | 16 | −27.4% | −37.2% | +60.2% | 14 |
+| Stops | ETH | 72 | −29.9% | −37.2% | +73.7% | 52 |
+| Around the price | ETH | 36 | −34.4% | −37.2% | −7.4% | 31 |
+| After a fast move | dollars | 48 | −13.9% | −7.9% | +9.6% | 5 |
+| Leave on the return | dollars | 32 | −17.5% | −17.1% | +2.7% | 3 |
+| Width from volatility | dollars | 16 | −22.0% | −19.5% | −2.3% | 4 |
+| One-sided, plain | dollars | 16 | −25.3% | −21.6% | +14.0% | 5 |
+| Around the price | dollars | 36 | −32.1% | −30.5% | −4.8% | 13 |
+| Holding horizons | dollars | 40 | −38.0% | −50.0% | −4.8% | 25 |
+| Stops | dollars | 72 | −39.3% | −50.0% | +1.3% | 48 |
+
+Every family's best ETH run is the same one: plain one-sided, 600 ticks wide, on WETH/USDT 0.3% (the families include the plain rule as their baseline).
+
+### 1. Around the price: the loss of price leaving the range, realized
+
+A range around the price earns from the first block and lost in every configuration: −34% and −32% on average in dollars. Moving it back around the price as soon as price leaves (`exit.recenter_after: 0`) makes the loss of the move permanent each time: a ±3% range on USDC/WETH 0.05% moved 132 times in six months of 2026, earned fees of 67% of its capital, and lost 31% in ETH. A day's grace changed nothing; never moving was the least bad for dollar runs (−16% against −40%). The fees a range earns per unit of capital and what each move locks in both grow as the range narrows, so width alone does not fix it: what decides it is the pool's fees against its volatility, and on these pools in this window volatility won.
+
+### 2. Cutting losses only works with a selective entry
+
+Every stop did worse than no stop: −30% to −48% in dollars against −12% to −13% without, with 170 to 490 campaigns instead of 4 to 43. Closing a campaign at a 1% or 3% loss and entering again at the next look puts the bot straight back into the same conditions, and it takes the same loss again. Shorter horizons were worse in steps (an hour: every run at the loss limit; then six hours, a day, a week; never closing was best), and leaving on the return after a 2% excursion was worse than after 10%, which was no different from waiting.
+
+### 3. After a fast move: the one family that held up
+
+Entering only after ETH moved 3% or 6% within four hours, in a range a day's volatility wide, leaving after six hours or a day or at a 2% loss, was the only family near or above its benchmark, with no run at the loss limit with ETH as the value token. The direction matters, and it is the one the owner suggested: provide liquidity on the side that bets on the move stalling.
+
+| Setting (one-sided, leave after a day or at −2%) | Pool | In the value token | Worst drawdown | Campaigns | First half | Second half |
+| --- | --- | --- | --- | --- | --- | --- |
+| Dollars, after ETH fell 3% in four hours (buys the dip) | USDC/WETH 0.05% | +9.6% | 5% | 54 | +7.8% | +1.6% |
+| Dollars, same | WETH/USDT 0.3% | +1.3% | 5% | 48 | +4.8% | −3.3% |
+| ETH, after ETH rose 3% in four hours (sells the rip) | USDC/WETH 0.05% | +5.9% | 3% | 46 | +11.4% vs ETH | −0.7% vs ETH |
+| ETH, same | WETH/USDT 0.3% | +2.6% | 5% | 40 | +7.9% vs ETH | −1.5% vs ETH |
+
+(For ETH runs the halves are the run's dollar result less what holding ETH did.) Around the price after the same moves lost, as it did everywhere. Directions that bet on the move continuing (dollars after a rise, ETH after a fall) lost. These were chosen in sample among 96 settings; each trades a few dozen times in eighteen months, so a few campaigns more or less move the figures.
+
+### 4. The rest
+
+- One-sided wide ranges with ETH as the value token earned in ETH (600 ticks: +23% on average, +38% on WETH/USDT 0.3%), with drawdowns above 50%: they sold ETH on the way up in the summer of 2025 and held dollars through the fall. That is the trend bet of the first round, made with good timing.
+- Ranges sized from the day's volatility did no better than fixed widths.
+- How settings ranked in the first half said little about the second: within a family and value token the correlation between the halves ran from −0.7 to 0.96, positive in nine of the fourteen groups and negative for around the price, stops and dollar horizons. Almost every run lost in the second half, when ETH fell 24%.
+
+### What follows
+
+- Score the fast-move entries walk-forward (choose on one stretch, score the next) and on the other pools, with the bot's own latency, before trusting them.
+- Gas is still at 1 gwei; the stop-heavy families would look worse at real gas prices.
+
 ## 19 November 2026: the first backtests on real history
 
 **Data.** The 24 pools of the universe, 31 January to 18 November 2026, from the owner's archive node (13.9 million logs; every pool replays to its state on the chain). Most runs trade May to October 2026. ETH went from $2,258 down to $1,622 at the end of June (with a wick to about $1,520 on 6 June), up to $2,784 in mid-September and back to $2,254 at the end of October: flat over the window, with a 28% fall and a 72% rise inside it.
