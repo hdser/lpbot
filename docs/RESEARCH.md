@@ -2,6 +2,42 @@
 
 What backtests on real history have shown, newest first. Each entry names the experiment files, so every figure can be rerun: `cargo run --release -p lpbot -- run <file>`, then `lpbot load-results` to see the runs in Grafana. All results here are in-sample unless an entry says otherwise.
 
+## 20 November 2026, last: selective entries the way a person trades them, scored out of sample
+
+**The question.** Trading by hand, in for hours or days, out with the value token back plus fees, makes money; can a rule do the same? Round 3 showed the entry decides it. This round builds the rule that way: one-sided in the value token, entered only after ETH moved, on the side that bets on the move stalling (dollars after a fall, ETH after a rise), looked for every five minutes, out after a time limit, at a stop, or (`exit.after_round_trips: 1`, new) as soon as a round trip brings it back wholly into the value token with its fees. Gas at each block's price. Every result is in the value token, against holding it; over May 2025 to October 2026 holding ETH made +25.6% in dollars and half and half +12.8%, and from February 2026 on ETH fell 24%.
+
+**The selective grid** (`selective-*`, 2,304 runs on USDC/WETH and WETH/USDT, 0.05% and 0.3%): moves of 2%, 3% or 5% within one, four or twelve hours; ranges 120 or 600 ticks wide; one or three days; the round-trip exit or not; a 2% or 5% stop; a day's wait after each campaign or none. 339 of the 2,304 runs ended with more of their value token, 13.7% less on average; the best made +26.7% in dollars (WETH/USDT 0.05%). With dollars as the value token 288 of 1,152 ended ahead, with ETH 51. A 600-tick range averaged −6.2%, a 120-tick one −21.1%.
+
+What it showed besides:
+
+- **Re-entering the same move.** Looking every five minutes, the move signal stays true for hours after it fires, and without a wait the run went back into the same falling market after each exit and took the same stop again. `entry.cooldown` (new) holds it out for a while after a campaign: a day's wait raised the average by six points (−10.5% against −16.8%).
+- **Following the price.** 57% to 65% of all campaigns ended by being moved: a resting range that price had left was withdrawn and entered again nearer the price, each time paying gas and entering closer to a move still under way. `entry.reposition: false` (new) leaves a range where it was placed until its time limit, stop or round trip, as an order that does not fill would be left.
+
+**The anchored grid** (`anchored-*`, 576 runs): the settings the 0.3% pools favoured (moves of 3% or 5%, a day's wait, a 5% stop) with ranges left in place, 300 or 600 ticks wide, one, three or seven days.
+
+| Dollars after ETH fell, 600 ticks | First nine months | Last nine months | Whole window | Runs ending with more dollars |
+| --- | --- | --- | --- | --- |
+| WETH/USDT 0.3% | +2.6% | +3.4% | +6.1% | 27 of 36 in the last nine months |
+| WETH/USDT 0.05% | +0.5% | +4.4% | +4.9% | 34 of 36 |
+| USDC/WETH 0.3% | +3.9% | −0.4% | +3.4% | 17 of 36 |
+| USDC/WETH 0.05% | −6.0% | −0.3% | −6.3% | 11 of 36 |
+
+(The averages of 36 runs each: three windows, two move sizes, three time limits, with and without the round-trip exit.) The worst drawdown was about 5%. ETH after a rise lost on every pool, −1% to −16% on average at 600 ticks, and on the WETH/USDT pools every one of its runs lost in the last nine months.
+
+**Out of sample.** Three ways of choosing in advance, none of which made money:
+
+- Month by month, the setting that did best over the three months before, or six, or everything since May 2025: on the selective grid's 0.3% pools it lost 11% to 41% in dollars (in ETH, from +3% to −35%); on round 2's fast-move family −1% to −29%, where the setting chosen with hindsight had made +8.0%.
+- The first nine months to choose, the last nine to score: the best settings of the first half made 0% to −16% in the second.
+- The dollar family's best value of each setting on the first half, pooled over the pools (a day, a 5% move within four hours, the round-trip exit, 600 ticks): −0.6%, −0.6%, +1.8% and −0.5% in the last nine months, below the family's own average there.
+
+So: a family that waits for ETH to fall 3% to 5%, provides dollars in a wide range below the price for a day or so, and does it once per move, earned a few percent over holding dollars on three of four pools, at small drawdowns; no way of picking its settings in advance turned that into a reliable result, and the version that does the same with ETH does not work at all. That is weaker than what trading by hand is said to make. What a person does that these rules do not: chooses the level, not the nearest range; chooses when not to trade at all, beyond a move signal; and decides when to give up on a position that has not come back. The way to find out which of those matters is to replay a person's own positions (`lpbot lp-positions --account`), priced at the block, against holding.
+
+### What follows
+
+- Replay the owner's own positions, when available, and turn what they do into rules.
+- Levels instead of the nearest range: enter at a level price has turned at before (the zone map has the passes), after the move.
+- A larger window: eighteen months with one rise and one fall is little to choose settings on.
+
 ## 20 November 2026, later: gas block by block, intraday positions, and copying real providers
 
 **How results are counted.** A run starts in its value token and is turned back into it at the end. Its result is the value token it ends with against what it started with: against simply holding that token outside the pool, after fees, gas, swaps and price moving through its ranges. A run that reaches the 50% loss limit stops and holds the value token to the end of the window. The same capital is also valued in dollars, which can be set against holding ETH or half ETH and half dollars over the same window: May 2025 to October 2026 holding ETH made +25.6% and half and half +12.8%; December 2025 to October 2026, −24.6% and −12.3%. A dollar run that lost 6.7% in those last months lost to holding dollars but did better than holding ETH or the mix, only because it held dollars while ETH fell.
