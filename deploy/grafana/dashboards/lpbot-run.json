@@ -641,7 +641,7 @@
     },
     {
       "id": 109,
-      "title": "Gas, in the value token",
+      "title": "Gas, in the value token, and the average price paid",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -663,7 +663,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select r.gas as value from runs r where r.run_id = '$run'"
+          "rawSql": "select r.gas as \"Gas paid\", r.gas_gwei as \"Average gwei\" from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -682,7 +682,24 @@
             "mode": "thresholds"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Average gwei"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -692,7 +709,7 @@
           ],
           "fields": ""
         },
-        "textMode": "value",
+        "textMode": "value_and_name",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
@@ -934,7 +951,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select 100.0 * count(*) filter (where state in ('in_range')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(100.0 * r.seconds_in_range / nullif(r.seconds_in_range + r.seconds_out_of_range + r.seconds_flat, 0), (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -999,7 +1016,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(100.0 * (select coalesce(sum(c.seconds_beyond), 0) from campaigns c where c.run_id = r.run_id) / nullif(r.seconds_in_range + r.seconds_out_of_range + r.seconds_flat, 0), (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -1064,7 +1081,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select 100.0 * count(*) filter (where state in ('resting')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(100.0 * (r.seconds_out_of_range - (select coalesce(sum(c.seconds_beyond), 0) from campaigns c where c.run_id = r.run_id)) / nullif(r.seconds_in_range + r.seconds_out_of_range + r.seconds_flat, 0), (select 100.0 * count(*) filter (where state = 'resting') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -1129,7 +1146,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select 100.0 * count(*) filter (where state in ('flat')) / nullif(count(*), 0) as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(100.0 * r.seconds_flat / nullif(r.seconds_in_range + r.seconds_out_of_range + r.seconds_flat, 0), (select 100.0 * count(*) filter (where state = 'flat') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -1194,7 +1211,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*) filter (where state <> 'flat'), 0) as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(100.0 * r.seconds_in_range / nullif(r.seconds_in_range + r.seconds_out_of_range, 0), (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*) filter (where state <> 'flat'), 0) from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -1259,7 +1276,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select count(*) filter (where state = 'in_range') / 24.0 as value from series where run_id = '$run'"
+          "rawSql": "select coalesce(r.seconds_in_range / 86400.0, (select count(*) filter (where state = 'in_range') / 24.0 from series s where s.run_id = r.run_id)) as value from runs r where r.run_id = '$run'"
         }
       ],
       "fieldConfig": {
@@ -2074,7 +2091,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  round(((c.closed_time - c.opened_time) / 3600.0)::numeric, 1) as hours,\n  (select count(*) from series s where s.run_id = c.run_id and s.time between c.opened_time and c.closed_time and s.state = 'in_range') as hours_in_range,\n  round((c.seconds_beyond / 3600.0)::numeric, 1) as hours_out_of_range,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  coalesce(c.shape, 'one_sided') as shape, c.exit_reason, c.passes, c.flips, coalesce(c.recentres, 0) as moves, c.amount_in, c.result, round((c.result / nullif(c.amount_in, 0) * 100)::numeric, 3) as result_pct,\n  c.fees, c.gas\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
+          "rawSql": "select c.campaign, to_timestamp(c.opened_time) as opened, to_timestamp(c.closed_time) as closed,\n  round(((c.closed_time - c.opened_time) / 3600.0)::numeric, 1) as hours,\n  coalesce(round((c.seconds_in_range / 3600.0)::numeric, 2), (select count(*) from series s where s.run_id = c.run_id and s.time between c.opened_time and c.closed_time and s.state = 'in_range')) as hours_in_range,\n  round((c.seconds_beyond / 3600.0)::numeric, 1) as hours_out_of_range,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_low,\n  (select round((case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end)::numeric, 2)\n     from series s where s.run_id = c.run_id and s.time >= c.opened_time and s.price_lower is not null\n     order by s.time limit 1) as dollars_high,\n  coalesce(c.shape, 'one_sided') as shape, c.exit_reason, c.passes, c.flips, coalesce(c.recentres, 0) as moves, c.amount_in, c.result, round((c.result / nullif(c.amount_in, 0) * 100)::numeric, 3) as result_pct,\n  c.fees, c.gas\nfrom campaigns c join runs r using (run_id)\nwhere c.run_id = '$run'\norder by c.campaign"
         }
       ],
       "fieldConfig": {

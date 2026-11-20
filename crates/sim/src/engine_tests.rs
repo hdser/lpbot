@@ -1,6 +1,10 @@
 use alloy_primitives::{I256, U256};
+use std::sync::Arc;
+
+use lpbot_data::gas::BlockFees;
 use lpbot_data::lake::TimedEvent;
 use lpbot_data::synth::{generate, SynthConfig};
+use lpbot_data::zone_map::DAY;
 use lpbot_risk::LossLimit;
 use lpbot_strategy::FixedRule;
 use lpbot_venues::uniswap_v3::events::PoolEvent;
@@ -10,7 +14,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
-    FollowSpan, GasModel, MoveDirection, Output, Policy, Settings, Shape, Token,
+    FollowSpan, GasModel, MoveDirection, Output, Policy, Settings, Shape, SimError, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -112,7 +116,9 @@ fn settings(rule: FixedRule) -> Settings {
         decide_every: HOUR,
         check_every: HOUR,
         latency_blocks: 1,
-        lookbacks_days: vec![7, 30],
+        lookbacks: vec![7 * DAY, 30 * DAY],
+        signal_step: 600,
+        vol_window: DAY,
         move_margin: 1.5,
         min_passes_per_day: 0.0,
         max_vol_to_width: None,
@@ -132,6 +138,7 @@ fn settings(rule: FixedRule) -> Settings {
         follow: None,
         follow_join_within: HOUR,
         gas: GasModel::free(),
+        block_fees: None,
         series_every: HOUR,
         trade_from: T0,
         trade_to: T0 + 1_000 * HOUR,
@@ -153,6 +160,69 @@ fn assert_conserved(out: &Output) {
         (from_campaigns - total).abs() < 1e-12,
         "campaigns {from_campaigns} vs run {total}"
     );
+}
+
+#[test]
+fn time_in_range_is_counted_block_by_block() {
+    // Into the range (-20, 0) for three hours, then back just above it,
+    // where the position rests until the window ends.
+    let (snapshot, events) = history(&[5, 6, -5, -6, -7, 3, 4, 5]);
+    let out = run(snapshot, &events, &settings(FixedRule::Wait)).unwrap();
+    assert_eq!(out.campaigns.len(), 1);
+    let c = &out.campaigns[0];
+    assert_eq!((c.tick_lower, c.tick_upper), (-20, 0));
+    assert_eq!(c.opened_time, T0 + 2 * HOUR);
+    assert_eq!(c.exit_reason, "window_end");
+    assert_eq!(c.seconds_in_range, 3 * HOUR);
+    let s = &out.summary;
+    assert_eq!(s.seconds_in_range, 3 * HOUR);
+    assert_eq!(s.seconds_out_of_range, 3 * HOUR, "open six hours in all");
+    assert_eq!(s.seconds_flat, 2 * HOUR, "before the entry");
+}
+
+#[test]
+fn zone_lookbacks_may_be_shorter_than_a_day() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let out = run(
+        snapshot.clone(),
+        &events,
+        &Settings {
+            lookbacks: vec![HOUR, 6 * HOUR],
+            ..settings(FixedRule::Wait)
+        },
+    )
+    .unwrap();
+    let mut lookbacks: Vec<f64> = out.zones.iter().map(|z| z.lookback_days).collect();
+    lookbacks.dedup();
+    assert!(lookbacks.contains(&(1.0 / 24.0)), "{lookbacks:?}");
+    assert!(lookbacks.contains(&0.25), "{lookbacks:?}");
+    // A range and lookback is recorded at most once an hour.
+    let mut seen = std::collections::HashSet::new();
+    for z in &out.zones {
+        let key = (
+            z.tick_lower,
+            z.tick_upper,
+            z.lookback_days.to_bits(),
+            z.time / HOUR,
+        );
+        assert!(seen.insert(key), "{z:?} twice in one hour");
+    }
+    for bad in [
+        Settings {
+            lookbacks: vec![HOUR, 0],
+            ..settings(FixedRule::Wait)
+        },
+        Settings {
+            signal_step: 0,
+            ..settings(FixedRule::Wait)
+        },
+        Settings {
+            vol_window: 0,
+            ..settings(FixedRule::Wait)
+        },
+    ] {
+        assert!(run(snapshot.clone(), &events, &bad).is_err());
+    }
 }
 
 #[test]
@@ -304,6 +374,8 @@ fn gas_is_charged_per_action_in_the_value_token() {
             gas_price_gwei: 10.0,
             // The value token is worth one ETH here.
             value_raw_per_eth: 1e18,
+            tip_gwei: None,
+            weth: None,
         },
         ..settings(FixedRule::Wait)
     };
@@ -314,6 +386,129 @@ fn gas_is_charged_per_action_in_the_value_token() {
     // The gas set aside at entry is not deployed, so the fees are a touch lower too.
     assert!((free.campaigns[0].result - out.campaigns[0].result - gas).abs() < 1e-5);
     assert!(out.summary.gas >= gas);
+    assert_conserved(&out);
+}
+
+/// Each block's gas price over `events`: a base fee rising by a gwei a
+/// block from 10 gwei, and a median tip of 1 gwei.
+fn rising_fees(events: &[TimedEvent]) -> Arc<BlockFees> {
+    let first = events.first().unwrap().block;
+    let n = events.last().unwrap().block - first + 1;
+    Arc::new(
+        BlockFees::new(
+            first,
+            (0..n).map(|i| (10 + i) * 1_000_000_000).collect(),
+            vec![1_000_000_000; n as usize],
+        )
+        .unwrap(),
+    )
+}
+
+fn gas_units() -> GasModel {
+    GasModel {
+        open_units: 500_000,
+        close_units: 300_000,
+        swap_units: 200_000,
+        // Not used once the blocks' prices are given.
+        gas_price_gwei: 1_000.0,
+        value_raw_per_eth: 1e18,
+        tip_gwei: None,
+        weth: None,
+    }
+}
+
+#[test]
+fn each_action_pays_the_gas_price_of_its_block() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let fees = rising_fees(&events);
+    let at = |block: u64, tip: Option<u64>| {
+        let (base, median) = fees.at(block).unwrap();
+        (base + tip.unwrap_or(median)) as f64 / 1e18
+    };
+    let out = run(
+        snapshot.clone(),
+        &events,
+        &Settings {
+            gas: gas_units(),
+            block_fees: Some(fees.clone()),
+            ..settings(FixedRule::Wait)
+        },
+    )
+    .unwrap();
+    // Opened in one block; closed, and the fee in the other token swapped,
+    // in another.
+    let c = &out.campaigns[0];
+    assert!(c.closed_block > c.opened_block);
+    let expected = 500_000.0 * at(c.opened_block, None) + 500_000.0 * at(c.closed_block, None);
+    assert!((c.gas - expected).abs() < 1e-12, "{} vs {expected}", c.gas);
+    assert!(out.summary.gas_gwei > 11.0, "{}", out.summary.gas_gwei);
+    assert_conserved(&out);
+
+    // A priority fee of its own replaces the block's median.
+    let tipped = run(
+        snapshot,
+        &events,
+        &Settings {
+            gas: GasModel {
+                tip_gwei: Some(0.0),
+                ..gas_units()
+            },
+            block_fees: Some(fees.clone()),
+            ..settings(FixedRule::Wait)
+        },
+    )
+    .unwrap();
+    let c = &tipped.campaigns[0];
+    let expected =
+        500_000.0 * at(c.opened_block, Some(0)) + 500_000.0 * at(c.closed_block, Some(0));
+    assert!((c.gas - expected).abs() < 1e-12, "{} vs {expected}", c.gas);
+}
+
+#[test]
+fn a_run_needs_the_gas_prices_of_every_block_it_trades() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let all = rising_fees(&events);
+    let late = Arc::new(all.range(all.first() + 1, all.end()));
+    let refused = run(
+        snapshot,
+        &events,
+        &Settings {
+            gas: gas_units(),
+            block_fees: Some(late),
+            ..settings(FixedRule::Wait)
+        },
+    );
+    match refused {
+        Err(SimError::Settings(message)) => {
+            assert!(message.contains("lpbot gas-history"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn gas_in_a_pool_with_weth_is_priced_at_the_pool_price() {
+    // The same path where one token0, the WETH here, is worth half a
+    // token1: the gas in the value token costs half as much.
+    let half = -6_931;
+    let path: Vec<i32> = THERE_AND_BACK.iter().map(|t| t + half).collect();
+    let (snapshot, events) = history(&path);
+    let model = GasModel {
+        gas_price_gwei: 10.0,
+        weth: Some(Token::Zero),
+        ..gas_units()
+    };
+    let out = run(
+        snapshot,
+        &events,
+        &Settings {
+            gas: model,
+            ..settings(FixedRule::Wait)
+        },
+    )
+    .unwrap();
+    let gas = out.campaigns[0].gas;
+    assert!((gas - 0.005).abs() < 0.000_05, "{gas}");
     assert_conserved(&out);
 }
 
@@ -401,7 +596,7 @@ fn a_simulated_month_runs_under_every_rule_and_adds_up() {
         // The first two days only build the zone history.
         trade_from: config.start.start() + 2 * 86_400,
         trade_to: config.start.start() + 6 * 86_400,
-        lookbacks_days: vec![1, 2],
+        lookbacks: vec![DAY, 2 * DAY],
         ..settings(FixedRule::Wait)
     };
     for rule in [FixedRule::Wait, FixedRule::Flip, FixedRule::Close] {
@@ -453,7 +648,7 @@ fn adaptive(params: AdaptiveParams) -> Settings {
         policy: Policy::Adaptive(params),
         // The swings are history only; trading starts after them.
         trade_from: T0 + 48 * HOUR + 1,
-        lookbacks_days: vec![1, 2],
+        lookbacks: vec![DAY, 2 * DAY],
         ..settings(FixedRule::Wait)
     }
 }
@@ -612,6 +807,8 @@ fn priced() -> GasModel {
         swap_units: 200_000,
         gas_price_gwei: 10.0,
         value_raw_per_eth: 1e18,
+        tip_gwei: None,
+        weth: None,
     }
 }
 
@@ -880,6 +1077,8 @@ fn gas_is_charged_in_exact_integers() {
             swap_units: 0,
             gas_price_gwei: 2.3,
             value_raw_per_eth: 1e18,
+            tip_gwei: None,
+            weth: None,
         },
         ..settings(FixedRule::Wait)
     };
@@ -1029,6 +1228,8 @@ fn what_a_flips_range_cannot_take_goes_back_with_a_charged_swap() {
             swap_units: 7,
             gas_price_gwei: 1.0,
             value_raw_per_eth: 1e9,
+            tip_gwei: None,
+            weth: None,
         },
         ..settings(FixedRule::Flip)
     };
@@ -1194,7 +1395,7 @@ fn a_resting_position_steps_aside_when_the_day_turns_wild() {
     let calm = Settings {
         // Moving away is not what this is about.
         max_gap: 100_000,
-        lookbacks_days: vec![1, 2],
+        lookbacks: vec![DAY, 2 * DAY],
         trade_from: T0 + 25 * HOUR,
         ..settings(FixedRule::Wait)
     };
@@ -1576,7 +1777,7 @@ fn ranges_can_be_sized_by_the_days_volatility() {
     let targets: Vec<i32> = (0..40).map(|i| if i % 2 == 0 { 5 } else { -25 }).collect();
     let (snapshot, events) = history(&targets);
     let base = Settings {
-        lookbacks_days: vec![1, 2],
+        lookbacks: vec![DAY, 2 * DAY],
         trade_from: T0 + 25 * HOUR,
         max_gap: 100_000,
         ..around(FixedRule::Wait)

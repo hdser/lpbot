@@ -13,6 +13,7 @@ mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
 mod fees_cmd;
+mod gas_history_cmd;
 mod gates_cmd;
 mod load_cmd;
 mod lp_positions_cmd;
@@ -79,6 +80,10 @@ enum Command {
     /// node's position manager records, one row per stretch with liquidity
     /// in place: what a backtest can follow (`strategy.follow`).
     LpPositions(LpPositionsCli),
+    /// Store each block's base fee and median priority fee from the node's
+    /// fee history, so backtests charge gas at the price of the block an
+    /// action lands in.
+    GasHistory(GasHistoryArgs),
 }
 
 #[derive(Args)]
@@ -283,6 +288,21 @@ struct LpPositionsCli {
     /// Blocks per log request; the node refuses more than 100,000.
     #[arg(long, default_value_t = 100_000)]
     log_chunk: u64,
+}
+
+#[derive(Args)]
+struct GasHistoryArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to store, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Requests sent at the same time.
+    #[arg(long, default_value_t = 2)]
+    threads: usize,
 }
 
 #[derive(Args)]
@@ -627,6 +647,50 @@ fn real_main() -> Result<()> {
                 },
             )?;
             println!("{written} stretch(es) written to {}", args.out.display());
+            Ok(())
+        }
+        Command::GasHistory(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let client = &chain.client;
+            let source = lpbot_data::backfill::NodeSource {
+                client,
+                head_margin: 0,
+                log_chunk: 2_000,
+            };
+            // Up to the newest block no reorg can change.
+            let to = match client.finalized_block()? {
+                Some((block, _)) => block,
+                None => client.block_number()?.saturating_sub(64),
+            };
+            let first =
+                lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            println!(
+                "  gas prices of blocks {first} to {to} into {}",
+                root.display()
+            );
+            let done =
+                gas_history_cmd::run(client, &root, &args.chain.chain, first, to, args.threads)?;
+            let stored =
+                lpbot_data::gas::GasStore::new(&root).read(&args.chain.chain, first, to)?;
+            let average = stored
+                .as_ref()
+                .and_then(|fees| fees.summary())
+                .map_or(String::new(), |(_, wei)| {
+                    format!(", {:.3} gwei a block on average", wei / 1e9)
+                });
+            println!(
+                "{} chunk(s) read from the node, {} already stored{average}",
+                done.chunks, done.kept
+            );
             Ok(())
         }
         Command::PoolStats(args) => {

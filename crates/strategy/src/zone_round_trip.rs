@@ -13,8 +13,9 @@ pub struct ZoneScore {
     pub passes_per_day_long: f64,
     /// Full passes per day on the shortest lookback.
     pub passes_per_day_short: f64,
-    /// Days of history behind the long figure.
-    pub observed_days: f64,
+    /// Whether the long figure stands on enough history to rank on: a day
+    /// of it, or the whole lookback when that is shorter.
+    pub enough_history: bool,
 }
 
 fn round_down(tick: Tick, step: Tick) -> Tick {
@@ -101,8 +102,8 @@ pub fn around_price(tick: Tick, spacing: Tick, width: Tick) -> Option<(Tick, Tic
 
 /// Picks the range to enter from candidates listed nearest first.
 ///
-/// Without a day of history there is nothing to rank on, and the nearest
-/// range is taken. With history, a range must have been crossed on the
+/// Without enough history (`ZoneScore::enough_history`) there is nothing
+/// to rank on, and the nearest range is taken. With history, a range must have been crossed on the
 /// short lookback to qualify, and at least `min_passes_per_day` times a day
 /// on the long one: a range that only a sudden move crossed, where price
 /// has not been trading, is not a zone. Of those, the one crossed most on
@@ -117,7 +118,7 @@ pub fn choose_zone(
         .iter()
         .map(|&(lower, upper)| ((lower, upper), score(lower, upper)))
         .collect();
-    if scored.iter().all(|(_, s)| s.observed_days < 1.0) {
+    if scored.iter().all(|(_, s)| !s.enough_history) {
         return candidates.first().copied();
     }
     let mut best: Option<((Tick, Tick), f64)> = None;
@@ -140,7 +141,7 @@ mod tests {
         ZoneScore {
             passes_per_day_long: long,
             passes_per_day_short: short,
-            observed_days: days,
+            enough_history: days >= 1.0,
         }
     }
 

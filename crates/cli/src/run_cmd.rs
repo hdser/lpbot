@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,12 +12,14 @@ use lpbot_core::config::{Mode, StrategyConfig};
 use lpbot_core::experiment::ResolvedRun;
 use lpbot_core::{Config, Tick};
 use lpbot_data::day::Day;
+use lpbot_data::gas::{BlockFees, GasStore};
 use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
 use lpbot_sim::engine::{
     self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Settings, Shape, Token,
+    DEFAULT_SIGNAL_STEP,
 };
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
@@ -127,7 +130,8 @@ pub fn follow_spans(strategy: &StrategyConfig, pool: Address) -> Result<Option<V
         .with_context(|| format!("strategy.follow.file {file}"))?;
     if spans.is_empty() {
         bail!(
-            "strategy.follow.file {file} has no positions{} on the run's pool {pool:#x}; pick              the pool the provider trades, or another provider",
+            "strategy.follow.file {file} has no positions{} on the run's pool {pool:#x}; pick \
+             the pool the provider trades, or another provider",
             owner.map(|o| format!(" of {o:#x}")).unwrap_or_default()
         );
     }
@@ -209,22 +213,105 @@ pub fn width_ticks(strategy: &StrategyConfig) -> Result<Tick> {
         .ok_or_else(|| anyhow!("entry.width_ticks must be greater than zero"))
 }
 
-/// The zone lookbacks of a strategy, in days.
-pub fn lookbacks(strategy: &StrategyConfig) -> Result<Vec<u32>> {
+/// The zone lookbacks of a strategy, in seconds.
+pub fn lookbacks(strategy: &StrategyConfig) -> Result<Vec<u64>> {
     let Some(list) = lookup(&strategy.extra, &["zone", "lookbacks"]) else {
-        return Ok(vec![7, 30, 90]);
+        return Ok(vec![7 * DAY, 30 * DAY, 90 * DAY]);
     };
-    let days: Option<Vec<u32>> = list.as_sequence().and_then(|items| {
+    let seconds: Option<Vec<u64>> = list.as_sequence().and_then(|items| {
         items
             .iter()
-            .map(|item| {
-                let seconds = parse_duration(item.as_str()?)?;
-                (seconds >= DAY && seconds % DAY == 0).then_some((seconds / DAY) as u32)
-            })
+            .map(|item| parse_duration(item.as_str()?).filter(|s| *s > 0))
             .collect()
     });
-    days.filter(|d| !d.is_empty())
-        .ok_or_else(|| anyhow!("zone.lookbacks must be a list of whole days, such as [7d, 30d]"))
+    seconds
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| anyhow!("zone.lookbacks must be a list of durations, such as [6h, 7d, 30d]"))
+}
+
+/// Whether a run charges each block's own gas price (`costs.gas: chain`,
+/// the default) or `costs.gas_price_gwei` on every block (`fixed`).
+pub fn gas_from_chain(config: &Config) -> Result<bool> {
+    match text(&config.extra, &["costs", "gas"]).as_deref() {
+        None | Some("chain") => Ok(true),
+        Some("fixed") => Ok(false),
+        Some(other) => bail!(
+            "costs.gas is `{other}`; set it to `chain` (each block's price, stored by `lpbot \
+             gas-history`) or `fixed` (costs.gas_price_gwei on every block)"
+        ),
+    }
+}
+
+/// The priority fee a run pays on top of a block's base fee
+/// (`costs.priority_fee_gwei`); `None`, or `median`, pays the median tip of
+/// the last `TIP_BLOCKS` blocks, as a wallet sets it.
+pub fn priority_fee(config: &Config) -> Result<Option<f64>> {
+    match lookup(&config.extra, &["costs", "priority_fee_gwei"]) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s == "median" => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|gwei| gwei.is_finite() && *gwei >= 0.0)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow!(
+                    "costs.priority_fee_gwei must be a number of gwei of at least 0, or `median`"
+                )
+            }),
+    }
+}
+
+/// Blocks over which the median priority fee is taken.
+pub const TIP_BLOCKS: usize = 20;
+
+/// Gas prices already read, by the first and last block they cover.
+pub type FeeCache = HashMap<(u64, u64), Arc<BlockFees>>;
+
+/// The gas price of every block a run trades, when it charges each block's
+/// own (`costs.gas: chain`). Refuses with what to run when they are not
+/// stored.
+pub fn block_fees(
+    config: &Config,
+    root: &Path,
+    chain: &str,
+    events: &[TimedEvent],
+    settings: &Settings,
+    from: Day,
+    cache: &mut FeeCache,
+) -> Result<Option<Arc<BlockFees>>> {
+    if !gas_from_chain(config)? {
+        return Ok(None);
+    }
+    let mut traded = events
+        .iter()
+        .filter(|e| e.time >= settings.trade_from && e.time < settings.trade_to);
+    let Some(first) = traded.next().map(|e| e.block) else {
+        return Ok(None);
+    };
+    let last = traded.next_back().map_or(first, |e| e.block);
+    if let Some(fees) = cache.get(&(first, last)) {
+        return Ok(Some(Arc::clone(fees)));
+    }
+    let fees = GasStore::new(root)
+        .read(chain, first, last)?
+        .ok_or_else(|| {
+            anyhow!(
+                "no gas prices are stored for blocks {first} to {last}, which the run trades; \
+                 run `lpbot gas-history --from {from}` to read them from the node, or set \
+                 costs.gas: fixed to charge costs.gas_price_gwei on every block"
+            )
+        })?;
+    // The priority fee a sender would set: the median of recent blocks'.
+    let fees = Arc::new(fees.with_recent_median_tip(TIP_BLOCKS));
+    cache.insert((first, last), Arc::clone(&fees));
+    Ok(Some(fees))
+}
+
+/// Whole days of history a run needs before its window: its longest zone
+/// lookback, rounded up.
+pub fn history_days(strategy: &StrategyConfig) -> Result<u32> {
+    let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+    Ok(longest.div_ceil(DAY) as u32)
 }
 
 /// How a run decides when price has left a position behind: a fixed rule,
@@ -551,6 +638,14 @@ fn settings(
         close_units: units("close", 300_000),
         swap_units: units("swap", 180_000),
         gas_price_gwei: costs("gas_price_gwei").unwrap_or(1.0),
+        tip_gwei: priority_fee(config)?,
+        weth: if symbol0 == "WETH" {
+            Some(Token::Zero)
+        } else if symbol1 == "WETH" {
+            Some(Token::One)
+        } else {
+            None
+        },
         value_raw_per_eth: value_per_eth * unit,
     };
 
@@ -586,7 +681,9 @@ fn settings(
         decide_every: duration(&strategy.patience.extra, &["decide_every"], 3_600)?,
         check_every: duration(&strategy.extra, &["entry", "check_every"], 3_600)?,
         latency_blocks: number(&config.extra, &["sim", "latency_blocks"]).map_or(1, |v| v as u64),
-        lookbacks_days: lookbacks(strategy)?,
+        lookbacks: lookbacks(strategy)?,
+        signal_step: duration(&strategy.extra, &["signal_step"], DEFAULT_SIGNAL_STEP)?,
+        vol_window: duration(&strategy.extra, &["entry", "vol_window"], DAY)?,
         move_margin: number(&strategy.extra, &["entry", "move_margin"]).unwrap_or(1.5),
         min_passes_per_day: number(&strategy.extra, &["entry", "min_passes_per_day"])
             .unwrap_or(0.0),
@@ -609,6 +706,7 @@ fn settings(
         follow: follow_spans(strategy, history.snapshot.pool)?,
         follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
         gas,
+        block_fees: None,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
         trade_to: to.end(),
@@ -636,10 +734,11 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
     // looks; a pool on what `pool_key` holds. Runs share what they agree on.
     let mut histories: HashMap<(Address, Day, Day, u32), Rc<History>> = HashMap::new();
     let mut pools: HashMap<PoolKey, (Address, Vec<PoolRankRow>)> = HashMap::new();
+    let mut fee_cache = FeeCache::new();
     let mut done = 0;
 
     println!(
-        "{:<44} {:<16} {:>8} {:>9} {:>8} {:>10} {:>9} {:>9} {:>6} {:>7} {:>7}",
+        "{:<44} {:<16} {:>8} {:>9} {:>8} {:>10} {:>9} {:>9} {:>6} {:>6} {:>7} {:>7}",
         "run",
         "pool",
         "rule",
@@ -648,6 +747,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         "hold USD %",
         "fees",
         "gas",
+        "gwei",
         "camps",
         "passes",
         "max dd"
@@ -675,7 +775,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         }
         let (pool, rank_rows) = &pools[&key];
 
-        let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let longest = history_days(strategy)?;
         let history_key = (*pool, from, to, longest);
         let history = match histories.get(&history_key) {
             Some(history) => Rc::clone(history),
@@ -686,7 +786,17 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             }
         };
 
-        let (settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+        let (mut settings, pool_name) =
+            settings(run, strategy, policy, &history, &tokens, from, to)?;
+        settings.block_fees = block_fees(
+            config,
+            root,
+            chain,
+            &history.events,
+            &settings,
+            from,
+            &mut fee_cache,
+        )?;
         let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
             .with_context(|| format!("run {} failed", run.run_id))?;
 
@@ -713,6 +823,11 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             } else {
                 settings.shape.name().to_string()
             },
+            gas_prices: if settings.block_fees.is_some() {
+                "chain".to_string()
+            } else {
+                "fixed".to_string()
+            },
             sweep: run
                 .sweep_point
                 .iter()
@@ -725,7 +840,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
 
         let s = &out.summary;
         println!(
-            "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6} {:>7} {:>6.2}%{}",
+            "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6.3} {:>6} {:>7} {:>6.2}%{}",
             run.run_id,
             pool_name,
             info.patience,
@@ -734,6 +849,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             s.hold_value_pct_usd,
             s.fees,
             s.gas,
+            s.gas_gwei,
             s.campaigns,
             s.passes,
             s.max_drawdown_pct,
@@ -910,9 +1026,9 @@ pub fn calibrate(
         }
         let (_, tokens) = chain_addresses(config, chain)?;
         let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
-        let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+        let longest = history_days(strategy)?;
         let history = load_history(root, chain, pool, from, to, longest)?;
-        let (base_settings, pool_name) = settings(
+        let (mut base_settings, pool_name) = settings(
             run,
             strategy,
             Policy::Adaptive(base),
@@ -920,6 +1036,15 @@ pub fn calibrate(
             &tokens,
             from,
             to,
+        )?;
+        base_settings.block_fees = block_fees(
+            config,
+            root,
+            chain,
+            &history.events,
+            &base_settings,
+            from,
+            &mut FeeCache::new(),
         )?;
         let result = |policy: Policy, first: Day, last: Day| -> Result<f64> {
             let settings = Settings {
@@ -1601,11 +1726,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lookbacks_are_whole_days_with_a_default() {
-        assert_eq!(lookbacks(&strategy(BASE)).unwrap(), vec![7, 30, 90]);
-        let two = strategy(&format!("{BASE}zone: {{ lookbacks: [1d, 14d] }}\n"));
-        assert_eq!(lookbacks(&two).unwrap(), vec![1, 14]);
-        for bad in ["[12h]", "[]", "[7]", "weekly"] {
+    fn gas_is_priced_from_the_chain_unless_fixed() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/mainnet.yml");
+        let mut config = crate::chain_cmd::load_base_config(&path).unwrap();
+        assert!(gas_from_chain(&config).unwrap());
+        assert_eq!(priority_fee(&config).unwrap(), None, "the block's median");
+        let costs = |yaml: &str| serde_yaml::from_str::<Value>(yaml).unwrap();
+        config.extra.insert(
+            "costs".into(),
+            costs("{ gas: fixed, priority_fee_gwei: 0.05 }"),
+        );
+        assert!(!gas_from_chain(&config).unwrap());
+        assert_eq!(priority_fee(&config).unwrap(), Some(0.05));
+        config.extra.insert(
+            "costs".into(),
+            costs("{ gas: blocks, priority_fee_gwei: -1 }"),
+        );
+        assert!(gas_from_chain(&config).is_err());
+        assert!(priority_fee(&config).is_err());
+    }
+
+    #[test]
+    fn lookbacks_are_durations_with_a_default() {
+        assert_eq!(
+            lookbacks(&strategy(BASE)).unwrap(),
+            vec![7 * DAY, 30 * DAY, 90 * DAY]
+        );
+        let two = strategy(&format!("{BASE}zone: {{ lookbacks: [6h, 14d] }}\n"));
+        assert_eq!(lookbacks(&two).unwrap(), vec![6 * 3_600, 14 * DAY]);
+        assert_eq!(history_days(&two).unwrap(), 14);
+        let short = strategy(&format!("{BASE}zone: {{ lookbacks: [1h, 30h] }}\n"));
+        assert_eq!(history_days(&short).unwrap(), 2, "rounded up to whole days");
+        for bad in ["[0s]", "[]", "[7]", "weekly"] {
             let s = strategy(&format!("{BASE}zone: {{ lookbacks: {bad} }}\n"));
             assert!(lookbacks(&s).is_err(), "{bad}");
         }

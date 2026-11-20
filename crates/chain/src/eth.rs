@@ -382,6 +382,66 @@ impl RpcClient {
     }
 }
 
+/// Base fee and median priority fee of each block in a range, from
+/// `eth_feeHistory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeHistory {
+    /// The first block the lists cover.
+    pub oldest: u64,
+    /// Base fee per gas of each block, in wei.
+    pub base_fees: Vec<u64>,
+    /// The median priority fee per gas paid in each block, in wei; zero
+    /// for an empty block.
+    pub median_tips: Vec<u64>,
+}
+
+impl RpcClient {
+    /// The fees of the `count` blocks ending at `newest`. Nodes serve at
+    /// most 1,024 blocks per request.
+    pub fn fee_history(&self, newest: u64, count: u64) -> RpcResult<FeeHistory> {
+        const M: &str = "eth_feeHistory";
+        let reply = self.call(M, json!([quantity(count), quantity(newest), [50.0]]))?;
+        let oldest = parse_quantity(M, reply.get("oldestBlock").unwrap_or(&Value::Null))?;
+        let list = |name: &str| {
+            reply
+                .get(name)
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| bad(M, format!("no `{name}` in the reply")))
+        };
+        // The base fees list one more entry: the block after `newest`.
+        let mut base_fees = list("baseFeePerGas")?
+            .iter()
+            .map(|v| parse_quantity(M, v))
+            .collect::<RpcResult<Vec<u64>>>()?;
+        let rewards = list("reward")?;
+        let blocks = newest + 1 - oldest;
+        base_fees.truncate(blocks as usize);
+        let median_tips = rewards
+            .iter()
+            .map(|r| match r.as_array().and_then(|r| r.first()) {
+                Some(value) => parse_quantity(M, value),
+                None => Ok(0),
+            })
+            .collect::<RpcResult<Vec<u64>>>()?;
+        if base_fees.len() as u64 != blocks || median_tips.len() as u64 != blocks {
+            return Err(bad(
+                M,
+                format!(
+                    "asked for blocks {oldest} to {newest}, got {} base fees and {} tips",
+                    base_fees.len(),
+                    median_tips.len()
+                ),
+            ));
+        }
+        Ok(FeeHistory {
+            oldest,
+            base_fees,
+            median_tips,
+        })
+    }
+}
+
 fn call_params(to: Address, data: &[u8], block: u64) -> Value {
     json!([
         {"to": format!("{to:#x}"), "data": format!("0x{}", hex::encode(data))},
@@ -463,6 +523,34 @@ mod tests {
         );
         let broken = MockNode::start(|_, _| Ok(json!({"currentBlock": 12})));
         assert!(RpcClient::new(broken.url()).syncing().is_err());
+    }
+
+    #[test]
+    fn fee_history_drops_the_next_block_and_reads_the_median_tip() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_feeHistory");
+            assert_eq!(params[0], json!("0x3"));
+            assert_eq!(params[1], json!("0xc"));
+            Ok(json!({
+                "oldestBlock": "0xa",
+                "baseFeePerGas": ["0x64", "0x65", "0x66", "0x67"],
+                "gasUsedRatio": [0.5, 0.5, 0.0],
+                "reward": [["0x5"], ["0x6"], []]
+            }))
+        });
+        let fees = RpcClient::new(node.url()).fee_history(12, 3).unwrap();
+        assert_eq!(fees.oldest, 10);
+        assert_eq!(fees.base_fees, vec![100, 101, 102]);
+        assert_eq!(
+            fees.median_tips,
+            vec![5, 6, 0],
+            "an empty block pays no tip"
+        );
+
+        let short = MockNode::start(|_, _| {
+            Ok(json!({"oldestBlock": "0xa", "baseFeePerGas": ["0x64"], "reward": [["0x5"]]}))
+        });
+        assert!(RpcClient::new(short.url()).fee_history(12, 3).is_err());
     }
 
     #[test]

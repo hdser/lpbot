@@ -15,9 +15,11 @@
 //! same information.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use alloy_primitives::{I256, U256};
 use lpbot_core::{Campaign, EntrySide, PoolId, Tick};
+use lpbot_data::gas::BlockFees;
 use lpbot_data::lake::TimedEvent;
 use lpbot_data::odds::TickBuckets;
 use lpbot_data::zone_map::{zone_stats, PathPoint, DAY};
@@ -60,16 +62,26 @@ impl Token {
 
 /// What each kind of action costs in gas, charged in the value token.
 ///
-/// The gas price and the value of an ETH come from the config and the
-/// price signal as decimals. The run turns them into integers once, at its
-/// start (`GasPrice`); every gas amount charged after that is integer math.
+/// Each action pays the gas price of the block it lands in when the run has
+/// the blocks' prices (`Settings::block_fees`), else `gas_price_gwei`. The
+/// ETH it costs is turned into the value token at the pool's price at that
+/// moment when the pool holds WETH, else at `value_raw_per_eth`. The run
+/// turns the decimals into integers once, at its start (`GasPrice`); every
+/// gas amount charged after that is integer math.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasModel {
     pub open_units: u64,
     pub close_units: u64,
     pub swap_units: u64,
+    /// The price of every block when the blocks' own are not given.
     pub gas_price_gwei: f64,
-    /// Smallest units of the value token that one ETH is worth.
+    /// The priority fee paid on top of a block's base fee. `None` pays the
+    /// median priority fee of the block's transactions.
+    pub tip_gwei: Option<f64>,
+    /// Which of the pool's tokens is WETH, if one is.
+    pub weth: Option<Token>,
+    /// Smallest units of the value token that one ETH is worth, for a pool
+    /// without WETH.
     pub value_raw_per_eth: f64,
 }
 
@@ -81,6 +93,8 @@ impl GasModel {
             close_units: 0,
             swap_units: 0,
             gas_price_gwei: 0.0,
+            tip_gwei: None,
+            weth: None,
             value_raw_per_eth: 0.0,
         }
     }
@@ -93,38 +107,58 @@ const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
 /// of the config and price signal, and the exact amounts charged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GasPrice {
-    wei_per_gas: U256,
-    value_raw_per_eth: U256,
+    /// Wei per gas when the blocks' own prices are not given.
+    fixed_wei_per_gas: U256,
+    /// Wei per gas paid on top of the base fee; `None`: the block's median.
+    tip_wei: Option<U256>,
+    eth: EthRate,
+}
+
+/// How the ETH that gas costs becomes the value token.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EthRate {
+    /// The value token is WETH.
+    Value,
+    /// The other token is WETH: at the pool's price at the time.
+    Other,
+    /// Smallest units of the value token per ETH, fixed for the run.
+    Fixed(U256),
 }
 
 impl GasPrice {
-    fn new(model: &GasModel) -> Result<Self, SimError> {
-        let wei_per_gas = whole(model.gas_price_gwei * WEI_PER_GWEI).ok_or_else(|| {
+    fn new(model: &GasModel, value: Token) -> Result<Self, SimError> {
+        let fixed_wei_per_gas = whole(model.gas_price_gwei * WEI_PER_GWEI).ok_or_else(|| {
             SimError::Settings(format!(
                 "the gas price of {} gwei is not a price; set costs.gas_price_gwei to a number \
                  of at least 0",
                 model.gas_price_gwei
             ))
         })?;
-        let value_raw_per_eth = whole(model.value_raw_per_eth).ok_or_else(|| {
-            SimError::Settings(format!(
-                "one ETH is said to be worth {} of the value token's smallest unit, which \
-                 cannot price gas; check costs.eth_price_usd and the pool's price",
-                model.value_raw_per_eth
-            ))
-        })?;
+        let tip_wei = match model.tip_gwei {
+            None => None,
+            Some(tip) => Some(whole(tip * WEI_PER_GWEI).ok_or_else(|| {
+                SimError::Settings(format!(
+                    "the priority fee of {tip} gwei is not a price; set costs.priority_fee_gwei \
+                     to a number of at least 0, or to `median`"
+                ))
+            })?),
+        };
+        let eth = match model.weth {
+            Some(token) if token == value => EthRate::Value,
+            Some(_) => EthRate::Other,
+            None => EthRate::Fixed(whole(model.value_raw_per_eth).ok_or_else(|| {
+                SimError::Settings(format!(
+                    "one ETH is said to be worth {} of the value token's smallest unit, which \
+                     cannot price gas; check costs.eth_price_usd and the pool's price",
+                    model.value_raw_per_eth
+                ))
+            })?),
+        };
         Ok(Self {
-            wei_per_gas,
-            value_raw_per_eth,
+            fixed_wei_per_gas,
+            tip_wei,
+            eth,
         })
-    }
-
-    /// What `units` of gas cost in the value token's smallest unit,
-    /// rounded down.
-    fn cost(&self, units: u64) -> U256 {
-        let wei = U256::from(units) * self.wei_per_gas;
-        // Only fails on a cost beyond 2^256, which no real price makes.
-        mul_div(wei, self.value_raw_per_eth, U256::from(WEI_PER_ETH)).unwrap_or(U256::MAX)
     }
 }
 
@@ -144,8 +178,9 @@ pub enum Policy {
     Adaptive(AdaptiveParams),
 }
 
-/// Seconds per step of the price history the adaptive decision counts on.
-const ODDS_STEP: u64 = 600;
+/// Seconds per step of the price history the signals count on, unless the
+/// strategy sets `signal_step`.
+pub const DEFAULT_SIGNAL_STEP: u64 = 600;
 
 /// Which token of the pool is a dollar stable, for results in USD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +266,16 @@ pub struct Settings {
     pub check_every: u64,
     /// Blocks between a decision and its execution. At least one.
     pub latency_blocks: u64,
-    pub lookbacks_days: Vec<u32>,
+    /// How far back the zone figures look, in seconds: the shortest and the
+    /// longest are used. Each is measured again every twelfth of its
+    /// length, at least every minute and at most once a day.
+    pub lookbacks: Vec<u64>,
+    /// Length of the price steps the volatility, move and odds signals
+    /// count on, in seconds (`signal_step`).
+    pub signal_step: u64,
+    /// How far back the volatility signals look, in seconds
+    /// (`entry.vol_window`). The volatility is per day whatever the window.
+    pub vol_window: u64,
     /// A resting position moves only to a range crossed this many times
     /// as often as its own.
     pub move_margin: f64,
@@ -292,6 +336,10 @@ pub struct Settings {
     /// provider opened it, or not at all: what is copied is the entry.
     pub follow_join_within: u64,
     pub gas: GasModel,
+    /// Each block's base fee and median priority fee. `None` charges
+    /// `gas.gas_price_gwei` on every block. When given it must cover every
+    /// block from the start of trading to the end of the history.
+    pub block_fees: Option<Arc<BlockFees>>,
     /// Seconds between rows of the series.
     pub series_every: u64,
     /// Trading starts here. Earlier events only build up history.
@@ -352,6 +400,8 @@ pub struct CampaignRow {
     /// Moves to the range around the price (`Settings::recenter_after`).
     pub recentres: u32,
     pub seconds_beyond: u64,
+    /// Seconds price spent inside the campaign's ranges, block by block.
+    pub seconds_in_range: u64,
 }
 
 /// One patience decision.
@@ -412,7 +462,8 @@ pub struct SeriesRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZoneLook {
     pub time: u64,
-    pub lookback_days: u32,
+    /// The lookback in days; under a day it is a fraction.
+    pub lookback_days: f64,
     pub tick_lower: Tick,
     pub tick_upper: Tick,
     pub observed_days: f64,
@@ -441,6 +492,14 @@ pub struct Summary {
     pub hold_value_pct_usd: f64,
     pub fees: f64,
     pub gas: f64,
+    /// The average gas price the run's actions paid, in gwei.
+    pub gas_gwei: f64,
+    /// Seconds of the traded window: with price inside a campaign's
+    /// range, in a campaign with price outside it, and with no campaign
+    /// open. Counted block by block.
+    pub seconds_in_range: u64,
+    pub seconds_out_of_range: u64,
+    pub seconds_flat: u64,
     pub campaigns: u32,
     pub passes: u32,
     pub max_drawdown_pct: f64,
@@ -635,6 +694,19 @@ struct OpenCampaign {
     best: f64,
     /// Price has been `exit_on_return_ticks` or more past the range.
     far_beyond: bool,
+    /// Since when price has been inside the range, and the seconds it
+    /// spent there before.
+    in_range_since: Option<u64>,
+    seconds_in_range: u64,
+}
+
+impl OpenCampaign {
+    /// Price is not inside the range from `time` on.
+    fn left_range(&mut self, time: u64) {
+        if let Some(since) = self.in_range_since.take() {
+            self.seconds_in_range += time.saturating_sub(since);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -658,6 +730,15 @@ enum Action {
     Recenter { decision: usize },
 }
 
+/// One range's figures over one lookback, and when they were measured.
+#[derive(Debug, Clone, Copy)]
+struct Look {
+    period: u64,
+    logged_hour: u64,
+    passes_per_day: f64,
+    observed_seconds: f64,
+}
+
 pub(crate) fn to_f64(value: U256) -> f64 {
     value.to_string().parse().unwrap_or(f64::INFINITY)
 }
@@ -674,14 +755,21 @@ struct Engine<'a> {
     next_decide: u64,
     next_series: u64,
     halted: bool,
-    scores: HashMap<(Tick, Tick, u64), ZoneScore>,
+    /// The latest look at each range over each lookback.
+    scores: HashMap<(Tick, Tick, u64), Look>,
     buckets: TickBuckets,
     out: Output,
     campaigns_opened: u32,
     fees_total: f64,
     gas: GasPrice,
     gas_total: U256,
-    gas_owed_units: u64,
+    /// Gas the free capital could not cover yet, in the value token.
+    gas_owed: U256,
+    /// Gas units charged and what they cost in wei, for the average price.
+    gas_units: f64,
+    gas_wei: f64,
+    /// The block being handled: the one an action lands in.
+    block: u64,
     /// The capital share in parts per million.
     capital_ppm: u32,
     share_cap: Option<LiquidityShareCap>,
@@ -710,9 +798,10 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// The day's realized volatility in ticks, from the price seen so far.
+    /// Realized volatility in ticks per day over the volatility window,
+    /// from the price seen so far.
     fn daily_vol(&self, now: u64) -> Option<f64> {
-        self.buckets.daily_vol_ticks(now, 86_400)
+        self.buckets.daily_vol_ticks(now, self.s.vol_window)
     }
 
     /// The width of a range opened now: the run's, or the day's
@@ -869,8 +958,29 @@ impl<'a> Engine<'a> {
             other += held_other + fee_other;
         }
         let keep = 1.0 - f64::from(self.pool.fee_pips()) / f64::from(MILLION);
-        let owed = self.gas.cost(self.gas_owed_units);
-        Ok(to_f64(value) + to_f64(other) * self.value_per_other() * keep - to_f64(owed))
+        Ok(to_f64(value) + to_f64(other) * self.value_per_other() * keep - to_f64(self.gas_owed))
+    }
+
+    /// Wei per gas in the block being handled.
+    fn wei_per_gas(&self) -> U256 {
+        match self.s.block_fees.as_deref().and_then(|f| f.at(self.block)) {
+            Some((base, tip)) => U256::from(base) + self.gas.tip_wei.unwrap_or(U256::from(tip)),
+            None => self.gas.fixed_wei_per_gas,
+        }
+    }
+
+    /// What `units` of gas cost in the value token's smallest unit in the
+    /// block being handled, rounded down.
+    fn gas_cost(&self, units: u64) -> U256 {
+        let wei = U256::from(units) * self.wei_per_gas();
+        // Only fails on a cost beyond 2^256, which no real price makes.
+        match self.gas.eth {
+            EthRate::Value => wei,
+            EthRate::Other => self.other_in_value(wei).unwrap_or(U256::MAX),
+            EthRate::Fixed(rate) => {
+                mul_div(wei, rate, U256::from(WEI_PER_ETH)).unwrap_or(U256::MAX)
+            }
+        }
     }
 
     /// Takes an action's gas out of the free capital. When the free capital
@@ -878,10 +988,12 @@ impl<'a> Engine<'a> {
     /// pool, it is owed and settled with the next charge; until then the
     /// equity counts it as spent.
     fn charge_gas(&mut self, units: u64) {
-        let units = units + std::mem::take(&mut self.gas_owed_units);
-        let cost = self.gas.cost(units);
+        let wei_per_gas = self.wei_per_gas();
+        self.gas_units += units as f64;
+        self.gas_wei += units as f64 * to_f64(wei_per_gas);
+        let cost = self.gas_cost(units) + std::mem::take(&mut self.gas_owed);
         if cost > self.cash {
-            self.gas_owed_units = units;
+            self.gas_owed = cost;
             return;
         }
         self.cash -= cost;
@@ -1146,9 +1258,10 @@ impl<'a> Engine<'a> {
     }
 
     fn end_campaign(&mut self, reason: &str, time: u64, block: u64) {
-        let Some(campaign) = self.campaign.take() else {
+        let Some(mut campaign) = self.campaign.take() else {
             return;
         };
+        campaign.left_range(time);
         let unit = self.value_unit;
         let seconds_beyond = campaign.seconds_beyond
             + campaign
@@ -1176,10 +1289,12 @@ impl<'a> Engine<'a> {
             flips: campaign.flips,
             recentres: campaign.recentres,
             seconds_beyond,
+            seconds_in_range: campaign.seconds_in_range,
         });
     }
 
     fn execute(&mut self, action: Action, time: u64, block: u64) -> Result<(), SimError> {
+        self.block = block;
         match action {
             Action::Open {
                 lower,
@@ -1196,7 +1311,7 @@ impl<'a> Engine<'a> {
                 // Gas comes out of the same capital, so it is set aside
                 // first. An entry around the price swaps as well as opens.
                 let swap_units = if mixed { self.s.gas.swap_units } else { 0 };
-                let gas = self.gas.cost(self.s.gas.open_units + swap_units);
+                let gas = self.gas_cost(self.s.gas.open_units + swap_units);
                 if gas >= self.cash {
                     return Ok(());
                 }
@@ -1204,7 +1319,7 @@ impl<'a> Engine<'a> {
                 let cash_before = self.cash;
                 // Too small to pay for its own way in and out: not made.
                 let min_used = self.s.min_gas_multiple.map_or(U256::ZERO, |multiple| {
-                    let round_trip = self.gas.cost(
+                    let round_trip = self.gas_cost(
                         self.s.gas.open_units + self.s.gas.close_units + self.s.gas.swap_units,
                     );
                     whole(multiple * to_f64(round_trip)).unwrap_or(U256::MAX)
@@ -1266,6 +1381,8 @@ impl<'a> Engine<'a> {
                     out_since: None,
                     best: to_f64(cash_before),
                     far_beyond: false,
+                    in_range_since: None,
+                    seconds_in_range: 0,
                 });
                 let swap_units = if swapped { self.s.gas.swap_units } else { 0 };
                 self.charge_gas(self.s.gas.open_units + swap_units);
@@ -1457,28 +1574,38 @@ impl<'a> Engine<'a> {
     }
 
     fn score(&mut self, lower: Tick, upper: Tick, now: u64) -> ZoneScore {
-        let day = now / DAY;
-        if let Some(score) = self.scores.get(&(lower, upper, day)) {
-            return *score;
+        let shortest = self.s.lookbacks.iter().copied().min().unwrap_or(DAY);
+        let longest = self.s.lookbacks.iter().copied().max().unwrap_or(DAY);
+        let short = self.zone_look(lower, upper, shortest, now);
+        let long = self.zone_look(lower, upper, longest, now);
+        ZoneScore {
+            passes_per_day_long: long.passes_per_day,
+            passes_per_day_short: short.passes_per_day,
+            enough_history: long.observed_seconds >= longest.min(DAY) as f64,
         }
-        let mut lookbacks = self.s.lookbacks_days.clone();
-        lookbacks.sort_unstable();
-        let mut score = ZoneScore {
-            passes_per_day_long: 0.0,
-            passes_per_day_short: 0.0,
-            observed_days: 0.0,
-        };
-        for (i, days) in lookbacks.iter().enumerate() {
-            let from = now.saturating_sub(u64::from(*days) * DAY);
-            let stats = zone_stats(&self.path, lower, upper, from, now);
-            if i == 0 {
-                score.passes_per_day_short = stats.passes_per_day();
+    }
+
+    /// One range's figures over one lookback, measured again every twelfth
+    /// of the lookback (at least a minute, at most a day). A look is
+    /// recorded in the zone table at most once an hour per range and
+    /// lookback.
+    fn zone_look(&mut self, lower: Tick, upper: Tick, lookback: u64, now: u64) -> Look {
+        let period = now / (lookback / 12).clamp(60, DAY);
+        if let Some(look) = self.scores.get(&(lower, upper, lookback)) {
+            if look.period == period {
+                return *look;
             }
-            score.passes_per_day_long = stats.passes_per_day();
-            score.observed_days = stats.observed_days();
+        }
+        let stats = zone_stats(&self.path, lower, upper, now.saturating_sub(lookback), now);
+        let hour = now / 3_600;
+        let logged = self
+            .scores
+            .get(&(lower, upper, lookback))
+            .map(|l| l.logged_hour);
+        if logged != Some(hour) {
             self.out.zones.push(ZoneLook {
                 time: now,
-                lookback_days: *days,
+                lookback_days: lookback as f64 / DAY as f64,
                 tick_lower: lower,
                 tick_upper: upper,
                 observed_days: stats.observed_days(),
@@ -1487,8 +1614,14 @@ impl<'a> Engine<'a> {
                 return_odds_1d: stats.return_odds(DAY, None),
             });
         }
-        self.scores.insert((lower, upper, day), score);
-        score
+        let look = Look {
+            period,
+            logged_hour: hour,
+            passes_per_day: stats.passes_per_day(),
+            observed_seconds: stats.observed_days() * DAY as f64,
+        };
+        self.scores.insert((lower, upper, lookback), look);
+        look
     }
 
     /// The range to enter now. Around the price there is one, the range
@@ -1500,7 +1633,7 @@ impl<'a> Engine<'a> {
             let width = self.width_now(now);
             let range = around_price(self.pool.tick(), self.pool.tick_spacing(), width)?;
             let score = self.score(range.0, range.1, now);
-            return (score.observed_days < 1.0
+            return (!score.enough_history
                 || score.passes_per_day_long >= self.s.min_passes_per_day)
                 .then_some(range);
         }
@@ -1543,7 +1676,7 @@ impl<'a> Engine<'a> {
         let other_outside = fee_other + self.loose_other;
         let other = to_f64(held_other + other_outside);
         let kept = to_f64(held_value + fee_value);
-        let gas = |units: u64| to_f64(self.gas.cost(units));
+        let gas = |units: u64| to_f64(self.gas_cost(units));
         let (open, close, swap) = (
             self.s.gas.open_units,
             self.s.gas.close_units,
@@ -1722,6 +1855,7 @@ impl<'a> Engine<'a> {
 
     /// Everything that happens once a block's events are applied.
     fn on_block_end(&mut self, time: u64, block: u64) -> Result<(), SimError> {
+        self.block = block;
         if time < self.s.trade_from {
             return Ok(());
         }
@@ -1749,6 +1883,7 @@ impl<'a> Engine<'a> {
                 campaign.extreme = Extreme::Other;
                 campaign.other_since.get_or_insert(time);
                 campaign.out_since.get_or_insert(time);
+                campaign.left_range(time);
                 // How far past its nearest bound price is.
                 let past = if tick < leg.lower {
                     leg.lower - tick
@@ -1773,10 +1908,12 @@ impl<'a> Engine<'a> {
                     campaign.seconds_beyond += time.saturating_sub(since);
                 }
                 campaign.out_since.get_or_insert(time);
+                campaign.left_range(time);
                 resting = true;
                 state = "resting";
             } else {
                 campaign.out_since = None;
+                campaign.in_range_since.get_or_insert(time);
                 state = "in_range";
             }
             out_since = campaign.out_since;
@@ -2083,8 +2220,17 @@ pub fn run(
     if settings.capital.is_zero() {
         return Err(SimError::Settings("the run has no capital".into()));
     }
-    if settings.lookbacks_days.is_empty() {
-        return Err(SimError::Settings("the zone lookbacks are empty".into()));
+    if settings.lookbacks.is_empty() || settings.lookbacks.contains(&0) {
+        return Err(SimError::Settings(
+            "the zone lookbacks are empty or hold a zero; set zone.lookbacks to durations such \
+             as [6h, 7d]"
+                .into(),
+        ));
+    }
+    if settings.signal_step == 0 || settings.vol_window == 0 {
+        return Err(SimError::Settings(
+            "signal_step and entry.vol_window must be durations above 0, such as 1m and 1d".into(),
+        ));
     }
     let positive = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v > 0.0);
     for (value, key) in [
@@ -2141,7 +2287,25 @@ pub fn run(
             ))
         })?),
     };
-    let gas = GasPrice::new(&settings.gas)?;
+    let gas = GasPrice::new(&settings.gas, settings.value)?;
+    if let Some(fees) = settings.block_fees.as_deref() {
+        let mut traded = events
+            .iter()
+            .filter(|e| e.time >= settings.trade_from && e.time < settings.trade_to);
+        let first = traded.clone().next().map(|e| e.block);
+        let last = traded.next_back().map(|e| e.block);
+        if let (Some(first), Some(last)) = (first, last) {
+            if !fees.covers(first, last) {
+                return Err(SimError::Settings(format!(
+                    "the stored gas prices cover blocks {} to {}, the run trades blocks {first} \
+                     to {last}; run `lpbot gas-history --from <first day>` to store them, or \
+                     set costs.gas: fixed",
+                    fees.first(),
+                    fees.end().saturating_sub(1)
+                )));
+            }
+        }
+    }
 
     let mut engine = Engine {
         s: settings,
@@ -2156,13 +2320,16 @@ pub fn run(
         next_series: settings.trade_from,
         halted: false,
         scores: HashMap::new(),
-        buckets: TickBuckets::new(ODDS_STEP),
+        buckets: TickBuckets::new(settings.signal_step),
         out: Output::default(),
         campaigns_opened: 0,
         fees_total: 0.0,
         gas,
         gas_total: U256::ZERO,
-        gas_owed_units: 0,
+        gas_owed: U256::ZERO,
+        gas_units: 0.0,
+        gas_wei: 0.0,
+        block: 0,
         capital_ppm,
         share_cap,
         loose_other: U256::ZERO,
@@ -2279,6 +2446,19 @@ pub fn run(
     let start = to_f64(settings.capital);
     let end = to_f64(engine.cash);
     let passes = engine.out.campaigns.iter().map(|c| c.passes).sum();
+    let seconds_in_range = engine
+        .out
+        .campaigns
+        .iter()
+        .map(|c| c.seconds_in_range)
+        .sum();
+    let in_campaigns: u64 = engine
+        .out
+        .campaigns
+        .iter()
+        .map(|c| c.closed_time.saturating_sub(c.opened_time))
+        .sum();
+    let traded = last.0.saturating_sub(settings.trade_from);
     // A run that never reached its window starts and ends at the same price.
     let end_price = engine.price();
     let start_price = engine.start_price.unwrap_or(end_price);
@@ -2298,8 +2478,16 @@ pub fn run(
             * 100.0,
         fees: engine.fees_total / unit,
         gas: to_f64(engine.gas_total) / unit,
+        gas_gwei: if engine.gas_units > 0.0 {
+            engine.gas_wei / engine.gas_units / WEI_PER_GWEI
+        } else {
+            0.0
+        },
         campaigns: engine.out.campaigns.len() as u32,
         passes,
+        seconds_in_range,
+        seconds_out_of_range: in_campaigns.saturating_sub(seconds_in_range),
+        seconds_flat: traded.saturating_sub(in_campaigns),
         ..engine.out.summary
     };
     Ok(engine.out)

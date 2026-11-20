@@ -15,6 +15,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::backfill::PoolRef;
 use crate::day::{Day, DAY_SECONDS};
+use crate::gas::{chunk_of, BlockFees, GasStore, CHUNK};
 use crate::lake::TimedEvent;
 use crate::snapshot::{SnapshotStore, StoredSnapshot};
 use crate::store::{EventStore, StoreResult, StoredLog};
@@ -229,7 +230,8 @@ pub fn stored_log(event: &TimedEvent) -> StoredLog {
     }
 }
 
-/// Stores a simulated history: its snapshot and one complete file per day.
+/// Stores a simulated history as the backfill would: its snapshot, one
+/// complete file per day, and a gas price for every block.
 pub fn write_history(root: &Path, chain: &str, history: &SynthHistory) -> StoreResult<()> {
     SnapshotStore::new(root).write(chain, &history.snapshot)?;
     let store = EventStore::new(root);
@@ -242,6 +244,23 @@ pub fn write_history(root: &Path, chain: &str, history: &SynthHistory) -> StoreR
         store.write_day(chain, pool, day, &logs, true)?;
         rest = &rest[count..];
         day = day.next();
+    }
+    // Gas at a flat 1 gwei and no tip on every block, in whole chunks, so
+    // that two simulated pools share the same prices.
+    let blocks = history.events.iter().map(|e| e.block);
+    if let (Some(first), Some(last)) = (blocks.clone().min(), blocks.max()) {
+        let gas = GasStore::new(root);
+        let mut chunk = chunk_of(first);
+        while chunk <= last {
+            let flat = BlockFees::new(
+                chunk,
+                vec![1_000_000_000; CHUNK as usize],
+                vec![0; CHUNK as usize],
+            )
+            .expect("the lists are the same length");
+            gas.write_chunk(chain, &flat)?;
+            chunk += CHUNK;
+        }
     }
     Ok(())
 }
