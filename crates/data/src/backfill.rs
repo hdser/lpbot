@@ -326,7 +326,7 @@ pub fn first_block_with_code(
 }
 
 /// The time of every block the logs are in, each checked to fall on `day`.
-fn block_times_on(
+pub(crate) fn block_times_on(
     source: &impl ChainSource,
     logs: &[Log],
     day: Day,
@@ -354,7 +354,7 @@ fn block_times_on(
 }
 
 /// The logs as stored, with the times `block_times_on` found.
-fn stored_logs(
+pub(crate) fn stored_logs(
     logs: Vec<Log>,
     times: &BTreeMap<u64, u64>,
 ) -> Result<Vec<StoredLog>, BackfillError> {
@@ -745,9 +745,21 @@ pub(crate) mod testing {
         }
 
         pub fn add_log(&mut self, pool: Address, block: u64, index: u64, data: Vec<u8>) {
+            self.add_raw_log(pool, block, index, vec![B256::repeat_byte(0x11)], data);
+        }
+
+        /// A log with topics of its own.
+        pub fn add_raw_log(
+            &mut self,
+            address: Address,
+            block: u64,
+            index: u64,
+            topics: Vec<B256>,
+            data: Vec<u8>,
+        ) {
             self.logs.push(Log {
-                address: pool,
-                topics: vec![B256::repeat_byte(0x11)],
+                address,
+                topics,
                 data,
                 block_number: block,
                 log_index: index,

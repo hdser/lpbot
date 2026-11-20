@@ -62,16 +62,16 @@ pub struct Quote {
 }
 
 impl Quote {
-    fn whole0(&self, raw: f64) -> f64 {
+    pub(crate) fn whole0(&self, raw: f64) -> f64 {
         raw / 10f64.powi(i32::from(self.decimals0))
     }
 
-    fn whole1(&self, raw: f64) -> f64 {
+    pub(crate) fn whole1(&self, raw: f64) -> f64 {
         raw / 10f64.powi(i32::from(self.decimals1))
     }
 
     /// Whole token1 per whole token0 at a raw price.
-    fn one_per_zero(&self, raw_price: f64) -> f64 {
+    pub(crate) fn one_per_zero(&self, raw_price: f64) -> f64 {
         raw_price * 10f64.powi(i32::from(self.decimals0) - i32::from(self.decimals1))
     }
 
@@ -95,7 +95,7 @@ impl Quote {
     /// Dollars per whole token0 and per whole token1 at a raw price and a
     /// time: from the pool's dollar stable, or from the reference price of
     /// one of its tokens.
-    fn dollars_per(&self, raw_price: f64, time: u64) -> Option<(f64, f64)> {
+    pub(crate) fn dollars_per(&self, raw_price: f64, time: u64) -> Option<(f64, f64)> {
         let p = self.one_per_zero(raw_price);
         match self.dollar {
             Some(DollarSide::One) => Some((p, 1.0)),
@@ -112,7 +112,7 @@ impl Quote {
     }
 
     /// The token the price is quoted in: the dollar stable, or token1.
-    fn quote_side(&self) -> DollarSide {
+    pub(crate) fn quote_side(&self) -> DollarSide {
         self.dollar.unwrap_or(DollarSide::One)
     }
 
@@ -128,7 +128,7 @@ impl Quote {
 
     /// The token whose dollar price this pool gives, when it pairs a
     /// volatile token with a dollar stable.
-    fn volatile_symbol(&self) -> Option<&str> {
+    pub(crate) fn volatile_symbol(&self) -> Option<&str> {
         match self.dollar? {
             DollarSide::Zero => Some(&self.symbol1),
             DollarSide::One => Some(&self.symbol0),

@@ -33,7 +33,7 @@ pub struct StoredSnapshot {
     pub state: PoolSnapshot,
 }
 
-fn to_json(snapshot: &StoredSnapshot) -> Value {
+pub(crate) fn to_json(snapshot: &StoredSnapshot) -> Value {
     let s = &snapshot.state;
     let ticks: Vec<Value> = s
         .ticks
@@ -67,7 +67,7 @@ fn to_json(snapshot: &StoredSnapshot) -> Value {
     })
 }
 
-fn from_json(value: &Value) -> Result<StoredSnapshot, String> {
+pub(crate) fn from_json(value: &Value) -> Result<StoredSnapshot, String> {
     fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         value
             .get(key)

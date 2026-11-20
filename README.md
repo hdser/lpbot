@@ -6,13 +6,13 @@ It automates one play: put the token you value into a price range that gets cros
 
 ## Status
 
-Backtests only so far. The bot reads pools from a node and replays their history; nothing here sends a transaction or holds funds yet.
+Backtests, and the pools followed live. The bot reads pools from a node, replays their history and follows them block by block; nothing here sends a transaction or holds funds yet.
 
 | Works today | Not built yet |
 | --- | --- |
 | One-command setup of the node and services (`make up`) | Paper mode |
 | Experiment files: base config, overrides, sweeps, config hashing | Differential test of the pool math against a mainnet fork |
-| Run-input checks (capital and loss limit are required) | Live subscriptions, the reorg undo log |
+| Run-input checks (capital and loss limit are required) | Paper and live trading on the followed pools |
 | Uniswap v3 pool math, checked against the reference test vectors | Executor, Safe roles policy |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Watchdog |
 | Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Scoring decisions against the options not taken |
@@ -28,6 +28,7 @@ Backtests only so far. The bot reads pools from a node and replays their history
 | `lpbot calibrate`: fits the adaptive decision walk-forward; it ships only if it beats the three fixed rules out of sample | |
 | Viewer: `lpbot load-results` puts the tables in Postgres; five Grafana dashboards read them (runs; run detail with the price, the range shaded by state, time in and out of range, APR and fee APR; compare, for runs and strategies side by side; pools and zones; pool) | |
 | `lpbot pool-stats`: each pool's price, value held, volume and fees hour by hour, and the liquidity around the price day by day, for the pool dashboard | |
+| `lpbot watch-pools` (the watcher service): every pool followed from the node block by block, with reorgs taken back; every position and position NFT with its owner, range, amounts, fees and when it opened and closed; the live tables and the live dashboard | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |
 
 The pool math and replica are tested against Uniswap's own test vectors, against themselves, and end to end against a simulated node. `make gates` is that check and every other one that needs real chain data, and it is the first thing to run once the node is synced. Its first run against a real node, on 19 November 2026, passed: the replica matched all 24 pools of the universe exactly, their stored history since 31 January replays to their state on the chain, and 6,135 real positions collected exactly the fees the replica computed. The backtest on that history lost money (every run stopped at its 5% loss limit), which is the next thing to understand.
@@ -71,6 +72,8 @@ make load               # result tables into Postgres
 ```
 
 Then open Grafana on http://127.0.0.1:3000, folder `lpbot`, dashboard `lpbot: runs`. Click a run id to open that run in detail with the time range set to its window.
+
+On the node machine the watcher service, which `make up` starts, keeps the dashboard `lpbot: live` current: every pool's price, liquidity, volume and fees minute by minute, the liquidity around the price, recent swaps and every position with its owner, NFT, range, amounts and fees. It refreshes every ten seconds. Its first start replays the stored history, which takes a while; `make watch-logs` shows how far it is. `deploy/RUNBOOK.md` has the rest.
 
 The machine that runs the node is set up with `deploy/REMOTE.md`: one script to prepare it, `make snapshot` to download the node's database, `make up` to start it. From a laptop, `make tunnel HOST=<user>@<machine>` brings its Grafana to http://127.0.0.1:3001; the same file has a table of what goes wrong and why. `deploy/RUNBOOK.md` is what to type on the machine: long jobs in `tmux`, and what to do after it was switched off.
 
@@ -117,9 +120,9 @@ cargo run --release -p lpbot -- calibrate experiments/width-and-patience-eth.yml
 ```text
 crates/
   core/       types, config, experiment files, metrics
-  chain/      RPC pool, node ingestion, reorg handling
+  chain/      RPC client, logs, headers, pool and position reads
   venues/     pool math, state replica, call encoding (Uniswap v3 first)
-  data/       Parquet sinks, exchange feeds, backfill
+  data/       Parquet sinks, backfill, positions, the live state and its follower
   sim/        replay engine, cost models, result tables
   strategy/   strategy and patience-policy interfaces, built-in rules
   risk/       limits and exit paths
