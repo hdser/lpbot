@@ -216,6 +216,22 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
     ) -> RpcResult<Vec<Log>> {
+        self.get_logs_where(addresses, &[topic0s.to_vec()], from_block, to_block)
+    }
+
+    /// Logs of several contracts in a block range whose topics match:
+    /// `topics[i]` lists the values allowed at position `i`, and an empty
+    /// list, or a position past the end, allows any. In chain order, with
+    /// the same checks as `get_logs_many`. Filtering on an indexed
+    /// argument, such as a token id or an owner, lets the node skip blocks
+    /// by their bloom filter.
+    pub fn get_logs_where(
+        &self,
+        addresses: &[Address],
+        topics: &[Vec<B256>],
+        from_block: u64,
+        to_block: u64,
+    ) -> RpcResult<Vec<Log>> {
         let address = match addresses {
             [] => return Ok(Vec::new()),
             [one] => json!(format!("{one:#x}")),
@@ -226,9 +242,20 @@ impl RpcClient {
             "fromBlock": quantity(from_block),
             "toBlock": quantity(to_block),
         });
-        if !topic0s.is_empty() {
-            let list: Vec<String> = topic0s.iter().map(|t| format!("{t:#x}")).collect();
-            filter["topics"] = json!([list]);
+        // Trailing positions that allow anything are left out.
+        let used = topics
+            .iter()
+            .rposition(|t| !t.is_empty())
+            .map_or(0, |i| i + 1);
+        if used > 0 {
+            let positions: Vec<Value> = topics[..used]
+                .iter()
+                .map(|allowed| match allowed.as_slice() {
+                    [] => Value::Null,
+                    some => json!(some.iter().map(|t| format!("{t:#x}")).collect::<Vec<_>>()),
+                })
+                .collect();
+            filter["topics"] = json!(positions);
         }
         let result = self.call("eth_getLogs", json!([filter]))?;
         let mut logs = result
@@ -281,6 +308,26 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
         initial_chunk: u64,
+        on_progress: impl FnMut(u64, usize),
+    ) -> RpcResult<Vec<Log>> {
+        self.get_logs_chunked_where(
+            addresses,
+            &[topic0s.to_vec()],
+            from_block,
+            to_block,
+            initial_chunk,
+            on_progress,
+        )
+    }
+
+    /// `get_logs_where` for a long range, in chunks as `get_logs_chunked`.
+    pub fn get_logs_chunked_where(
+        &self,
+        addresses: &[Address],
+        topics: &[Vec<B256>],
+        from_block: u64,
+        to_block: u64,
+        initial_chunk: u64,
         mut on_progress: impl FnMut(u64, usize),
     ) -> RpcResult<Vec<Log>> {
         let mut logs = Vec::new();
@@ -291,7 +338,7 @@ impl RpcClient {
         let mut start = from_block;
         while start <= to_block {
             let end = to_block.min(start.saturating_add(chunk - 1));
-            match self.get_logs_many(addresses, topic0s, start, end) {
+            match self.get_logs_where(addresses, topics, start, end) {
                 Ok(mut batch) => {
                     logs.append(&mut batch);
                     on_progress(end, logs.len());
@@ -440,6 +487,40 @@ mod tests {
         assert_eq!(client.block_times(&[]).unwrap(), Vec::<u64>::new());
         let error = client.block_times(&[5, 999]).unwrap_err();
         assert!(error.to_string().contains("999"), "{error}");
+    }
+
+    #[test]
+    fn a_filter_on_later_topics_is_sent_position_by_position() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let node = MockNode::start(move |method, params| {
+            assert_eq!(method, "eth_getLogs");
+            record.lock().unwrap().push(params[0]["topics"].clone());
+            Ok(json!([]))
+        });
+        let client = RpcClient::new(node.url());
+        let a = B256::repeat_byte(0xaa);
+        let b = B256::repeat_byte(0xbb);
+        let c = B256::repeat_byte(0xcc);
+        client
+            .get_logs_where(&[pool()], &[vec![a], vec![], vec![b, c]], 1, 2)
+            .unwrap();
+        // Positions that allow anything at the end are left out.
+        client
+            .get_logs_where(&[pool()], &[vec![a], vec![], vec![]], 1, 2)
+            .unwrap();
+        client.get_logs_where(&[pool()], &[], 1, 2).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            json!([
+                [format!("{a:#x}")],
+                null,
+                [format!("{b:#x}"), format!("{c:#x}")]
+            ])
+        );
+        assert_eq!(seen[1], json!([[format!("{a:#x}")]]));
+        assert_eq!(seen[2], Value::Null);
     }
 
     #[test]

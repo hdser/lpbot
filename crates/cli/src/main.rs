@@ -15,6 +15,7 @@ mod demo_cmd;
 mod fees_cmd;
 mod gates_cmd;
 mod load_cmd;
+mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
@@ -74,6 +75,10 @@ enum Command {
     /// fees over time, and the liquidity around the price, as the two pool
     /// tables for the pool dashboard.
     PoolStats(PoolStatsArgs),
+    /// A liquidity provider's positions on the stored pools, from the
+    /// node's position manager records, one row per stretch with liquidity
+    /// in place: what a backtest can follow (`strategy.follow`).
+    LpPositions(LpPositionsCli),
 }
 
 #[derive(Args)]
@@ -252,6 +257,32 @@ struct PoolStatsArgs {
     /// Folder the pool tables are written to, beside the run tables.
     #[arg(long, default_value = "runs")]
     results_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct LpPositionsCli {
+    /// A position's NFT id, such as one seen on revert.finance; its owner's
+    /// positions are read. Repeat for several.
+    #[arg(long = "nft")]
+    nfts: Vec<String>,
+    /// An owner's address. Repeat for several.
+    #[arg(long = "account")]
+    accounts: Vec<String>,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to read, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder with the stored pools. Defaults to LPBOT_DATA_DIR, then
+    /// data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// File the positions are written to, as CSV.
+    #[arg(long, default_value = "data/follow/positions.csv")]
+    out: PathBuf,
+    /// Blocks per log request; the node refuses more than 100,000.
+    #[arg(long, default_value_t = 100_000)]
+    log_chunk: u64,
 }
 
 #[derive(Args)]
@@ -553,6 +584,50 @@ fn real_main() -> Result<()> {
                 },
             )
             .map(|_| ())
+        }
+        Command::LpPositions(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let nfts = args
+                .nfts
+                .iter()
+                .map(|text| {
+                    text.parse::<alloy_primitives::U256>()
+                        .map_err(|_| anyhow::anyhow!("--nft {text}: give the NFT id as a number"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let accounts = args
+                .accounts
+                .iter()
+                .map(|a| chain_cmd::checked_address("account", a))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            if nfts.is_empty() && accounts.is_empty() {
+                anyhow::bail!("say whose positions to read: --nft <id> or --account <address>");
+            }
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let written = lp_positions_cmd::run(
+                &config,
+                &chain.client,
+                &lp_positions_cmd::LpPositionsArgs {
+                    nfts: &nfts,
+                    accounts: &accounts,
+                    from,
+                    root: &root,
+                    out: &args.out,
+                    chain: &args.chain.chain,
+                    log_chunk: args.log_chunk,
+                },
+            )?;
+            println!("{written} stretch(es) written to {}", args.out.display());
+            Ok(())
         }
         Command::PoolStats(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;

@@ -178,6 +178,17 @@ impl Shape {
     }
 }
 
+/// One of a followed provider's positions on the run's pool: its range,
+/// and when the provider put liquidity in and took the last of it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowSpan {
+    pub open_time: u64,
+    /// `None` while the provider's position is still open.
+    pub close_time: Option<u64>,
+    pub lower: Tick,
+    pub upper: Tick,
+}
+
 /// Which way price must have moved for the entry signal, as the dollar
 /// price of the pool's volatile token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +282,15 @@ pub struct Settings {
     /// ticks, rounded up to the tick spacing; `width` while there is not
     /// enough history to measure it. `None`: always `width`.
     pub width_vol_multiple: Option<f64>,
+    /// A provider's positions to follow instead of the run's own entries,
+    /// sorted by when they opened: each is entered in the provider's range,
+    /// swapping into its mix, when the provider opens it, and closed when
+    /// the provider closes it. The patience rule and moves do not apply;
+    /// the campaign exits still do. `None`: the run's own strategy.
+    pub follow: Option<Vec<FollowSpan>>,
+    /// A followed position is joined only this many seconds after the
+    /// provider opened it, or not at all: what is copied is the entry.
+    pub follow_join_within: u64,
     pub gas: GasModel,
     /// Seconds between rows of the series.
     pub series_every: u64,
@@ -622,26 +642,20 @@ enum Action {
     Open {
         lower: Tick,
         upper: Tick,
+        /// The followed provider's position this enters, by index.
+        follow: Option<usize>,
     },
     /// Withdraw and swap everything back to the value token.
-    Close {
-        reason: &'static str,
-    },
+    Close { reason: &'static str },
     /// Withdraw and place the other token next to the price. `decision` is
     /// the row of the decision it carries out.
-    Flip {
-        decision: usize,
-    },
+    Flip { decision: usize },
     /// Withdraw a position that is wholly in the value token.
-    Withdraw {
-        reason: &'static str,
-    },
+    Withdraw { reason: &'static str },
     /// Withdraw a position that price has left and put it in the range
     /// around the price, swapping only what that range needs. `decision`
     /// is the row of the decision it carries out.
-    Recenter {
-        decision: usize,
-    },
+    Recenter { decision: usize },
 }
 
 pub(crate) fn to_f64(value: U256) -> f64 {
@@ -675,6 +689,10 @@ struct Engine<'a> {
     /// could not take. It stays as it would in the Safe, and goes back to
     /// the value token with the campaign's closing swap.
     loose_other: U256,
+    /// The followed position the open campaign copies, and the first one
+    /// not yet looked at.
+    following: Option<usize>,
+    follow_next: usize,
     peak: f64,
     value_unit: f64,
     /// Price of the value token in the other token on the first block of
@@ -939,16 +957,23 @@ impl<'a> Engine<'a> {
         Ok(Some(Opened { used, capped }))
     }
 
-    /// Puts `value` and `other` into `[lower, upper)`, a range the price is
-    /// strictly inside. Whichever token is over the range's mix at the pool
-    /// price is swapped into the other one, against a copy of the pool as a
-    /// closing swap is, and the liquidity both amounts then buy is added.
+    /// Whether the pool price is strictly inside `[lower, upper)`, so a
+    /// range there holds both tokens.
+    fn holds_both(&self, lower: Tick, upper: Tick) -> Result<bool, MathError> {
+        let price = self.pool.sqrt_price_x96();
+        Ok(get_sqrt_ratio_at_tick(lower)? < price && price < get_sqrt_ratio_at_tick(upper)?)
+    }
+
+    /// Puts `value` and `other` into `[lower, upper)`, wherever the price
+    /// is: whichever token is over the range's mix at the pool price is
+    /// swapped into the other one, against a copy of the pool as a closing
+    /// swap is, and the liquidity both amounts then buy is added. A range
+    /// the price is below takes only token0, one it is above only token1.
     /// The share cap is applied first, on the liquidity the whole amount
     /// would buy, so what it holds back is not swapped. `None`, with
-    /// nothing changed, when the price is not strictly inside the range,
-    /// the amounts are worth less than `limits.min_used`, or they buy no
-    /// liquidity.
-    fn open_around(
+    /// nothing changed, when the amounts are worth less than
+    /// `limits.min_used` or buy no liquidity.
+    fn open_mixed(
         &mut self,
         value: U256,
         other: U256,
@@ -959,9 +984,6 @@ impl<'a> Engine<'a> {
         let sqrt_lower = get_sqrt_ratio_at_tick(lower)?;
         let sqrt_upper = get_sqrt_ratio_at_tick(upper)?;
         let price = self.pool.sqrt_price_x96();
-        if price <= sqrt_lower || price >= sqrt_upper {
-            return Ok(None);
-        }
         // The range's mix at the price, from what a reference liquidity
         // holds, both sides counted in the value token.
         const REFERENCE: u128 = 1 << 96;
@@ -1023,8 +1045,22 @@ impl<'a> Engine<'a> {
             if liquidity == 0 {
                 return Ok(None);
             }
-            let take0 = get_amount0_delta(price, sqrt_upper, liquidity, true)?;
-            let take1 = get_amount1_delta(sqrt_lower, price, liquidity, true)?;
+            let (take0, take1) = if price <= sqrt_lower {
+                (
+                    get_amount0_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
+                    U256::ZERO,
+                )
+            } else if price < sqrt_upper {
+                (
+                    get_amount0_delta(price, sqrt_upper, liquidity, true)?,
+                    get_amount1_delta(sqrt_lower, price, liquidity, true)?,
+                )
+            } else {
+                (
+                    U256::ZERO,
+                    get_amount1_delta(sqrt_lower, sqrt_upper, liquidity, true)?,
+                )
+            };
             if take0 <= amount0 && take1 <= amount1 {
                 taken = Some((take0, take1));
                 break;
@@ -1127,7 +1163,11 @@ impl<'a> Engine<'a> {
             closed_time: time,
             closed_block: block,
             exit_reason: reason.to_string(),
-            shape: self.s.shape.name().to_string(),
+            shape: if self.s.follow.is_some() {
+                "followed".to_string()
+            } else {
+                self.s.shape.name().to_string()
+            },
             amount_in: to_f64(campaign.amount_in) / unit,
             result: (to_f64(self.cash) - to_f64(campaign.cash_before)) / unit,
             fees: campaign.fees / unit,
@@ -1141,14 +1181,21 @@ impl<'a> Engine<'a> {
 
     fn execute(&mut self, action: Action, time: u64, block: u64) -> Result<(), SimError> {
         match action {
-            Action::Open { lower, upper } => {
+            Action::Open {
+                lower,
+                upper,
+                follow,
+            } => {
                 if self.leg.is_some() || self.halted {
                     return Ok(());
                 }
                 let around = self.s.shape == Shape::AroundPrice;
+                // A followed range is entered wherever the price is, in
+                // its mix; it may hold either token or both.
+                let mixed = around || follow.is_some();
                 // Gas comes out of the same capital, so it is set aside
                 // first. An entry around the price swaps as well as opens.
-                let swap_units = if around { self.s.gas.swap_units } else { 0 };
+                let swap_units = if mixed { self.s.gas.swap_units } else { 0 };
                 let gas = self.gas.cost(self.s.gas.open_units + swap_units);
                 if gas >= self.cash {
                     return Ok(());
@@ -1169,8 +1216,12 @@ impl<'a> Engine<'a> {
                 // `None`: price moved onto (or, around the price, out of)
                 // the range in the meantime, or the pool has no liquidity in
                 // part of it to take a share of. Look again later.
-                let (used, capped, swapped) = if around {
-                    let Some(mixed) = self.open_around(budget, U256::ZERO, lower, upper, limits)?
+                let (used, capped, swapped) = if mixed {
+                    // A price on or past a bound has no range around it.
+                    if around && follow.is_none() && !self.holds_both(lower, upper)? {
+                        return Ok(());
+                    }
+                    let Some(mixed) = self.open_mixed(budget, U256::ZERO, lower, upper, limits)?
                     else {
                         return Ok(());
                     };
@@ -1206,7 +1257,7 @@ impl<'a> Engine<'a> {
                     flips: 0,
                     recentres: 0,
                     seconds_beyond: 0,
-                    extreme: if around {
+                    extreme: if mixed {
                         Extreme::Neither
                     } else {
                         Extreme::Value
@@ -1218,6 +1269,7 @@ impl<'a> Engine<'a> {
                 });
                 let swap_units = if swapped { self.s.gas.swap_units } else { 0 };
                 self.charge_gas(self.s.gas.open_units + swap_units);
+                self.following = follow;
             }
             Action::Recenter { decision } => {
                 let Some(leg) = &self.leg else {
@@ -1254,7 +1306,7 @@ impl<'a> Engine<'a> {
                     cap: self.share_cap,
                     min_used: U256::ZERO,
                 };
-                match self.open_around(value, other, lower, upper, limits)? {
+                match self.open_mixed(value, other, lower, upper, limits)? {
                     Some(mixed) => {
                         self.cash += mixed.value_left;
                         self.loose_other = mixed.other_left;
@@ -1580,6 +1632,60 @@ impl<'a> Engine<'a> {
         Ok((action, Some(expected)))
     }
 
+    /// One block's step when following a provider: an open campaign is
+    /// closed by its own exit rules or once the provider has closed the
+    /// position it copies; flat, the latest of the provider's positions
+    /// opened within the join window and still open is entered.
+    fn follow_step(
+        &mut self,
+        spans: &[FollowSpan],
+        time: u64,
+        block: u64,
+        equity: f64,
+        state: &str,
+    ) {
+        if self.leg.is_some() {
+            if let Some(reason) = self.campaign_exit(time, equity, state) {
+                self.schedule(block, Action::Close { reason });
+            } else if self
+                .following
+                .and_then(|i| spans.get(i))
+                .is_none_or(|span| span.close_time.is_some_and(|close| time >= close))
+            {
+                self.schedule(
+                    block,
+                    Action::Close {
+                        reason: "leader_exit",
+                    },
+                );
+            }
+            return;
+        }
+        let mut chosen = None;
+        while let Some(span) = spans.get(self.follow_next) {
+            if span.open_time > time {
+                break;
+            }
+            let joinable = span.open_time.saturating_add(self.s.follow_join_within) >= time
+                && span.close_time.is_none_or(|close| close > time);
+            if joinable {
+                chosen = Some(self.follow_next);
+            }
+            self.follow_next += 1;
+        }
+        if let Some(i) = chosen {
+            let span = spans[i];
+            self.schedule(
+                block,
+                Action::Open {
+                    lower: span.lower,
+                    upper: span.upper,
+                    follow: Some(i),
+                },
+            );
+        }
+    }
+
     /// The exit rule, if any, that ends the open campaign now, given the
     /// run's equity and the position's state.
     fn campaign_exit(&self, time: u64, equity: f64, state: &str) -> Option<&'static str> {
@@ -1738,13 +1844,27 @@ impl<'a> Engine<'a> {
             return Ok(());
         }
 
+        // Following a provider replaces the run's own entries and moves.
+        let settings = self.s;
+        if let Some(spans) = &settings.follow {
+            self.follow_step(spans, time, block, equity, state);
+            return Ok(());
+        }
+
         let Some(leg) = self.leg.clone() else {
             // Flat: look for a range to enter.
             if time >= self.next_check {
                 self.next_check = time + self.s.check_every.max(1);
                 if self.calm_enough(time) && self.moved_enough(time) {
                     if let Some((lower, upper)) = self.best_entry(time) {
-                        self.schedule(block, Action::Open { lower, upper });
+                        self.schedule(
+                            block,
+                            Action::Open {
+                                lower,
+                                upper,
+                                follow: None,
+                            },
+                        );
                     }
                 }
             }
@@ -2046,6 +2166,8 @@ pub fn run(
         capital_ppm,
         share_cap,
         loose_other: U256::ZERO,
+        following: None,
+        follow_next: 0,
         peak: to_f64(settings.capital),
         value_unit: 10f64.powi(i32::from(value_decimals)),
         start_price: None,

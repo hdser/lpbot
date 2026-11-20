@@ -83,6 +83,7 @@ strategies:
       max_loss_pct: null             # close a campaign that fell this many percent below what went in, back to the value token
       max_drawdown_pct: null         # close a campaign that fell this many percent of what went in from its best
       exit_on_return_pct: null       # once price ran this many percent past the range, close as soon as it is back in the range
+    follow: null                     # { file: data/follow/x.csv, owner: "0x...", join_within: 1h }: copy a provider's positions, written by `lpbot lp-positions`
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings

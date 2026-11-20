@@ -15,7 +15,9 @@ use lpbot_data::lake::{read_events, stored_pools, swaps, TimedEvent};
 use lpbot_data::snapshot::{SnapshotStore, StoredSnapshot};
 use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
-use lpbot_sim::engine::{self, Dollar, GasModel, MoveDirection, Policy, Settings, Shape, Token};
+use lpbot_sim::engine::{
+    self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Settings, Shape, Token,
+};
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
 use lpbot_strategy::adaptive::AdaptiveParams;
 use lpbot_strategy::FixedRule;
@@ -105,6 +107,69 @@ pub fn pct_to_ticks(pct: f64) -> Tick {
     } else {
         0
     }
+}
+
+/// The positions a run follows: `strategy.follow.file`, a file written by
+/// `lpbot lp-positions`, cut to the run's pool and, with
+/// `strategy.follow.owner`, to one owner; sorted by when they opened.
+/// `None` without a file.
+pub fn follow_spans(strategy: &StrategyConfig, pool: Address) -> Result<Option<Vec<FollowSpan>>> {
+    let Some(file) = text(&strategy.extra, &["follow", "file"]) else {
+        return Ok(None);
+    };
+    let owner = text(&strategy.extra, &["follow", "owner"])
+        .map(|o| checked_address("strategy.follow.owner", &o))
+        .transpose()?;
+    let content = std::fs::read_to_string(&file).with_context(|| {
+        format!("reading strategy.follow.file {file}; write it with `lpbot lp-positions`")
+    })?;
+    let spans = parse_follow(&content, pool, owner)
+        .with_context(|| format!("strategy.follow.file {file}"))?;
+    if spans.is_empty() {
+        bail!(
+            "strategy.follow.file {file} has no positions{} on the run's pool {pool:#x}; pick              the pool the provider trades, or another provider",
+            owner.map(|o| format!(" of {o:#x}")).unwrap_or_default()
+        );
+    }
+    Ok(Some(spans))
+}
+
+/// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.
+pub fn parse_follow(
+    content: &str,
+    pool: Address,
+    owner: Option<Address>,
+) -> Result<Vec<FollowSpan>> {
+    let mut lines = content.lines();
+    if lines.next() != Some(crate::lp_positions_cmd::HEADER) {
+        bail!("its first line is not the header `lpbot lp-positions` writes");
+    }
+    let mut spans = Vec::new();
+    for (number, line) in lines.enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let bad = || anyhow!("line {} is not a position row", number + 2);
+        if fields.len() != crate::lp_positions_cmd::HEADER.split(',').count() {
+            return Err(bad());
+        }
+        let row_owner: Address = fields[0].parse().map_err(|_| bad())?;
+        let row_pool: Address = fields[2].parse().map_err(|_| bad())?;
+        if row_pool != pool || owner.is_some_and(|o| o != row_owner) {
+            continue;
+        }
+        let number = |i: usize| fields[i].parse::<i64>().map_err(|_| bad());
+        spans.push(FollowSpan {
+            open_time: number(7)? as u64,
+            close_time: if fields[9].is_empty() {
+                None
+            } else {
+                Some(number(9)? as u64)
+            },
+            lower: number(4)? as Tick,
+            upper: number(5)? as Tick,
+        });
+    }
+    spans.sort_by_key(|s| s.open_time);
+    Ok(spans)
 }
 
 /// Which way price must have moved for the entry signal:
@@ -541,6 +606,8 @@ fn settings(
         move_window: duration(&strategy.extra, &["entry", "move_window"], 4 * 3_600)?,
         move_direction: move_direction(strategy)?,
         width_vol_multiple: number(&strategy.extra, &["entry", "width_vol_multiple"]),
+        follow: follow_spans(strategy, history.snapshot.pool)?,
+        follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
         gas,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
         trade_from,
@@ -641,7 +708,11 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             value_token: strategy.value_token.clone(),
             fee_pips: history.snapshot.state.fee_pips,
             width_ticks: settings.width,
-            entry_shape: settings.shape.name().to_string(),
+            entry_shape: if settings.follow.is_some() {
+                "followed".to_string()
+            } else {
+                settings.shape.name().to_string()
+            },
             sweep: run
                 .sweep_point
                 .iter()
@@ -1464,6 +1535,34 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("any, up or down"));
+    }
+
+    #[test]
+    fn a_follow_file_is_cut_to_the_pool_and_owner() {
+        let header = crate::lp_positions_cmd::HEADER;
+        let pool = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+        let other_pool = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let a = "0x00000000000000000000000000000000000000aa";
+        let b = "0x00000000000000000000000000000000000000bb";
+        let content = format!(
+            "{header}\n\
+             {a},7,{pool},USDC/WETH 0.05,-10,10,100,2000,120,3000,1,1,1,1,1,1\n\
+             {a},8,{other_pool},USDC/WETH 0.3,-60,60,100,1500,,,1,1,0,0,0,0\n\
+             {b},9,{pool},USDC/WETH 0.05,-20,20,90,1000,,,1,1,0,0,0,0\n"
+        );
+        let pool: Address = pool.parse().unwrap();
+        let all = parse_follow(&content, pool, None).unwrap();
+        // Both owners on the pool, by when they opened.
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].open_time, all[0].close_time), (1_000, None));
+        assert_eq!(
+            (all[1].lower, all[1].upper, all[1].close_time),
+            (-10, 10, Some(3_000))
+        );
+        let only_a = parse_follow(&content, pool, Some(a.parse().unwrap())).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert!(parse_follow("owner,pool\n", pool, None).is_err());
+        assert!(parse_follow(&format!("{header}\nnot,a,row\n"), pool, None).is_err());
     }
 
     #[test]

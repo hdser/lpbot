@@ -10,7 +10,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
-    GasModel, MoveDirection, Output, Policy, Settings, Shape, Token,
+    FollowSpan, GasModel, MoveDirection, Output, Policy, Settings, Shape, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -129,6 +129,8 @@ fn settings(rule: FixedRule) -> Settings {
         move_window: 4 * HOUR,
         move_direction: MoveDirection::Any,
         width_vol_multiple: None,
+        follow: None,
+        follow_join_within: HOUR,
         gas: GasModel::free(),
         series_every: HOUR,
         trade_from: T0,
@@ -1656,4 +1658,75 @@ fn exit_and_signal_settings_that_are_not_numbers_are_refused() {
             .to_string();
         assert!(error.contains(key), "{error}");
     }
+}
+
+fn span(open_hours: u64, close_hours: Option<u64>, lower: i32, upper: i32) -> FollowSpan {
+    FollowSpan {
+        open_time: T0 + open_hours * HOUR,
+        close_time: close_hours.map(|h| T0 + h * HOUR),
+        lower,
+        upper,
+    }
+}
+
+#[test]
+fn a_followed_provider_is_copied_in_and_out() {
+    let (snapshot, events) = history(&[5, 6, -10, -12, 30, 31, 32, 33]);
+    let following = Settings {
+        follow: Some(vec![
+            // Around the price at hour 1, closed at hour 4.
+            span(1, Some(4), -20, 20),
+            // Opened while the first is still followed: too late to join
+            // once the bot is free again.
+            span(2, Some(7), -40, 0),
+            // Around the price after the jump to 30, never closed.
+            span(5, None, 20, 40),
+        ]),
+        ..settings(FixedRule::Wait)
+    };
+    let out = run(snapshot, &events, &following).unwrap();
+    assert_eq!(out.campaigns.len(), 2, "{:?}", out.campaigns);
+    let (first, second) = (&out.campaigns[0], &out.campaigns[1]);
+    assert_eq!((first.tick_lower, first.tick_upper), (-20, 20));
+    assert_eq!(first.shape, "followed");
+    // Seen at the end of hour 1, entered in the next block; the provider's
+    // exit seen at hour 4, carried out in the next block.
+    assert_eq!(first.opened_block, events[1].block);
+    assert_eq!(first.exit_reason, "leader_exit");
+    assert_eq!(first.closed_block, events[4].block);
+    assert_eq!((second.tick_lower, second.tick_upper), (20, 40));
+    assert_eq!(second.exit_reason, "window_end");
+    // No patience decisions: the provider decides.
+    assert!(out.decisions.is_empty());
+    assert_conserved(&out);
+}
+
+#[test]
+fn a_followed_range_on_either_side_of_the_price_is_entered_in_its_token() {
+    let (snapshot, events) = history(&[5, 6, 7, 8]);
+    let follow = |lower, upper| Settings {
+        follow: Some(vec![span(1, Some(3), lower, upper)]),
+        gas: priced(),
+        ..settings(FixedRule::Wait)
+    };
+    // Below the price the range holds token1, the value token here: no
+    // swap in. Above it, token0: everything is swapped in, and back out.
+    let below = run(snapshot.clone(), &events, &follow(-40, -20)).unwrap();
+    let above = run(snapshot, &events, &follow(40, 60)).unwrap();
+    assert!(
+        (below.campaigns[0].gas - 0.008).abs() < 1e-9,
+        "{}",
+        below.campaigns[0].gas
+    );
+    assert!(
+        (above.campaigns[0].gas - 0.012).abs() < 1e-9,
+        "{}",
+        above.campaigns[0].gas
+    );
+    assert!(above.campaigns[0].amount_in > 0.99);
+    // Two swaps at the 0.05% fee and nothing earned: about 0.1% lost.
+    let loss = above.campaigns[0].result / above.campaigns[0].amount_in;
+    assert!((-0.002..-0.0005).contains(&(loss + 0.012)), "{loss}");
+    assert_conserved(&below);
+    assert_conserved(&above);
 }

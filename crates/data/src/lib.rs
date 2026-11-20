@@ -7,6 +7,7 @@ pub mod backfill;
 pub mod day;
 pub mod fee_check;
 pub mod lake;
+pub mod lp_history;
 pub mod odds;
 pub mod pool_stats;
 pub mod snapshot;
