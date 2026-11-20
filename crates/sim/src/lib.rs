@@ -7,13 +7,17 @@
 //! See `docs/DESIGN.md`, "Simulation and backtesting".
 
 pub mod engine;
+pub mod live_db;
+pub mod live_tables;
 pub mod loader;
 pub mod tables;
+
+pub use live_tables::LIVE_TABLES;
 
 #[cfg(test)]
 mod engine_tests;
 
-/// Names of the tables every run writes. The viewer knows only these.
+/// Names of the tables every run writes.
 pub const RESULT_TABLES: [&str; 6] = [
     "runs",
     "campaigns",

@@ -601,6 +601,15 @@ fn positions_are_read_at_a_block_by_their_key() {
             PositionInfo::default()
         ]
     );
+    let at = read_positions_at(
+        &client,
+        &[
+            (pool_address(), owner, -120, 120, 42),
+            (pool_address(), owner, -120, 60, 42),
+        ],
+    )
+    .unwrap();
+    assert_eq!(at, vec![read[1], read[0]]);
 
     // A pool that is not there yet answers with no data at all.
     let empty = MockNode::start(|_, _| Ok(json!("0x")));
@@ -613,4 +622,78 @@ fn positions_are_read_at_a_block_by_their_key() {
         ),
         Err(ChainError::ShortReturn { got: 0, .. })
     ));
+}
+
+#[test]
+fn position_nfts_and_their_holders_are_read_and_a_burned_token_is_none() {
+    let weth = Address::repeat_byte(0xEE);
+    let usdc = Address::repeat_byte(0x0C);
+    let holder = Address::repeat_byte(0x77);
+    let node = MockNode::start(move |method, params| {
+        assert_eq!(method, "eth_call");
+        assert_eq!(params[0]["to"], format!("{POSITION_MANAGER:#x}"));
+        assert_eq!(params[1], "0x2a");
+        let data = hex::decode(params[0]["data"].as_str().unwrap()).unwrap();
+        let id = U256::from_be_slice(&data[4..36]).to::<u64>();
+        let selector = hex::encode(&data[..4]);
+        match id {
+            9 if selector == selector_of("positions(uint256)") => {
+                Err((3, "execution reverted: Invalid token ID".into()))
+            }
+            9 => Err((
+                3,
+                "execution reverted: ERC721: owner query for nonexistent token".into(),
+            )),
+            13 => Err((-32000, "header not found".into())),
+            _ if selector == selector_of("positions(uint256)") => Ok(json!(words(&[
+                U256::from(1u8),
+                U256::ZERO,
+                U256::from_be_slice(usdc.as_slice()),
+                U256::from_be_slice(weth.as_slice()),
+                U256::from(500u32),
+                signed(-200_000),
+                signed(-199_000),
+                U256::from(id * 1_000),
+                U256::from(11u8),
+                U256::from(12u8),
+                U256::from(3u8),
+                U256::from(4u8),
+            ]))),
+            _ => Ok(json!(words(&[U256::from_be_slice(holder.as_slice())]))),
+        }
+    });
+    let client = RpcClient::new(node.url());
+    let read = fetch_nft_positions(&client, POSITION_MANAGER, &[7, 9], 42).unwrap();
+    assert_eq!(
+        read,
+        vec![
+            Some(NftInfo {
+                token0: usdc,
+                token1: weth,
+                fee_pips: 500,
+                tick_lower: -200_000,
+                tick_upper: -199_000,
+                liquidity: 7_000,
+                fee_growth_inside0_last: U256::from(11u8),
+                fee_growth_inside1_last: U256::from(12u8),
+                tokens_owed0: 3,
+                tokens_owed1: 4,
+            }),
+            None
+        ]
+    );
+    assert_eq!(
+        fetch_nft_owners(&client, POSITION_MANAGER, &[7, 9], 42).unwrap(),
+        vec![Some(holder), None]
+    );
+    // Each read at a block of its own, position and holder together.
+    let both = read_nfts_at(&client, POSITION_MANAGER, &[(9, 42), (7, 42)]).unwrap();
+    assert_eq!(both, vec![None, Some((read[0].unwrap(), holder))]);
+    assert_eq!(
+        read_nft_positions_at(&client, POSITION_MANAGER, &[(7, 42), (9, 42)]).unwrap(),
+        read
+    );
+    // A refusal that is not about the token stops the read.
+    assert!(fetch_nft_positions(&client, POSITION_MANAGER, &[7, 13], 42).is_err());
+    assert!(fetch_nft_owners(&client, POSITION_MANAGER, &[13], 42).is_err());
 }

@@ -16,6 +16,26 @@ pub struct Log {
     pub transaction_hash: B256,
 }
 
+/// A log with the hash of the block it was read from. Two answers for the
+/// same block number with different hashes mean the chain reorganized in
+/// between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashedLog {
+    pub log: Log,
+    pub block_hash: B256,
+}
+
+/// What places a block in the chain: its number, its hash, its parent's
+/// hash and its time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHeader {
+    pub number: u64,
+    pub hash: B256,
+    pub parent_hash: B256,
+    /// Unix time, in seconds.
+    pub time: u64,
+}
+
 /// How far a node that is still syncing has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncProgress {
@@ -95,7 +115,108 @@ fn parse_log(value: &Value) -> RpcResult<Log> {
     })
 }
 
+fn parse_hashed_log(value: &Value) -> RpcResult<HashedLog> {
+    let block_hash = value
+        .get("blockHash")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<B256>().ok())
+        .ok_or_else(|| bad("eth_getLogs", "log has no `blockHash`"))?;
+    Ok(HashedLog {
+        log: parse_log(value)?,
+        block_hash,
+    })
+}
+
+fn parse_header(method: &str, block: &Value) -> RpcResult<BlockHeader> {
+    let hash = |name: &str| {
+        block
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<B256>().ok())
+            .ok_or_else(|| bad(method, format!("block has no `{name}`")))
+    };
+    Ok(BlockHeader {
+        number: parse_quantity(method, block.get("number").unwrap_or(&Value::Null))?,
+        hash: hash("hash")?,
+        parent_hash: hash("parentHash")?,
+        time: parse_quantity(method, block.get("timestamp").unwrap_or(&Value::Null))?,
+    })
+}
+
 impl RpcClient {
+    /// The header of the newest block the node has.
+    pub fn latest_header(&self) -> RpcResult<BlockHeader> {
+        const M: &str = "eth_getBlockByNumber";
+        let block = self.call(M, json!(["latest", false]))?;
+        if block.is_null() {
+            return Err(bad(M, "the node has no latest block"));
+        }
+        parse_header(M, &block)
+    }
+
+    /// Headers of several blocks, in the order asked, read in batches. A
+    /// block the node does not have is an error.
+    pub fn block_headers(&self, numbers: &[u64]) -> RpcResult<Vec<BlockHeader>> {
+        const M: &str = "eth_getBlockByNumber";
+        const PER_REQUEST: usize = 200;
+        let mut headers = Vec::with_capacity(numbers.len());
+        for group in numbers.chunks(PER_REQUEST) {
+            let calls: Vec<(&str, Value)> = group
+                .iter()
+                .map(|n| (M, json!([quantity(*n), false])))
+                .collect();
+            for (number, block) in group.iter().zip(self.batch(&calls)?) {
+                if block.is_null() {
+                    return Err(bad(M, format!("block {number} is not available")));
+                }
+                let header = parse_header(M, &block)?;
+                if header.number != *number {
+                    return Err(bad(
+                        M,
+                        format!("asked for block {number}, got {}", header.number),
+                    ));
+                }
+                headers.push(header);
+            }
+        }
+        Ok(headers)
+    }
+
+    /// Like `get_logs_many`, with each log's block hash, so that logs read
+    /// near the head can be checked against the headers they belong to.
+    pub fn get_logs_hashed(
+        &self,
+        addresses: &[Address],
+        topic0s: &[B256],
+        from_block: u64,
+        to_block: u64,
+    ) -> RpcResult<Vec<HashedLog>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = self.call(
+            "eth_getLogs",
+            json!([log_filter(addresses, topic0s, from_block, to_block)]),
+        )?;
+        let mut logs = result
+            .as_array()
+            .ok_or_else(|| bad("eth_getLogs", "expected a list of logs"))?
+            .iter()
+            .map(parse_hashed_log)
+            .collect::<RpcResult<Vec<_>>>()?;
+        if let Some(stray) = logs.iter().find(|l| !addresses.contains(&l.log.address)) {
+            return Err(bad(
+                "eth_getLogs",
+                format!(
+                    "a log of {:#x} in block {}, which was not asked for",
+                    stray.log.address, stray.log.block_number
+                ),
+            ));
+        }
+        logs.sort_by_key(|l| (l.log.block_number, l.log.log_index));
+        Ok(logs)
+    }
+
     /// Number of the latest block.
     pub fn block_number(&self) -> RpcResult<u64> {
         parse_quantity("eth_blockNumber", &self.call("eth_blockNumber", json!([]))?)
@@ -232,31 +353,10 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
     ) -> RpcResult<Vec<Log>> {
-        let address = match addresses {
-            [] => return Ok(Vec::new()),
-            [one] => json!(format!("{one:#x}")),
-            many => json!(many.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
-        };
-        let mut filter = json!({
-            "address": address,
-            "fromBlock": quantity(from_block),
-            "toBlock": quantity(to_block),
-        });
-        // Trailing positions that allow anything are left out.
-        let used = topics
-            .iter()
-            .rposition(|t| !t.is_empty())
-            .map_or(0, |i| i + 1);
-        if used > 0 {
-            let positions: Vec<Value> = topics[..used]
-                .iter()
-                .map(|allowed| match allowed.as_slice() {
-                    [] => Value::Null,
-                    some => json!(some.iter().map(|t| format!("{t:#x}")).collect::<Vec<_>>()),
-                })
-                .collect();
-            filter["topics"] = json!(positions);
+        if addresses.is_empty() {
+            return Ok(Vec::new());
         }
+        let filter = log_filter_where(addresses, topics, from_block, to_block);
         let result = self.call("eth_getLogs", json!([filter]))?;
         let mut logs = result
             .as_array()
@@ -440,6 +540,84 @@ impl RpcClient {
             median_tips,
         })
     }
+}
+
+impl RpcClient {
+    /// Many view calls at one block, sent in batches, each with its own
+    /// outcome: a call that reverts is an error in its place, and the
+    /// others stand. A reply that does not fit is an error for all.
+    pub fn eth_call_each(
+        &self,
+        calls: &[(Address, Vec<u8>)],
+        block: u64,
+        batch_size: usize,
+    ) -> RpcResult<Vec<RpcResult<Vec<u8>>>> {
+        let at: Vec<(Address, Vec<u8>, u64)> = calls
+            .iter()
+            .map(|(to, data)| (*to, data.clone(), block))
+            .collect();
+        self.eth_call_each_at(&at, batch_size)
+    }
+
+    /// Like `eth_call_each`, each call at a block of its own.
+    pub fn eth_call_each_at(
+        &self,
+        calls: &[(Address, Vec<u8>, u64)],
+        batch_size: usize,
+    ) -> RpcResult<Vec<RpcResult<Vec<u8>>>> {
+        let mut out = Vec::with_capacity(calls.len());
+        for group in calls.chunks(batch_size.max(1)) {
+            let batch: Vec<(&str, Value)> = group
+                .iter()
+                .map(|(to, data, block)| ("eth_call", call_params(*to, data, *block)))
+                .collect();
+            for result in self.batch_each(&batch)? {
+                out.push(result.and_then(|value| parse_bytes("eth_call", &value)));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The filter of an `eth_getLogs` request on the event types `topic0s`;
+/// empty means all.
+fn log_filter(addresses: &[Address], topic0s: &[B256], from_block: u64, to_block: u64) -> Value {
+    log_filter_where(addresses, &[topic0s.to_vec()], from_block, to_block)
+}
+
+/// The filter of an `eth_getLogs` request whose topics match `topics`, as
+/// `RpcClient::get_logs_where` describes.
+fn log_filter_where(
+    addresses: &[Address],
+    topics: &[Vec<B256>],
+    from_block: u64,
+    to_block: u64,
+) -> Value {
+    let address = match addresses {
+        [one] => json!(format!("{one:#x}")),
+        many => json!(many.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
+    };
+    let mut filter = json!({
+        "address": address,
+        "fromBlock": quantity(from_block),
+        "toBlock": quantity(to_block),
+    });
+    // Trailing positions that allow anything are left out.
+    let used = topics
+        .iter()
+        .rposition(|t| !t.is_empty())
+        .map_or(0, |i| i + 1);
+    if used > 0 {
+        let positions: Vec<Value> = topics[..used]
+            .iter()
+            .map(|allowed| match allowed.as_slice() {
+                [] => Value::Null,
+                some => json!(some.iter().map(|t| format!("{t:#x}")).collect::<Vec<_>>()),
+            })
+            .collect();
+        filter["topics"] = json!(positions);
+    }
+    filter
 }
 
 fn call_params(to: Address, data: &[u8], block: u64) -> Value {
@@ -895,5 +1073,110 @@ mod tests {
         assert_eq!(timestamp, 100);
         assert_eq!(format!("{hash:#x}"), format!("0x{:064x}", 5));
         assert!(client.block_header(6).is_err());
+    }
+
+    fn header_json(number: u64) -> Value {
+        json!({
+            "number": quantity(number),
+            "hash": format!("0x{:064x}", number + 1000),
+            "parentHash": format!("0x{:064x}", number + 999),
+            "timestamp": quantity(1_000 + number * 12),
+        })
+    }
+
+    #[test]
+    fn headers_come_back_with_number_hash_parent_and_time_in_the_order_asked() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_getBlockByNumber");
+            match params[0].as_str().unwrap() {
+                "latest" => Ok(header_json(42)),
+                "0x63" => Ok(Value::Null),
+                "0x64" => Ok(header_json(7)),
+                tag => Ok(header_json(
+                    u64::from_str_radix(tag.trim_start_matches("0x"), 16).unwrap(),
+                )),
+            }
+        });
+        let client = RpcClient::new(node.url());
+        let latest = client.latest_header().unwrap();
+        assert_eq!(latest.number, 42);
+        assert_eq!(latest.time, 1_000 + 42 * 12);
+        assert_eq!(
+            format!("{:#x}", latest.parent_hash),
+            format!("0x{:064x}", 1041)
+        );
+
+        let numbers: Vec<u64> = (1..=450).rev().filter(|n| *n != 99 && *n != 100).collect();
+        let headers = client.block_headers(&numbers).unwrap();
+        assert_eq!(
+            headers.iter().map(|h| h.number).collect::<Vec<_>>(),
+            numbers
+        );
+        assert_eq!(
+            headers[0].hash,
+            format!("0x{:064x}", 1450).parse::<B256>().unwrap()
+        );
+        // A block the node does not have, and an answer for another block, are errors.
+        assert!(client.block_headers(&[99]).is_err());
+        assert!(client.block_headers(&[100]).is_err());
+    }
+
+    #[test]
+    fn hashed_logs_carry_their_block_hash_and_come_in_chain_order() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_getLogs");
+            assert_eq!(params[0]["fromBlock"], "0x5");
+            let with_hash = |block: u64, index: u64| {
+                let mut log = log_json(block, index);
+                log["blockHash"] = json!(format!("0x{:064x}", block + 77));
+                log
+            };
+            Ok(json!([with_hash(6, 0), with_hash(5, 3), with_hash(5, 1)]))
+        });
+        let client = RpcClient::new(node.url());
+        let logs = client.get_logs_hashed(&[pool()], &[], 5, 6).unwrap();
+        let order: Vec<(u64, u64)> = logs
+            .iter()
+            .map(|l| (l.log.block_number, l.log.log_index))
+            .collect();
+        assert_eq!(order, vec![(5, 1), (5, 3), (6, 0)]);
+        assert_eq!(
+            logs[2].block_hash,
+            format!("0x{:064x}", 83).parse::<B256>().unwrap()
+        );
+        assert!(client.get_logs_hashed(&[], &[], 5, 6).unwrap().is_empty());
+
+        // A log without its block hash cannot be checked, so it is refused.
+        let bare = MockNode::start(|_, _| Ok(json!([log_json(5, 0)])));
+        assert!(RpcClient::new(bare.url())
+            .get_logs_hashed(&[pool()], &[], 5, 5)
+            .is_err());
+    }
+
+    #[test]
+    fn view_calls_one_by_one_keep_a_revert_in_its_place() {
+        let node = MockNode::start(|_, params| {
+            let data = params[0]["data"].as_str().unwrap().to_string();
+            if data == "0x02" || data == "0x05" {
+                Err((3, "execution reverted: Invalid token ID".into()))
+            } else {
+                Ok(json!(data))
+            }
+        });
+        let client = RpcClient::new(node.url());
+        let calls: Vec<(Address, Vec<u8>)> = (0..7u8).map(|i| (pool(), vec![i])).collect();
+        let results = client.eth_call_each(&calls, 16, 3).unwrap();
+        assert_eq!(results.len(), 7);
+        for (i, result) in results.iter().enumerate() {
+            match i {
+                2 | 5 => assert!(
+                    matches!(result, Err(RpcError::Rpc { code: 3, .. })),
+                    "{result:?}"
+                ),
+                _ => assert_eq!(result, &Ok(vec![i as u8])),
+            }
+        }
+        // The batch that fails on the first refusal still does.
+        assert!(client.eth_call_many(&calls, 16, 3).is_err());
     }
 }

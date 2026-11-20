@@ -94,23 +94,23 @@ impl Table {
     }
 }
 
-fn text<'a>(values: impl IntoIterator<Item = &'a str>) -> Column {
+pub(crate) fn text<'a>(values: impl IntoIterator<Item = &'a str>) -> Column {
     Column::Text(values.into_iter().map(|v| Some(v.to_string())).collect())
 }
 
-fn float(values: impl IntoIterator<Item = f64>) -> Column {
+pub(crate) fn float(values: impl IntoIterator<Item = f64>) -> Column {
     Column::Float(values.into_iter().map(Some).collect())
 }
 
-fn float_or_empty(values: impl IntoIterator<Item = Option<f64>>) -> Column {
+pub(crate) fn float_or_empty(values: impl IntoIterator<Item = Option<f64>>) -> Column {
     Column::Float(values.into_iter().collect())
 }
 
-fn int(values: impl IntoIterator<Item = i64>) -> Column {
+pub(crate) fn int(values: impl IntoIterator<Item = i64>) -> Column {
     Column::Int(values.into_iter().map(Some).collect())
 }
 
-fn int_or_empty(values: impl IntoIterator<Item = Option<i64>>) -> Column {
+pub(crate) fn int_or_empty(values: impl IntoIterator<Item = Option<i64>>) -> Column {
     Column::Int(values.into_iter().collect())
 }
 
@@ -441,7 +441,9 @@ pub struct PoolLiquidityRow {
     /// What the positions hold inside the bucket, in whole tokens.
     pub amount0: f64,
     pub amount1: f64,
-    /// The same in dollars, in all and split by the token held.
+    /// The same in dollars, in all and split by the token held: the base
+    /// token (the one priced, such as WETH in USDC/WETH or WBTC in
+    /// WBTC/WETH) and the quote token (the dollar stable, or WETH there).
     pub value_usd: Option<f64>,
     pub volatile_usd: Option<f64>,
     pub dollar_usd: Option<f64>,

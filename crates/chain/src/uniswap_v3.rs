@@ -238,17 +238,194 @@ pub fn fetch_positions(
         })
         .collect();
     let replies = client.eth_call_many(&calls, block, CALL_BATCH)?;
-    replies
+    replies.iter().map(|data| decode_position(data)).collect()
+}
+
+fn position_call(owner: Address, tick_lower: i32, tick_upper: i32) -> Vec<u8> {
+    let key = position_key(owner, tick_lower, tick_upper);
+    call_data("positions(bytes32)", &[U256::from_be_bytes(key.0)])
+}
+
+fn decode_position(data: &[u8]) -> ChainResult<PositionInfo> {
+    Ok(PositionInfo {
+        liquidity: as_u128("positions", word("positions", data, 0)?)?,
+        fee_growth_inside0_last: word("positions", data, 1)?,
+        fee_growth_inside1_last: word("positions", data, 2)?,
+        tokens_owed0: as_u128("positions", word("positions", data, 3)?)?,
+        tokens_owed1: as_u128("positions", word("positions", data, 4)?)?,
+    })
+}
+
+/// A pool position to read: pool, owner, range, and the block after which.
+pub type PositionRead = (Address, Address, i32, i32, u64);
+
+/// Reads pool positions, each after a block of its own, in the order
+/// asked.
+pub fn read_positions_at(
+    client: &RpcClient,
+    reads: &[PositionRead],
+) -> ChainResult<Vec<PositionInfo>> {
+    let calls: Vec<(Address, Vec<u8>, u64)> = reads
         .iter()
-        .map(|data| {
-            Ok(PositionInfo {
-                liquidity: as_u128("positions", word("positions", data, 0)?)?,
-                fee_growth_inside0_last: word("positions", data, 1)?,
-                fee_growth_inside1_last: word("positions", data, 2)?,
-                tokens_owed0: as_u128("positions", word("positions", data, 3)?)?,
-                tokens_owed1: as_u128("positions", word("positions", data, 4)?)?,
-            })
+        .map(|(pool, owner, lower, upper, block)| {
+            (*pool, position_call(*owner, *lower, *upper), *block)
         })
+        .collect();
+    client
+        .eth_call_each_at(&calls, CALL_BATCH)?
+        .into_iter()
+        .map(|reply| decode_position(&reply?))
+        .collect()
+}
+
+// --- position manager ---------------------------------------------------
+
+/// Uniswap v3's NonfungiblePositionManager on Ethereum mainnet. It holds
+/// most positions: in the pool they belong to it, and it keeps each NFT's
+/// share itself.
+pub const POSITION_MANAGER: Address =
+    alloy_primitives::address!("C36442b4a4522E871399CD717aBDD847Ab11FE88");
+
+/// A position NFT as the position manager stores it (`positions(uint256)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NftInfo {
+    pub token0: Address,
+    pub token1: Address,
+    pub fee_pips: u32,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub liquidity: u128,
+    pub fee_growth_inside0_last: U256,
+    pub fee_growth_inside1_last: U256,
+    /// Fees and principal credited to the NFT and not yet collected.
+    pub tokens_owed0: u128,
+    pub tokens_owed1: u128,
+}
+
+/// Whether a refused view call is the position manager saying the token
+/// does not exist (never minted, or burned).
+fn no_such_token(error: &RpcError) -> bool {
+    // `positions` says the first, OpenZeppelin's `ownerOf` the second.
+    matches!(error, RpcError::Rpc { message, .. }
+        if message.contains("Invalid token ID") || message.contains("nonexistent token"))
+}
+
+/// Reads position NFTs after a block, in the order asked. A token that
+/// does not exist at that block (not minted yet, or burned) is `None`; any
+/// other refusal is an error.
+pub fn fetch_nft_positions(
+    client: &RpcClient,
+    manager: Address,
+    token_ids: &[u64],
+    block: u64,
+) -> ChainResult<Vec<Option<NftInfo>>> {
+    let calls: Vec<(Address, Vec<u8>)> = token_ids
+        .iter()
+        .map(|id| (manager, call_data("positions(uint256)", &[U256::from(*id)])))
+        .collect();
+    client
+        .eth_call_each(&calls, block, CALL_BATCH)?
+        .into_iter()
+        .map(decode_nft)
+        .collect()
+}
+
+fn decode_nft(reply: Result<Vec<u8>, RpcError>) -> ChainResult<Option<NftInfo>> {
+    let data = match reply {
+        Ok(data) => data,
+        Err(error) if no_such_token(&error) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    const W: &str = "positions(uint256)";
+    Ok(Some(NftInfo {
+        token0: as_address(word(W, &data, 2)?),
+        token1: as_address(word(W, &data, 3)?),
+        fee_pips: u32::try_from(word(W, &data, 4)?)
+            .map_err(|_| ChainError::ValueOutOfRange { what: W })?,
+        tick_lower: as_i32(W, word(W, &data, 5)?)?,
+        tick_upper: as_i32(W, word(W, &data, 6)?)?,
+        liquidity: as_u128(W, word(W, &data, 7)?)?,
+        fee_growth_inside0_last: word(W, &data, 8)?,
+        fee_growth_inside1_last: word(W, &data, 9)?,
+        tokens_owed0: as_u128(W, word(W, &data, 10)?)?,
+        tokens_owed1: as_u128(W, word(W, &data, 11)?)?,
+    }))
+}
+
+fn decode_owner(reply: Result<Vec<u8>, RpcError>) -> ChainResult<Option<Address>> {
+    match reply {
+        Ok(data) => Ok(Some(as_address(word("ownerOf", &data, 0)?))),
+        Err(error) if no_such_token(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Reads position NFTs, each after a block of its own, in the order asked:
+/// `(token, block)`. A token that does not exist at its block is `None`.
+pub fn read_nft_positions_at(
+    client: &RpcClient,
+    manager: Address,
+    reads: &[(u64, u64)],
+) -> ChainResult<Vec<Option<NftInfo>>> {
+    let calls: Vec<(Address, Vec<u8>, u64)> = reads
+        .iter()
+        .map(|(token, block)| {
+            (
+                manager,
+                call_data("positions(uint256)", &[U256::from(*token)]),
+                *block,
+            )
+        })
+        .collect();
+    client
+        .eth_call_each_at(&calls, CALL_BATCH)?
+        .into_iter()
+        .map(decode_nft)
+        .collect()
+}
+
+/// Reads position NFTs and their holders, each after a block of its own,
+/// in the order asked: `(token, block)`. A token that does not exist at
+/// its block is `None`.
+pub fn read_nfts_at(
+    client: &RpcClient,
+    manager: Address,
+    reads: &[(u64, u64)],
+) -> ChainResult<Vec<Option<(NftInfo, Address)>>> {
+    let mut calls: Vec<(Address, Vec<u8>, u64)> = Vec::with_capacity(reads.len() * 2);
+    for (token, block) in reads {
+        let id = [U256::from(*token)];
+        calls.push((manager, call_data("positions(uint256)", &id), *block));
+        calls.push((manager, call_data("ownerOf(uint256)", &id), *block));
+    }
+    let replies = client.eth_call_each_at(&calls, CALL_BATCH)?;
+    let mut out = Vec::with_capacity(reads.len());
+    let mut replies = replies.into_iter();
+    while let (Some(position), Some(owner)) = (replies.next(), replies.next()) {
+        out.push(match (decode_nft(position)?, decode_owner(owner)?) {
+            (Some(info), Some(holder)) => Some((info, holder)),
+            _ => None,
+        });
+    }
+    Ok(out)
+}
+
+/// The holders of position NFTs after a block, in the order asked; `None`
+/// for a token that does not exist then.
+pub fn fetch_nft_owners(
+    client: &RpcClient,
+    manager: Address,
+    token_ids: &[u64],
+    block: u64,
+) -> ChainResult<Vec<Option<Address>>> {
+    let calls: Vec<(Address, Vec<u8>)> = token_ids
+        .iter()
+        .map(|id| (manager, call_data("ownerOf(uint256)", &[U256::from(*id)])))
+        .collect();
+    client
+        .eth_call_each(&calls, block, CALL_BATCH)?
+        .into_iter()
+        .map(decode_owner)
         .collect()
 }
 

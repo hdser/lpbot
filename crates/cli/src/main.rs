@@ -7,7 +7,8 @@
 //! volatility), `zones` (a pool's zone map), `backfill` and `demo-data` (fill
 //! the data folder), `run` (backtest an experiment on the stored history)
 //! and `gates` (every check against real chain data, in order, then the
-//! backtest, the load and the calibration).
+//! backtest, the load and the calibration). `watch-pools` keeps the live
+//! tables current from the node, block by block.
 
 mod backfill_cmd;
 mod chain_cmd;
@@ -20,6 +21,7 @@ mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
+mod watch_cmd;
 mod zones_cmd;
 
 use std::path::PathBuf;
@@ -84,6 +86,63 @@ enum Command {
     /// fee history, so backtests charge gas at the price of the block an
     /// action lands in.
     GasHistory(GasHistoryArgs),
+    /// Follow the stored pools live from the node, block by block, and keep
+    /// the live tables in Postgres current: price, liquidity, swaps, minute
+    /// rows and every position. Runs until stopped.
+    WatchPools(WatchPoolsArgs),
+}
+
+#[derive(Args)]
+struct WatchPoolsArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// Pool to follow, by address; repeat for several. Default: every
+    /// stored pool.
+    #[arg(long = "pool")]
+    pools: Vec<String>,
+    /// Data folder with the stored history. Defaults to LPBOT_DATA_DIR,
+    /// then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Database, as postgres://user:password@host:port/name. Defaults to
+    /// LPBOT_DB_URL.
+    #[arg(long)]
+    db: Option<String>,
+    /// Follow positions from this day, as YYYY-MM-DD: the replay starts at
+    /// the newest stored snapshot on or before it. Default: the earliest
+    /// snapshot, which sees the most positions and takes the longest.
+    #[arg(long)]
+    from: Option<String>,
+    /// The checkpoint file. Default: <data dir>/live/checkpoint-<chain>.json.
+    #[arg(long)]
+    state: Option<PathBuf>,
+    /// Leave the checkpoint aside and replay the stored history again.
+    #[arg(long)]
+    rebuild: bool,
+    /// How often to ask the node for a new block.
+    #[arg(long, default_value = "2s")]
+    poll: String,
+    /// The shortest time between two writes to the database.
+    #[arg(long, default_value = "10s")]
+    every: String,
+    /// How often positions in range are written again, for their fees.
+    #[arg(long, default_value = "1m")]
+    refresh: String,
+    /// How often the finalized state is saved as the checkpoint.
+    #[arg(long, default_value = "10m")]
+    checkpoint_every: String,
+    /// How long swaps and minute rows stay in the tables.
+    #[arg(long, default_value = "7d")]
+    keep: String,
+    /// How long closed positions stay in the table.
+    #[arg(long, default_value = "90d")]
+    keep_closed: String,
+    /// Connections that read positions from the node at once.
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
+    /// Stop once at the head, after one write: for a try or a catch-up.
+    #[arg(long)]
+    once: bool,
 }
 
 #[derive(Args)]
@@ -735,6 +794,64 @@ fn real_main() -> Result<()> {
                 args.results_dir.display()
             );
             Ok(())
+        }
+        Command::WatchPools(args) => {
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let chain =
+                chain_cmd::connect_to(&config, &args.chain.chain, args.chain.rpc.as_deref())?;
+            let pools = args
+                .pools
+                .iter()
+                .map(|p| chain_cmd::checked_address("pool", p))
+                .collect::<Result<Vec<_>>>()?;
+            let from = args
+                .from
+                .as_deref()
+                .map(|text| {
+                    text.parse::<lpbot_data::day::Day>()
+                        .map_err(|e| anyhow::anyhow!("--from {text}: {e}"))
+                })
+                .transpose()?;
+            let seconds = |text: &str, flag: &str| {
+                run_cmd::parse_duration(text)
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--{flag} {text}: give a duration such as 10s, 5m or 7d")
+                    })
+            };
+            let duration =
+                |text: &str, flag: &str| seconds(text, flag).map(std::time::Duration::from_secs);
+            let db = load_cmd::database(args.db).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no database given: pass --db or set LPBOT_DB_URL \
+                     (`make watch` takes it from deploy/.env)"
+                )
+            })?;
+            let lake = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let state_file = args.state.unwrap_or_else(|| {
+                lake.join("live")
+                    .join(format!("checkpoint-{}.json", args.chain.chain))
+            });
+            watch_cmd::run(
+                &config,
+                &chain,
+                &watch_cmd::WatchArgs {
+                    lake: &lake,
+                    db_url: &db,
+                    pools: &pools,
+                    from,
+                    state_file,
+                    rebuild: args.rebuild,
+                    poll: duration(&args.poll, "poll")?,
+                    every: duration(&args.every, "every")?,
+                    refresh: duration(&args.refresh, "refresh")?,
+                    checkpoint_every: duration(&args.checkpoint_every, "checkpoint-every")?,
+                    keep: seconds(&args.keep, "keep")?,
+                    keep_closed: seconds(&args.keep_closed, "keep-closed")?,
+                    threads: args.threads.max(1),
+                    once: args.once,
+                },
+            )
         }
         Command::Zones(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;

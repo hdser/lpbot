@@ -95,13 +95,13 @@ pub enum StatsError {
 }
 
 /// `sqrt(1.0001^tick)`.
-fn sqrt_at(tick: i32) -> f64 {
+pub fn sqrt_at(tick: i32) -> f64 {
     1.0001f64.powf(f64::from(tick) / 2.0)
 }
 
 /// What `liquidity` holds between `lower` and `upper` at the square root of
 /// the price `sqrt`, in smallest units, as the pool's formulas give it.
-fn amounts(liquidity: f64, lower: i32, upper: i32, sqrt: f64) -> (f64, f64) {
+pub fn amounts(liquidity: f64, lower: i32, upper: i32, sqrt: f64) -> (f64, f64) {
     let (a, b) = (sqrt_at(lower), sqrt_at(upper));
     if sqrt <= a {
         (liquidity * (1.0 / a - 1.0 / b), 0.0)
@@ -114,7 +114,7 @@ fn amounts(liquidity: f64, lower: i32, upper: i32, sqrt: f64) -> (f64, f64) {
 
 /// The ranges over which the liquidity is constant, with that liquidity,
 /// lowest first. Ranges without liquidity are left out.
-fn segments(pool: &Pool) -> Vec<(i32, i32, f64)> {
+pub fn segments(pool: &Pool) -> Vec<(i32, i32, f64)> {
     let mut ticks: Vec<(i32, i128)> = pool
         .ticks()
         .filter(|(_, info)| info.liquidity_gross > 0)
@@ -174,7 +174,9 @@ fn series_point(pool: &Pool, time: u64, block: u64, flow: &Flow) -> SeriesPoint 
     }
 }
 
-fn bucket_points(pool: &Pool, time: u64, width: i32, span: i32) -> Vec<BucketPoint> {
+/// The liquidity of `pool` in buckets `width` ticks wide, on a fixed grid,
+/// from `span` ticks below its tick to `span` above, at `time`.
+pub fn bucket_points(pool: &Pool, time: u64, width: i32, span: i32) -> Vec<BucketPoint> {
     let tick = pool.tick();
     let sqrt = sqrt_price(pool);
     let first = (tick - span).div_euclid(width);

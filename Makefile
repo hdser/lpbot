@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate load
+.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -133,6 +133,34 @@ RESULTS ?= runs
 load:
 	@LPBOT_DB_URL="postgres://lpbot:$(POSTGRES_PASSWORD)@127.0.0.1:5432/lpbot" \
 		cargo run --release -p lpbot -- load-results --results-dir $(RESULTS)
+
+## The live tables, kept current from the node by `lpbot watch-pools`.
+## The watcher service (started by `make up`) runs it in the background and
+## comes back after a restart; these targets look after it:
+##   make watch-logs      follow what it says; Ctrl-c leaves, it keeps running
+##   make watch-stop      stop it; make watch-start starts it again
+##   make watch-build     rebuild its image after a change, and restart it
+## `make watch` runs the same command in the foreground instead, for a try
+## or a long first replay inside tmux:
+##   make watch ARGS="--once"       catch up with the node, write, stop
+##   make watch ARGS="--rebuild"    replay the stored history again
+watch:
+	@LPBOT_DB_URL="postgres://lpbot:$(POSTGRES_PASSWORD)@127.0.0.1:5432/lpbot" \
+		cargo run --release -p lpbot -- watch-pools $(ARGS)
+
+# --no-deps: starting the watcher never recreates the node or the database.
+watch-build:
+	$(COMPOSE) build watcher
+	$(COMPOSE) up -d --no-deps watcher
+
+watch-start:
+	$(COMPOSE) up -d --no-deps watcher
+
+watch-stop:
+	$(COMPOSE) stop watcher
+
+watch-logs:
+	$(COMPOSE) logs -f --tail 100 watcher
 
 ## Run the unit tests.
 test:

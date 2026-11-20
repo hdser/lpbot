@@ -8,7 +8,7 @@ One command starts everything the bot needs on the home machine:
 make up
 ```
 
-It checks for Docker, creates `deploy/.env` with generated passwords, generates the engine secret shared by Reth and Lighthouse, creates the data folders, and starts five containers.
+It checks for Docker, creates `deploy/.env` with generated passwords, generates the engine secret shared by Reth and Lighthouse, creates the data folders, and starts six containers. The first time, it also builds the watcher's image from this repository, which takes a few minutes.
 
 | Service | What it is | Reachable at |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ It checks for Docker, creates `deploy/.env` with generated passwords, generates 
 | postgres | Result tables for the viewer | `127.0.0.1:5432`, database and user `lpbot` |
 | prometheus | Node metrics | `http://127.0.0.1:9090` |
 | grafana | Viewer and monitoring | `http://127.0.0.1:3000` |
+| watcher | `lpbot watch-pools`: follows the stored pools from the node block by block and keeps the live tables current, for the `lpbot: live` dashboard. See "The live tables" in [RUNBOOK.md](RUNBOOK.md) | Nothing: it writes into Postgres |
 
 Only the peer-to-peer ports (30303 and 9000, TCP and UDP) are open to the network. Forward those on the router. Never forward the others.
 
@@ -121,7 +122,7 @@ To see the results, load them into Postgres and open Grafana:
 make load
 ```
 
-On a machine without the node, `make viewer` starts Postgres, Prometheus and Grafana, which is enough to load and look at results. The `Reth node` dashboard stays empty until a node runs. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has five dashboards: every run of an experiment side by side, one run in detail, runs and strategies compared, what a run saw of pools and zones, and one pool over its stored history. Start from the runs dashboard and click a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. Loading is safe to repeat; a run loaded twice replaces itself.
+On a machine without the node, `make viewer` starts Postgres, Prometheus and Grafana, which is enough to load and look at results. The `Reth node` dashboard stays empty until a node runs. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has six dashboards: every run of an experiment side by side, one run in detail, runs and strategies compared, what a run saw of pools and zones, one pool over its stored history, and the followed pools live (filled by the watcher on the node machine). Start from the runs dashboard and click a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. Loading is safe to repeat; a run loaded twice replaces itself.
 
 `make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 

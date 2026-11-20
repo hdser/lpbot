@@ -204,6 +204,14 @@ impl RpcClient {
     /// Several calls in one HTTP request. Results come back in call order.
     /// The first JSON-RPC error fails the whole batch.
     pub fn batch(&self, calls: &[(&str, Value)]) -> RpcResult<Vec<Value>> {
+        self.batch_each(calls)?.into_iter().collect()
+    }
+
+    /// Several calls in one HTTP request, each with its own outcome, in
+    /// call order. A call the node refuses (a view call that reverts, say)
+    /// is an error in its place and leaves the others standing; a reply
+    /// that does not fit the request is an error for the whole batch.
+    pub fn batch_each(&self, calls: &[(&str, Value)]) -> RpcResult<Vec<RpcResult<Value>>> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -236,7 +244,7 @@ impl RpcClient {
             });
         }
 
-        let mut results: Vec<Option<Value>> = vec![None; calls.len()];
+        let mut results: Vec<Option<RpcResult<Value>>> = vec![None; calls.len()];
         for item in items {
             let index = item
                 .get("id")
@@ -247,7 +255,7 @@ impl RpcClient {
                     method: label.to_string(),
                     reason: "a batch reply has an unknown id".into(),
                 })? as usize;
-            results[index] = Some(extract_result(calls[index].0, item)?);
+            results[index] = Some(extract_result(calls[index].0, item));
         }
         results
             .into_iter()

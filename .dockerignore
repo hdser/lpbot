@@ -1,0 +1,9 @@
+# What the image build of deploy/lpbot.Dockerfile does not need to see.
+target
+data
+runs
+logs
+.git
+.claude
+deploy/.env
+deploy/jwt
