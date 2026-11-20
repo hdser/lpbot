@@ -1,0 +1,26 @@
+# Copying real liquidity providers on WETH/USDT 0.3%, May 2025 to 17 November 2026:
+# the owners of top open positions on revert.finance's pool pages on 20
+# November 2026, each followed with this run's own capital, block by
+# block: every position they opened on the pool in the window is entered
+# in the same range in the block after theirs, and closed in the block
+# after they close it, gas at each block's own price. 9 owner(s),
+# each in ETH and in dollars.
+#
+# The positions file is read from the node first:
+#   lpbot lp-positions --nft 1407425 --nft 1407132 --nft 1407225 --nft 1407130 --nft 1404929 --nft 1407375 --nft 1404734 --nft 1404653 --nft 1406652 --nft 1404622 --nft 1404638 --nft 1405205 --nft 675662 --nft 656895 --nft 844936 --nft 1407349 --nft 1407056 --nft 1404849 --nft 1405555 --nft 1406722 --nft 1405593  --from 2025-05-01 --out data/follow/revert.csv
+#   cargo run --release -p lpbot -- run experiments/follow-revert-weth-usdt.yml
+
+experiment: follow-revert-weth-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-11-17 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"]   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  follow.file: [data/follow/revert.csv]
+  follow.owner: ["0x2fc77839aeeba0db9e39a228c9d3cf7429905e3f", "0x42bc2b943af5194db8ab8ba82621d486d08f3d6f", "0x5160ff5305abf515ac546f9f308bb841cc9f49b2", "0x865db4adea0799f419e28ec30ff150ffacf0ca47", "0x869f1e25a0e712703b3f5e2d2d56b58ace6b56f7", "0x878164327a037001e4e9b609cc419ef30ed2882f", "0xa1097367be4c8bbdef3d881e3c24e6260afef36e", "0xb4eb77ce7d79ffc2d73629ca35cd74a32494ca48", "0xdf69fc2ce3b449a2c3d425769ce784a8d73be46b"]
