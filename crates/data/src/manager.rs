@@ -10,11 +10,14 @@
 //! ```
 //!
 //! The manager acts for every Uniswap v3 pool, not only the followed ones;
-//! the book picks out its pools' NFTs by pairing. A day is about 3,000
-//! logs, read in about three seconds from the local node.
+//! the book picks out its pools' NFTs by pairing. A day is 3,000 to 8,000
+//! logs. The local node serves a day in a few seconds and several days at
+//! once about as fast as one, so days are fetched on several connections.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use alloy_primitives::{Address, B256};
 
@@ -39,57 +42,136 @@ pub struct ManagerDays {
     pub skipped: usize,
 }
 
-/// Stores the manager's logs for every day from `from` to `to`, both
-/// included, that is not stored complete yet. A day is complete once the
-/// next day's first block is at or behind the source's head; a later day
-/// is not stored. Safe to run again: it fetches only what is missing.
-pub fn store_manager_days(
+/// One day's blocks: from `first` up to, not including, `end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayRange {
+    pub day: Day,
+    pub first: u64,
+    pub end: u64,
+}
+
+/// The block ranges of the days from `from` to `to`, both included, that
+/// are not stored complete and are over at the source's head, and how many
+/// are stored already.
+pub fn missing_ranges(
     source: &impl ChainSource,
     lake: &Path,
     chain: &str,
     from: Day,
     to: Day,
-    mut on_day: impl FnMut(Day, usize),
-) -> Result<ManagerDays, BackfillError> {
+) -> Result<(Vec<DayRange>, usize), BackfillError> {
     let store = EventStore::new(manager_root(lake));
-    let mut report = ManagerDays::default();
     let missing: Vec<Day> = days(from, to)
         .filter(|day| store.day_state(chain, MANAGER, *day) != DayState::Complete)
         .collect();
-    report.skipped = days(from, to).count() - missing.len();
-    let Some(first) = missing.first().copied() else {
-        return Ok(report);
+    let skipped = days(from, to).count() - missing.len();
+    let mut ranges = Vec::new();
+    let (Some(first), Some(last)) = (missing.first().copied(), missing.last().copied()) else {
+        return Ok((ranges, skipped));
     };
     let (head, _) = source.head()?;
-    let wanted: Vec<B256> = manager_topics::all();
     let mut start = first_block_at_or_after(source, first.start(), 0, head)?;
     let mut day = first;
-    while day <= to {
+    while day <= last {
         let next_start = first_block_at_or_after(source, day.end(), start, head)?;
         if next_start > head {
             // Not over yet at the head.
             break;
         }
         if missing.contains(&day) {
-            let logs: Vec<_> = if start < next_start {
-                source
-                    .logs(MANAGER, start, next_start - 1)?
-                    .into_iter()
-                    .filter(|log| log.topics.first().is_some_and(|t| wanted.contains(t)))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let times = block_times_on(source, &logs, day)?;
-            let logs = stored_logs(logs, &times)?;
-            store.write_day(chain, MANAGER, day, &logs, true)?;
-            report.written.push((day, logs.len()));
-            on_day(day, logs.len());
+            ranges.push(DayRange {
+                day,
+                first: start,
+                end: next_start,
+            });
         }
         start = next_start;
         day = day.next();
     }
-    Ok(report)
+    Ok((ranges, skipped))
+}
+
+/// One day of the manager's logs the book follows, with their block times.
+pub fn fetch_day(
+    source: &impl ChainSource,
+    range: &DayRange,
+) -> Result<Vec<StoredLog>, BackfillError> {
+    if range.first >= range.end {
+        return Ok(Vec::new());
+    }
+    let wanted: Vec<B256> = manager_topics::all();
+    let logs: Vec<_> = source
+        .logs(MANAGER, range.first, range.end - 1)?
+        .into_iter()
+        .filter(|log| log.topics.first().is_some_and(|t| wanted.contains(t)))
+        .collect();
+    let times = block_times_on(source, &logs, range.day)?;
+    stored_logs(logs, &times)
+}
+
+/// Stores the manager's logs for every day from `from` to `to`, both
+/// included, that is not stored complete yet, fetching `threads` days at
+/// once. A day is complete once the next day's first block is at or
+/// behind the source's head; a later day is not stored. Safe to run
+/// again: it fetches only what is missing. `on_day` hears of each day
+/// written, in no particular order.
+pub fn store_manager_days(
+    source: &(impl ChainSource + Sync),
+    lake: &Path,
+    chain: &str,
+    from: Day,
+    to: Day,
+    threads: usize,
+    on_day: impl Fn(Day, usize) + Sync,
+) -> Result<ManagerDays, BackfillError> {
+    let (ranges, skipped) = missing_ranges(source, lake, chain, from, to)?;
+    let store = EventStore::new(manager_root(lake));
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let written: Mutex<Vec<(Day, usize)>> = Mutex::new(Vec::new());
+    let errors: Mutex<Vec<BackfillError>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1).min(ranges.len().max(1)) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(range) = ranges.get(index) else {
+                    return;
+                };
+                if failed.load(Ordering::Relaxed) {
+                    return;
+                }
+                let result = fetch_day(source, range).and_then(|logs| {
+                    store.write_day(chain, MANAGER, range.day, &logs, true)?;
+                    Ok(logs.len())
+                });
+                match result {
+                    Ok(rows) => {
+                        on_day(range.day, rows);
+                        written
+                            .lock()
+                            .expect("not poisoned")
+                            .push((range.day, rows));
+                    }
+                    Err(error) => {
+                        failed.store(true, Ordering::Relaxed);
+                        errors.lock().expect("not poisoned").push(error);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    if let Some(error) = errors
+        .into_inner()
+        .expect("not poisoned")
+        .into_iter()
+        .next()
+    {
+        return Err(error);
+    }
+    let mut written = written.into_inner().expect("not poisoned");
+    written.sort();
+    Ok(ManagerDays { written, skipped })
 }
 
 fn days(from: Day, to: Day) -> impl Iterator<Item = Day> {
@@ -155,6 +237,40 @@ mod tests {
     use crate::store::testing::TempDir;
     use alloy_primitives::U256;
 
+    /// A scripted chain several threads can read.
+    struct Locked(Mutex<FakeChain>);
+
+    impl ChainSource for Locked {
+        fn head(&self) -> Result<(u64, u64), lpbot_chain::uniswap_v3::ChainError> {
+            self.0.lock().unwrap().head()
+        }
+        fn block_time(&self, block: u64) -> Result<u64, lpbot_chain::uniswap_v3::ChainError> {
+            self.0.lock().unwrap().block_time(block)
+        }
+        fn block_times(
+            &self,
+            blocks: &[u64],
+        ) -> Result<Vec<u64>, lpbot_chain::uniswap_v3::ChainError> {
+            self.0.lock().unwrap().block_times(blocks)
+        }
+        fn logs(
+            &self,
+            pool: Address,
+            from: u64,
+            to: u64,
+        ) -> Result<Vec<lpbot_chain::eth::Log>, lpbot_chain::uniswap_v3::ChainError> {
+            self.0.lock().unwrap().logs(pool, from, to)
+        }
+        fn snapshot(
+            &self,
+            pool: Address,
+            block: u64,
+        ) -> Result<lpbot_venues::uniswap_v3::pool::PoolSnapshot, lpbot_chain::uniswap_v3::ChainError>
+        {
+            self.0.lock().unwrap().snapshot(pool, block)
+        }
+    }
+
     #[test]
     fn the_managers_days_are_stored_once_and_read_back_merged_with_the_pools() {
         let genesis = Day::from_ymd(2026, 11, 1).unwrap().start();
@@ -186,16 +302,17 @@ mod tests {
             Day::from_ymd(2026, 11, 2).unwrap(),
             Day::from_ymd(2026, 11, 3).unwrap(),
         );
+        let chain = Locked(Mutex::new(chain));
         let report =
-            store_manager_days(&chain, dir.path(), "ethereum", first, third, |_, _| {}).unwrap();
+            store_manager_days(&chain, dir.path(), "ethereum", first, third, 3, |_, _| {}).unwrap();
         // The third day is not over at the head, so it is not stored.
         assert_eq!(report.written, vec![(first, 1), (second, 2)]);
         assert_eq!(
             first_missing_day(dir.path(), "ethereum", first, third),
             Some(third)
         );
-        let again =
-            store_manager_days(&chain, dir.path(), "ethereum", first, second, |_, _| {}).unwrap();
+        let again = store_manager_days(&chain, dir.path(), "ethereum", first, second, 3, |_, _| {})
+            .unwrap();
         assert!(again.written.is_empty());
         assert_eq!(again.skipped, 2);
 

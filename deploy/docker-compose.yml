@@ -1,5 +1,6 @@
 # Everything the bot needs on the home machine: an Ethereum node (Reth plus
-# Lighthouse), Postgres for result tables, Prometheus and Grafana.
+# Lighthouse), Postgres for result tables, Prometheus and Grafana, and the
+# watcher that keeps the live tables current from the node.
 #
 # Start it with `make up` from the repository root. That runs scripts/up.sh,
 # which creates deploy/.env and the engine secret on first use.
@@ -92,6 +93,37 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
     # The data directory is a bind mount owned by whoever ran `make up`.
+    user: "${HOST_UID}:${HOST_GID}"
+
+  # Follows the stored pools live from the node, block by block, and keeps
+  # the live tables in Postgres current (`lpbot watch-pools`). Built from
+  # this repository the first time `make up` runs; `make watch-build`
+  # rebuilds it after a change. It reads the pool history under
+  # DATA_DIR/lake and keeps the position manager's logs and its checkpoint
+  # there too.
+  watcher:
+    build:
+      context: ..
+      dockerfile: deploy/lpbot.Dockerfile
+      args:
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
+    image: lpbot:local
+    restart: unless-stopped
+    # A small init as the first process, so `docker compose stop` stops it
+    # at once instead of after the grace period.
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      reth:
+        condition: service_started
+    environment:
+      LPBOT_RPC: http://reth:8545
+      LPBOT_DB_URL: postgres://lpbot:${POSTGRES_PASSWORD}@postgres:5432/lpbot
+      LPBOT_DATA_DIR: /data/lake
+    volumes:
+      - ${DATA_DIR}/lake:/data/lake
+    command: watch-pools --config config/mainnet.yml ${LPBOT_WATCH_ARGS:-}
     user: "${HOST_UID}:${HOST_GID}"
 
   grafana:

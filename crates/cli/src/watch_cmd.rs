@@ -927,11 +927,19 @@ fn rebuild(
         };
         println!("storing the position manager's logs from {missing} to {to}");
         let started = Instant::now();
-        let report = store_manager_days(&source, args.lake, &chain.name, missing, to, |day, n| {
-            if day.0 % 10 == 0 {
-                println!("  {day}: {n} logs ({:.0?} so far)", started.elapsed());
-            }
-        })?;
+        let report = store_manager_days(
+            &source,
+            args.lake,
+            &chain.name,
+            missing,
+            to,
+            args.threads,
+            |day, n| {
+                if day.0 % 10 == 0 {
+                    println!("  {day}: {n} logs ({:.0?} so far)", started.elapsed());
+                }
+            },
+        )?;
         println!(
             "  {} day(s) stored, {} already there",
             report.written.len(),
