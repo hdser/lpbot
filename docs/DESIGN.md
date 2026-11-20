@@ -259,7 +259,7 @@ Three free streams feed everything: pool events from your node, reference prices
 
 - A snapshot to disk every few thousand blocks, so restart does not replay from genesis.
 - A periodic checksum against on-chain `slot0`, `liquidity` and `ticks()`. A mismatch halts trading on that pool.
-- An undo log for recent blocks, driven by the node's reorg notifications. On L2s, track unsafe, safe and finalized heads separately. Not built yet: until it is, everything stored is read at or behind the finalized block, where no reorg reaches.
+- A way back from reorgs near the head. What is stored is read at or behind the finalized block, where no reorg reaches. What follows the head (`lpbot watch-pools`, below) keeps two states: one at the newest finalized block, and one at the head, with the blocks between kept with their hashes and logs. Each step checks that the block it stands on is still the node's; when it is not, the head state is rebuilt from the finalized one and the kept blocks still on the chain, and the rest is fetched again. On L2s, track unsafe, safe and finalized heads separately.
 
 Every change to the replica is all-or-nothing: a mint, burn, flash or swap that fails leaves the state as it was, and the step observer sees a swap's steps only once it has succeeded. A virtual position's bounds are *watched* ticks: swap steps split there so the position's share of each step is exact, but the contract has no such tick. Watched ticks keep their own fee growth outside, apart from the contract's, and every swap ends at the tick the contract would hold, in both directions.
 
@@ -279,11 +279,24 @@ Read the protocol-fee setting per pool. Uniswap's fee switch now applies to v2 a
 ```text
 <data>/events/chain=<chain>/pool=<address>/day=<YYYY-MM-DD>/events.parquet
 <data>/snapshots/chain=<chain>/pool=<address>/day=<YYYY-MM-DD>.json
+<data>/manager/events/chain=<chain>/pool=<position manager>/day=<YYYY-MM-DD>/events.parquet
+<data>/live/checkpoint-<chain>.json
 ```
+
+The `manager` folder holds the position manager's own logs (`IncreaseLiquidity`, `DecreaseLiquidity`, `Collect`, `Transfer`), which following position NFTs needs; `lpbot watch-pools` stores the days it needs the first time, four at a time. `live` holds its checkpoint.
 
 A day is a UTC day. A finished day is written once and never touched again; the day in progress is kept as `events.partial.parquet` and rewritten by the next backfill, so a re-run fetches only what is new. A day counts as finished only once its last block is at or behind the node's finalized block (a few blocks behind the head, with a warning, on a node that does not serve the `finalized` tag). One backfill run reads one head and stores every pool up to it. It goes day by day, not pool by pool: each day's logs of every pool that still needs the day come from one `eth_getLogs` request per chunk, naming all those pools, and are split by pool on our side. The node reads a block's receipts once however many pools a request names, so a first backfill of the 24-pool universe costs about what its busiest pool alone does; one pool at a time took about 7 hours on the owner's node in November 2026, most of it the node reading the same blocks again for each pool. A pool that cannot start (its state unreadable) fails alone and the others go on; a failure of the node stops the run, and a re-run carries on from what is stored. The snapshot for a day is the pool's full state right before that day's first block, the point every replay starts from; a re-run reuses the newest stored snapshot when every day from it on is stored, instead of taking a new one each day. A pool created after the start asked for is stored from its first whole day. Reading a range of days fails on a missing day, so a gap is never mistaken for a quiet day.
 
 Writes survive a power cut: each file goes to a temporary name of its own, is synced, renamed into place, and its folder synced. A file found empty or cut short (no Parquet footer, or JSON that does not parse) counts as missing, so the next backfill fetches it again; it is renamed to `<name>.damaged` and named on the error output.
+
+**Following the pools live.** `lpbot watch-pools`, run as the watcher service, keeps every stored pool current from the local node. It starts from its checkpoint, or the first time from the stored history: each pool's snapshot and stored days and the position manager's days, merged in chain order and replayed day by day. Then it polls the node every two seconds over HTTP: the newest header, the finalized block, the headers of the new blocks, and in one `eth_getLogs` every log of the pools and the position manager in them, each log checked against its block's hash. New blocks are applied to the head state; blocks at or behind the finalized one move into the finalized state, which is saved as the checkpoint every ten minutes. A reorg is handled as above. Catching up after a stop goes 500 blocks per step. Polling HTTP stands in for ExEx or WebSocket notifications for now: a block comes every 12 seconds, and the cost is three small requests per poll.
+
+**Positions.** The watcher follows every position of the followed pools, as the contracts account for them:
+
+- *Pool positions*, by owner and range, from the pool's `Mint`, `Burn` and `Collect`: liquidity, the fee growth inside the range when last touched, and what the pool owes. Fees are credited exactly as the pool does before every change, with the fee growth read after a mint sets up its ticks and before a burn clears them.
+- *Position NFTs*, from the position manager's `IncreaseLiquidity`, `DecreaseLiquidity`, `Collect` and `Transfer`. An NFT event names only its token; the manager's pool event just before it in the same transaction (same liquidity for an increase or decrease) says which pool and range. Each NFT's fees are credited at the fee growth the manager reads, its own pool position's. The manager's pool positions are the NFTs added up and are not shown.
+
+A position the book meets for the first time may have held something before the history began. Unless it is minting into a range no one holds (then it starts from nothing), it is read from the node after the block before its first event: `positions(key)` from the pool, `positions(tokenId)` and `ownerOf` from the manager. From then on it is followed exactly. A position emptied and collected leaves the book and starts from nothing when used again, as on the chain. What the book cannot see is a position that held liquidity before the history began and that nobody has touched since: its liquidity stays unattributed, and each pool reports the share of its active liquidity that the book attributes. Something that does not add up (a burn of more than the book knew of) is counted and shown, never a reason to stop.
 
 **The table that matters most: the zone map.** For each pool it holds a grid of candidate ranges by lookback, with full passes per day, share of time in range, and the spread of return times after price leaves. It is updated incrementally from pool prices and drives zone choice and the patience policy. Markouts and arbitrage-loss figures can be added later as diagnostics; nothing depends on them.
 
@@ -659,6 +672,7 @@ risk:
 | `lpbot demo-data` | Writes a simulated pool history into its own folder, to try the pipeline before the node is synced |
 | `lpbot calibrate <experiment.yml>` | Fits the adaptive decision's settings on one window and scores them on the next against the three fixed rules, fold after fold. Says which ships and writes it to `<results>/calibration/` |
 | `lpbot load-results` | Loads the result tables into Postgres for the viewer. Tables are created from the files, and a run loaded twice replaces itself |
+| `lpbot watch-pools` | Follows the stored pools from the node block by block and keeps the live tables current; the watcher service runs it. `--from <date>` follows positions from a later snapshot, `--rebuild` replays the stored history again, `--once` stops at the head |
 | `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests run today, with the adaptive decision or a fixed rule |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
 | `lpbot live` --loss-limit \<pct> --autonomy \<mode> | Runs with real funds through the Safe |
@@ -739,6 +753,18 @@ A pool without a dollar stable, such as WBTC/WETH, is priced in dollars through 
 
 The value held by positions leaves out fees earned but not collected, which a pool's token balances include, so it reads somewhat below a TVL taken from balances: on 19 November 2026 the USDC/WETH 0.05% pool held $61.8M in positions against $71.7M on revert.finance a day later, while volume and fees agreed within the difference between the two days.
 
+**What the watcher writes.** Five live tables, written straight into Postgres by `lpbot watch-pools` rather than as files, each row replaced by its key. Every write is one transaction. Swaps and minute rows are kept seven days and closed positions ninety (`--keep`, `--keep-closed`); the hourly history of a pool stays in `pool_series`.
+
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `live_pools` | Pool | The last block applied, the node's head and finalized block, price, active liquidity, value held, dollars per token, volume, fees and swaps over the last hour and day, open positions and those in range, the share of active liquidity attributed to known positions, reorgs and anomalies |
+| `live_pool_series` | Pool and minute with activity | Open, high, low and close of the price, liquidity at the close, volume and fees in tokens and dollars, swaps, mints and burns |
+| `live_liquidity` | Pool, scope and bucket of prices | The liquidity around the price now, with what it holds by token and in dollars: `near` (a tick spacing per bucket, 2% either side) and `wide` (0.5% buckets, 20% either side) |
+| `live_swaps` | Swap | Block, time, transaction, sender and recipient, amounts, buy or sell of the base token, price after, value and fee in dollars |
+| `live_positions` | Position | NFT id or owner, range in ticks and prices, liquidity and share of the active liquidity, what it holds now and its dollar value, what its owner could collect now, fees earned while followed, put in, taken out and collected, when it opened and closed, when the watcher started following it |
+
+A position NFT is `nft-<token>`. A pool position is its owner, range and the block its liquidity came in, so the many positions some owners open and close in a single block each keep a row. Open positions in range are written again every minute, as their fees and holdings move with the price; the rest when an event touches them.
+
 **The viewer.** It is generic because it knows only these tables, never a particular experiment. A new strategy or sweep needs no new charts. My choice is Grafana, since it is already in the stack for monitoring; a small web page served by the bot itself is the alternative if you prefer no extra tool.
 
 | View | Shows |
@@ -749,7 +775,7 @@ The value held by positions leaves out fees earned but not collected, which a po
 | Decisions | Each patience decision with its three options, what was chosen and what happened next |
 | Pools and zones | The ranking table through time; the zone map as a heat map |
 | Pool | One pool over its history: price, value held by positions, volume, fees, volume over value held, active liquidity; the liquidity around the price now as stacked bars by token held, and over time as a heat map. The run detail shows the same heat map for the run's pool under the price and range |
-| Live | The same views on the running bot, plus node and safety status |
+| Live | Every followed pool now, then one pool: price, value held, volume and fees over the last hour and day, active liquidity, positions open and in range, the share of liquidity attributed, how far behind the head the watcher is and when it last wrote; price, volume, liquidity, fees and events minute by minute; the liquidity near and around the price now; every open position with its NFT (linked to the Uniswap app), owner, range, value, what it could collect and fees earned; recent swaps and recently closed positions. Refreshes every ten seconds. The running bot's own views and safety status come with paper mode |
 
 Backtest, simulation and live runs appear in the same views, so a live run can be laid directly over the simulation it came from.
 
@@ -757,7 +783,7 @@ Backtest, simulation and live runs appear in the same views, so a live run can b
 
 Everything runs from one Docker Compose file on the machine at home, plus the watchdog on a small machine somewhere else. All tooling is open source and free.
 
-**Services.** Ethereum execution and consensus clients, one L2 node per chain, the bot (ingest, engine, executor as one binary at first), the signer, Postgres, Prometheus, Grafana and Alertmanager.
+**Services.** Ethereum execution and consensus clients, one L2 node per chain, the bot (ingest, engine, executor as one binary at first), the signer, Postgres, Prometheus, Grafana and Alertmanager. Running today: the two clients, Postgres, Prometheus, Grafana, and the watcher (`lpbot watch-pools`), built from the repository by `make up`.
 
 **Keys.**
 

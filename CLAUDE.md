@@ -12,7 +12,7 @@ Do not reopen these without the owner asking.
 
 - **Language:** all Rust. No Python, no notebooks. The only non-Rust piece will be a small TypeScript script that applies the Safe roles policy.
 - **Experiments:** every run (backtest, paper, live) is one YAML file in `experiments/` over a base config in `config/`. No experiment-specific code.
-- **Results:** every run writes the same six tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map`. Besides them, two pool tables, keyed by pool and not by run, hold what each pool looked like over its stored history: `pool_series` and `pool_liquidity`, from `lpbot pool-stats` (added at the owner's request on 19 November 2026). The viewer (Grafana) knows only these eight tables.
+- **Results:** every run writes the same six tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map`. Besides them, two pool tables, keyed by pool and not by run, hold what each pool looked like over its stored history: `pool_series` and `pool_liquidity`, from `lpbot pool-stats` (added at the owner's request on 19 November 2026). Five live tables hold the followed pools now, kept current from the node by `lpbot watch-pools`: `live_pools`, `live_pool_series`, `live_liquidity`, `live_swaps`, `live_positions` (added at the owner's request on 20 November 2026). The viewer (Grafana) knows only these thirteen tables.
 - **Universe:** WETH, WBTC, USDC, USDT. A pool qualifies only if both tokens are listed.
 - **Ranking:** implied volatility from fee, volume and in-range liquidity (not total liquidity), at the price and per zone.
 - **Run inputs:** capital, loss limit (percent, in the value token) and autonomy (`auto` or `approve`). Capital and loss limit have no default; a run refuses to start without them. Backtests always run as `auto`.
@@ -91,7 +91,7 @@ Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range 
 
 1. **Uniswap v3 math** in `crates/venues` (`uniswap_v3::math`): TickMath, FullMath, SqrtPriceMath, SwapMath, LiquidityAmounts, fee growth inside a range.
    - Gate: unit tests from the reference vectors in the Uniswap v3 test suite pass; a differential test against the deployed pool on a mainnet fork agrees exactly on randomized swaps and mints. The fork test is not written yet; until it is, `lpbot verify-pool` against the node is the only check independent of the code.
-2. **Pool-state replica** in `crates/venues`: rebuild `slot0`, active liquidity, the tick map and fee growth from Initialize, Mint, Burn, Swap and Collect events, with snapshots and an undo log for reorgs. The undo log is not built: stored days close only at the finalized block, where no reorg reaches.
+2. **Pool-state replica** in `crates/venues`: rebuild `slot0`, active liquidity, the tick map and fee growth from Initialize, Mint, Burn, Swap and Collect events, with snapshots and a way back from reorgs. Stored days close only at the finalized block, where no reorg reaches; the live follower (`lpbot_data::live`) keeps the finalized state and the blocks past it, and rebuilds from there on a reorg.
    - Gate: after replaying a block range, state equals on-chain `slot0`, `liquidity` and `ticks()` at the end block.
 3. **Backfill** in `crates/data`: pool discovery from the factory, events and block headers for qualifying pools into Parquet, partitioned by pool and day. Chunked `eth_getLogs` first; node-local extraction later.
    - Gate: a re-run is idempotent, and the stored history replays to every pool's state on the chain at the end block.
@@ -103,6 +103,18 @@ Where things ended up: the ranking is in `lpbot_core::ranking`, the entry-range 
    - Gate: fees collected by real on-chain positions in the pool are reproduced within 0.1%.
 7. **`lpbot run`** wired to the replay engine for `mode: backtest`, with the three fixed patience rules.
    - Gate: `experiments/width-and-patience-eth.yml` runs end to end for the fixed rules and writes all six tables.
+
+## Live pools
+
+Added on 20 November 2026 at the owner's request: every stored pool followed from the local node block by block, with every position, for the `lpbot: live` dashboard. It runs as the `watcher` service of `deploy/docker-compose.yml` (`make up`, `make watch-logs`, `make watch-build`); `deploy/RUNBOOK.md` has the rest.
+
+- `lpbot_data::positions`: the position book. Pool positions by owner and range, and position NFTs by token, followed as the contracts do; NFT events pair with the manager's pool event before them in the same transaction. A position first met is read from the node at the block before (`Wanted`, `Seed`), except one minting into a range no one holds.
+- `lpbot_data::manager`: the position manager's logs, stored by day under `<lake>/manager`, fetched four days at a time.
+- `lpbot_data::live`: the live state (replicas, book, minute bars, swaps), `replay_history`, the `Follower` (finalized base, tail of blocks with hashes, rebuild on a reorg) and the checkpoint under `<lake>/live`.
+- `lpbot_sim::live_tables` and `lpbot_sim::live_db`: the five tables, their keys and upserts; `deploy/postgres/schema.sql` carries them, kept in step by the same test.
+- `crates/cli/src/watch_cmd.rs`: the command, the dollar prices (the pool-stats rules, with WBTC/WETH priced through USDC/WETH), the rows and the writes.
+
+Known gaps: a position that held liquidity before the stored history began and that nobody touched since is never seen, so its liquidity is unattributed (`live_pools.known_share` says how much is); the follower polls HTTP rather than taking ExEx or WebSocket notifications; it exports no Prometheus metrics yet, so "is it current" is read from the tables.
 
 ## Phase 2: where it stands
 

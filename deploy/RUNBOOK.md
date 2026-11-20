@@ -6,8 +6,8 @@ What to type on the node machine for the things that come up: starting a long jo
 
 | | Services | Jobs |
 | --- | --- | --- |
-| What | The containers: Reth, Lighthouse, Postgres, Prometheus, Grafana | Commands that run until they are done: `make snapshot`, `make gates`, `make history`, `make backtest`, `make calibrate` |
-| Started with | `make up`, or `make viewer` for all but the node | Typing them, inside `tmux` |
+| What | The containers: Reth, Lighthouse, Postgres, Prometheus, Grafana, and the watcher that keeps the live tables current | Commands that run until they are done: `make snapshot`, `make gates`, `make history`, `make backtest`, `make calibrate` |
+| Started with | `make up`, or `make viewer` for Postgres, Prometheus and Grafana alone | Typing them, inside `tmux` |
 | When your SSH connection drops | Keep running | Keep running if they were started inside `tmux`; stop otherwise |
 | When the machine restarts | Come back by themselves | Are gone. Start them again: each carries on from what it already stored |
 
@@ -45,6 +45,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 | `make gates` | Once the node is synced | `make gates` again, or `make gates STEP=<step>` to start at the step that was running. What is stored is not fetched again. A day file a power cut left empty or cut short is renamed to `<name>.damaged`, named in the output, and fetched again; the `.damaged` files can be deleted |
 | `make history`, `make backtest`, `make calibrate`, `make load` | The steps of `make gates`, one by one | The same command again |
 | `make pool-stats` | After `make history`, for the pool dashboard (price, value held, volume, fees, the liquidity around the price); `make load` then loads it | The same command again: it replaces each pool's tables |
+| `make watch` | Only to run the watcher by hand instead of as a service: stop the service first (`make watch-stop`), the two must not run at once. See "The live tables" below | The same command again: it carries on from its checkpoint |
 
 ### Is the snapshot download working?
 
@@ -61,6 +62,54 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
 | `bi` and `bo` both near 0 for several minutes | Waiting, or stopped. Look at the `node` session; if it shows a prompt, the download is not running |
 
 `vmstat` only watches. It can run, or not, without changing the download.
+
+## The live tables (the watcher)
+
+The watcher is the service that runs `lpbot watch-pools`. It follows every stored pool from the local node, block by block, and keeps the live tables in Postgres current; the Grafana dashboard `lpbot: live` reads them. It is a container like the others: `make up` builds and starts it, and it comes back by itself after a restart.
+
+| To | Type |
+| --- | --- |
+| See what it is doing | `make watch-logs` (Ctrl-c leaves; it keeps running) |
+| Stop it, start it again | `make watch-stop`, `make watch-start` |
+| Run a new version after `git pull` | `make watch-build`: it rebuilds the image (a few minutes, two compile jobs) and restarts it, which carries on from its checkpoint |
+| Check that it keeps up | The dashboard's "Blocks behind the head" (0 or 1) and "Written" (seconds since its last write) |
+
+**The first start takes a while.** With no checkpoint it builds its state from the stored history, and says so line by line in `make watch-logs`:
+
+1. `storing the position manager's logs from ... to ...`: the NFT events of the stored days, read from the node and kept under `DATA_DIR/lake/manager`. Four days at a time, a few seconds per day: about 15 minutes for a year. Only the first time; later starts find them stored.
+2. `rebuilding from the stored history`, then one line per day: every pool and position replayed from the first snapshot. Positions it meets for the first time are read from the node at the block before.
+3. `following ... pool(s) from block ...`: it catches up with the node, 500 blocks per step, then follows the head.
+
+It saves a checkpoint of its state at the finalized block every ten minutes, `DATA_DIR/lake/live/checkpoint-ethereum.json`. A restart, of the container or the machine, carries on from there: `carrying on from the checkpoint at block ...`, then it catches up on what it missed. A stop of hours or days is caught up the same way, from the node.
+
+**Its messages.**
+
+| It says | It means |
+| --- | --- |
+| `reorg: N block(s) taken back` | The chain replaced its newest blocks. It rebuilt its state from the finalized block and wrote the affected rows again. Nothing to do |
+| `... reading again` | The node's answers did not fit together, usually because a block arrived meanwhile. It tries again at once |
+| `the node did not answer` | Reth is down or busy. It waits and tries again, longer each time; it carries on when Reth is back |
+| `could not write to the database` | Postgres is down or refused a write. It keeps following, and writes everything again once Postgres is back |
+| `note: block N: ...` | A position did not add up, most often one that held liquidity before the stored history began and that nobody touched since. It carries on; the count is in `live_pools.anomalies` |
+| `the chain reorganized below the finalized block` | Should not happen. Rebuild, as below |
+
+**Rebuild** when it stopped on an error that names the checkpoint, or to follow positions from another day:
+
+```sh
+make watch-stop
+rm "$(sed -n 's/^DATA_DIR=//p' deploy/.env | tr -d '"')/lake/live/checkpoint-ethereum.json"
+make watch-start          # no checkpoint: it rebuilds from the stored history
+```
+
+To follow positions from a later day, which is quicker but sees fewer positions, set `LPBOT_WATCH_ARGS="--from 2026-01-31"` in `deploy/.env` before `make watch-start`; the replay starts at the newest snapshot on or before that day.
+
+**Running it by hand.** `make watch` runs the same command in the foreground, from the source; use it inside `tmux`, with the service stopped:
+
+```sh
+make watch-stop
+tmux new -s watch
+make watch                     # or: make watch ARGS="--once" to catch up, write once and stop
+```
 
 ## After the machine was off
 
@@ -121,3 +170,4 @@ sudo poweroff
 | The node's own log | `make logs`; Ctrl-c leaves it and the node keeps running |
 | Temperatures | `sensors` (package `lm-sensors`); `sudo nvme smart-log /dev/nvme0` (package `nvme-cli`) |
 | Dashboards | From the laptop: `make tunnel HOST=<user>@<node machine>`, then http://127.0.0.1:3001 |
+| The live tables | The `lpbot: live` dashboard: "Blocks behind the head" and "Written"; `make watch-logs` |

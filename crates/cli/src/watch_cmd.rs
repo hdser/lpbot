@@ -462,6 +462,9 @@ struct Writer {
     client: Option<postgres::Client>,
     /// Swaps not yet written, kept across a failed write.
     pending_swaps: Vec<LiveSwapRow>,
+    /// Rows of positions that finished, not yet written: they have left
+    /// the book, so a full write would not find them again.
+    pending_finished: Vec<LivePositionRow>,
     /// The tick of each pool at the last refresh of positions in range.
     last_ticks: HashMap<Address, i32>,
     last_refresh: Option<Instant>,
@@ -477,6 +480,7 @@ impl Writer {
             url: url.to_string(),
             client: None,
             pending_swaps: Vec::new(),
+            pending_finished: Vec::new(),
             last_ticks: HashMap::new(),
             last_refresh: None,
             full: true,
@@ -599,7 +603,11 @@ impl Writer {
         };
         let mut counts: BTreeMap<Address, Counts> = BTreeMap::new();
         let mut written: BTreeSet<PositionId> = BTreeSet::new();
-        for view in changed.iter().chain(finished.iter()) {
+        for view in &finished {
+            self.pending_finished.push(row_of(view));
+            written.insert(view.id);
+        }
+        for view in &changed {
             batch.positions.push(row_of(view));
             written.insert(view.id);
         }
@@ -761,6 +769,12 @@ impl Writer {
             .map(|a| pricing.label(*a).pool.clone())
             .collect();
         let swaps_kept = batch.swaps.clone();
+        // Finished positions go first, so a position that finished and
+        // opened again since keeps its newer row.
+        let finished_kept = std::mem::take(&mut self.pending_finished);
+        let mut positions = finished_kept.clone();
+        positions.append(&mut batch.positions);
+        batch.positions = positions;
         match self.commit(batch, &pools, retention) {
             Ok(rows) => {
                 if retention.is_some() {
@@ -774,6 +788,8 @@ impl Writer {
                 self.full = true;
                 self.pending_swaps = swaps_kept;
                 self.pending_swaps.truncate(200_000);
+                self.pending_finished = finished_kept;
+                self.pending_finished.truncate(200_000);
                 Err(error)
             }
         }
