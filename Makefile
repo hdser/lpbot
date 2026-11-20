@@ -142,12 +142,13 @@ watch:
 	@LPBOT_DB_URL="postgres://lpbot:$(POSTGRES_PASSWORD)@127.0.0.1:5432/lpbot" \
 		cargo run --release -p lpbot -- watch-pools $(ARGS)
 
+# --no-deps: starting the watcher never recreates the node or the database.
 watch-build:
 	$(COMPOSE) build watcher
-	$(COMPOSE) up -d watcher
+	$(COMPOSE) up -d --no-deps watcher
 
 watch-start:
-	$(COMPOSE) up -d watcher
+	$(COMPOSE) up -d --no-deps watcher
 
 watch-stop:
 	$(COMPOSE) stop watcher
