@@ -18,7 +18,7 @@ use lpbot_data::backfill::{first_block_at_or_after, NodeSource};
 use lpbot_data::day::Day;
 use lpbot_data::lake::stored_pools;
 use lpbot_data::lp_history::{
-    holdings, owner_of, read_positions, LpPosition, LpSource, POSITION_MANAGER,
+    holdings_of_many, owner_of, read_positions, LpPosition, LpSource, POSITION_MANAGER,
 };
 use lpbot_data::snapshot::SnapshotStore;
 
@@ -32,13 +32,20 @@ struct NodeLp<'a> {
 
 impl LpSource for NodeLp<'_> {
     fn logs(&self, topics: &[Vec<B256>], from: u64, to: u64) -> Result<Vec<Log>, ChainError> {
+        // A long scan says how far it is, every million blocks or so.
+        let mut reported = from;
         Ok(self.client.get_logs_chunked_where(
             &[POSITION_MANAGER],
             topics,
             from,
             to,
             self.chunk,
-            |_, _| {},
+            |done, found| {
+                if done - reported >= 1_000_000 && to - from > 1_000_000 {
+                    eprintln!("    block {done} of {to}: {found} log(s)");
+                    reported = done;
+                }
+            },
         )?)
     }
 
@@ -158,9 +165,15 @@ pub fn run(config: &Config, client: &RpcClient, args: &LpPositionsArgs) -> Resul
     owners.dedup();
 
     let pools = stored_pool_index(config, args.root, args.chain)?;
+    println!(
+        "  reading the NFTs of {} owner(s) since {}",
+        owners.len(),
+        args.from
+    );
+    let mut all_held = holdings_of_many(&source, &owners, from, head)?;
     let mut all = Vec::new();
     for owner in &owners {
-        let held = holdings(&source, *owner, from, head)?;
+        let held = all_held.remove(owner).unwrap_or_default();
         let positions = read_positions(&source, *owner, &held)?;
         let on_ours: Vec<&LpPosition> = positions
             .iter()

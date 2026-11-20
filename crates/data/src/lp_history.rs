@@ -304,17 +304,31 @@ pub fn holdings(
     from: u64,
     to: u64,
 ) -> Result<Vec<Holding>, ChainError> {
-    let owner_topic = vec![address_topic(owner)];
-    let received = source.logs(
-        &[vec![transfer_topic()], vec![], owner_topic.clone()],
-        from,
-        to,
-    )?;
-    let sent = source.logs(&[vec![transfer_topic()], owner_topic], from, to)?;
-    let mut held: BTreeMap<U256, Holding> = BTreeMap::new();
+    Ok(holdings_of_many(source, &[owner], from, to)?
+        .remove(&owner)
+        .unwrap_or_default())
+}
+
+/// `holdings` for several owners at once: the node is asked twice in all
+/// (transfers to any of them, transfers from any of them), not twice for
+/// each owner, which is what makes a dozen providers quick to read.
+pub fn holdings_of_many(
+    source: &impl LpSource,
+    owners: &[Address],
+    from: u64,
+    to: u64,
+) -> Result<BTreeMap<Address, Vec<Holding>>, ChainError> {
+    let mut by_owner: BTreeMap<Address, BTreeMap<U256, Holding>> =
+        owners.iter().map(|o| (*o, BTreeMap::new())).collect();
+    if owners.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let topics: Vec<B256> = owners.iter().map(|o| address_topic(*o)).collect();
+    let received = source.logs(&[vec![transfer_topic()], vec![], topics.clone()], from, to)?;
+    let sent = source.logs(&[vec![transfer_topic()], topics], from, to)?;
     for log in &received {
         if let Some((_, receiver, id)) = decode_transfer(log) {
-            if receiver == owner {
+            if let Some(held) = by_owner.get_mut(&receiver) {
                 held.entry(id).or_insert(Holding {
                     token_id: id,
                     from_block: log.block_number,
@@ -325,14 +339,17 @@ pub fn holdings(
     }
     for log in &sent {
         if let Some((sender, _, id)) = decode_transfer(log) {
-            if let Some(holding) = held.get_mut(&id) {
-                if sender == owner && log.block_number >= holding.from_block {
+            if let Some(holding) = by_owner.get_mut(&sender).and_then(|h| h.get_mut(&id)) {
+                if log.block_number >= holding.from_block {
                     holding.to_block = holding.to_block.min(log.block_number);
                 }
             }
         }
     }
-    Ok(held.into_values().collect())
+    Ok(by_owner
+        .into_iter()
+        .map(|(owner, held)| (owner, held.into_values().collect()))
+        .collect())
 }
 
 /// Every NFT passed to `owner` in the block range, by token id.
@@ -645,6 +662,26 @@ mod tests {
         assert_eq!(asked[0][2], vec![address_topic(owner)]);
         assert_eq!(asked[1][1], vec![address_topic(owner)]);
         assert_eq!(asked[2][1], vec![id_topic(3), id_topic(5)]);
+    }
+
+    #[test]
+    fn several_owners_are_read_with_two_requests() {
+        let a = Address::repeat_byte(0xaa);
+        let b = Address::repeat_byte(0xbb);
+        let chain = FakeChain {
+            logs: vec![
+                transfer(Address::ZERO, a, 3, 5),
+                transfer(Address::ZERO, b, 4, 6),
+                transfer(b, Address::ZERO, 4, 9),
+                transfer(Address::ZERO, Address::repeat_byte(0xcc), 5, 7),
+            ],
+            asked: RefCell::new(Vec::new()),
+        };
+        let held = holdings_of_many(&chain, &[a, b], 0, 100).unwrap();
+        assert_eq!(chain.asked.borrow().len(), 2);
+        assert_eq!(held[&a].len(), 1);
+        assert_eq!((held[&b][0].from_block, held[&b][0].to_block), (6, 9));
+        assert_eq!(held.len(), 2, "only the owners asked about");
     }
 
     #[test]
