@@ -72,7 +72,7 @@ The watcher is the service that runs `lpbot watch-pools`. It follows every store
 | See what it is doing | `make watch-logs` (Ctrl-c leaves; it keeps running) |
 | Stop it, start it again | `make watch-stop`, `make watch-start` |
 | Run a new version after `git pull` | `make watch-build`: it rebuilds the image (a few minutes, two compile jobs) and restarts it, which carries on from its checkpoint |
-| Check that it keeps up | The dashboard's "Blocks behind the head" (0 or 1) and "Written" (seconds since its last write) |
+| Check that it keeps up | The dashboard's "Block age" (how old the last block it applied is: up to about 12 seconds), "Blocks behind the head" (0 or 1) and "Written" (seconds since its last write). A block age of minutes with 0 blocks behind is the node itself behind the chain: see "After the internet was down" |
 
 **The first start takes a while.** With no checkpoint it builds its state from the stored history, and says so line by line in `make watch-logs`:
 
@@ -151,6 +151,22 @@ make watch                     # or: make watch ARGS="--once" to catch up, write
    | A `sudo` line with `COMMAND=` and `poweroff` or `shutdown` | Someone typed it |
    | It stops in the middle of ordinary lines, with none of the above | A power cut, a held power button, or the firmware cutting the power. Nothing was closed properly; Reth's database is built to survive that and may re-sync a little. The log reaches the disk every few minutes, so the cut can be up to five minutes after the last line |
 
+## After the internet was down
+
+The machine and the containers keep running without the internet, and nothing needs restarting when it comes back. While it is down:
+
+- Lighthouse logs `Low peer count`, then `Sync state updated` with `new_state: Stalled`, and Reth stops at its last block.
+- `make status` says how old the node's newest block is, with a warning past two minutes, and how many peers Lighthouse has. Reth's own line still reads `synced` or `block N of N`: it knows of no higher block.
+- On the `lpbot: live` dashboard, "Block age" grows while "Blocks behind the head" stays at 0 and "Written" stays fresh: the watcher keeps up with a node that is itself behind.
+
+When the connection comes back, Lighthouse finds peers within a minute or two and syncs (`make status` gives how many slots it is behind), and Reth follows in batches that `make logs` shows stage by stage: Headers, Bodies, Execution, MerkleExecute, then Finish. The newest block moves only at the end of a batch, so it can stand still for ten minutes or more. The watcher follows Reth by itself. Days offline take hours to catch up: after 4 days and 6 hours without internet (20 to 24 November 2026, about 30,700 blocks), Reth's first batch of 500 blocks took 12 minutes, most of it in Execution and MerkleExecute, and later batches were larger.
+
+Catching up keeps several cores busy for hours on a machine that runs hot. Check `sensors`, and that turbo is off: `cat /sys/devices/system/cpu/intel_pstate/no_turbo` prints 1, and a restart sets it back to 0. On 24 November 2026 it was 0, with the CPU at 100 °C; turning it off brought it to about 80 °C:
+
+```sh
+echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
+```
+
 ## Switch it off on purpose
 
 ```sh
@@ -165,9 +181,9 @@ sudo poweroff
 
 | What | How |
 | --- | --- |
-| Sync progress and free disk space | `make status` |
+| Sync progress, the age of the node's newest block, peers and free disk space | `make status` |
 | Whether the snapshot download is reading or writing | `vmstat 5`, see "Is the snapshot download working?" above |
 | The node's own log | `make logs`; Ctrl-c leaves it and the node keeps running |
 | Temperatures | `sensors` (package `lm-sensors`); `sudo nvme smart-log /dev/nvme0` (package `nvme-cli`) |
 | Dashboards | From the laptop: `make tunnel HOST=<user>@<node machine>`, then http://127.0.0.1:3001 |
-| The live tables | The `lpbot: live` dashboard: "Blocks behind the head" and "Written"; `make watch-logs` |
+| The live tables | The `lpbot: live` dashboard: "Block age", "Blocks behind the head" and "Written"; `make watch-logs` |

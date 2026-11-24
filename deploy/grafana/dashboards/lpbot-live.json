@@ -702,7 +702,7 @@
       "gridPos": {
         "x": 0,
         "y": 12,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
@@ -757,9 +757,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 4,
+        "x": 3,
         "y": 12,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
@@ -814,7 +814,7 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
+        "x": 6,
         "y": 12,
         "w": 3,
         "h": 4
@@ -871,7 +871,7 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 11,
+        "x": 9,
         "y": 12,
         "w": 3,
         "h": 4
@@ -928,7 +928,7 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 14,
+        "x": 12,
         "y": 12,
         "w": 3,
         "h": 4
@@ -977,6 +977,78 @@
       "description": "The last block applied."
     },
     {
+      "id": 26,
+      "title": "Block age",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 12,
+        "w": 3,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select extract(epoch from now())::bigint - time as value from live_pools where pool = '$pool'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {
+          "valueSize": 26
+        }
+      },
+      "description": "How old the last block applied is, by this machine's clock: up to about a block's time (12 seconds) when the node and the service keep up with the chain. It grows when either falls behind, also when the node itself stops getting blocks (no peers, the internet down), which \"Blocks behind the head\" cannot show: that one counts from the node's own head."
+    },
+    {
       "id": 14,
       "title": "Blocks behind the head",
       "type": "stat",
@@ -985,7 +1057,7 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 17,
+        "x": 18,
         "y": 12,
         "w": 3,
         "h": 4
@@ -1047,7 +1119,7 @@
           "valueSize": 26
         }
       },
-      "description": "How far the service is behind the node's head. 0 or 1 when it keeps up; more while it catches up."
+      "description": "How far the service is behind the node's head, not the chain's: 0 or 1 when it keeps up; more while it catches up. A node that is itself behind the chain shows 0 here; \"Block age\" shows it."
     },
     {
       "id": 15,
@@ -1058,9 +1130,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 20,
+        "x": 21,
         "y": 12,
-        "w": 4,
+        "w": 3,
         "h": 4
       },
       "targets": [
