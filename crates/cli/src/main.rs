@@ -10,7 +10,11 @@
 //! backtest, the load and the calibration). `watch-pools` keeps the live
 //! tables current from the node, block by block.
 
+mod agent_brief;
 mod agent_cmd;
+mod agent_eval;
+mod agent_log;
+mod agent_peers;
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
@@ -359,10 +363,18 @@ struct LpPositionsCli {
 #[derive(Subcommand)]
 enum AgentCommand {
     /// Replay the run to its first look without a decision and show the
-    /// pool there.
+    /// pool there, with the peers' records up to that look.
     Next(AgentArgs),
     /// Write the decision for the look `next` showed, then show the next.
-    Decide(DecideArgs),
+    Decide(Box<DecideArgs>),
+    /// Show again every record of the run's peers up to the look waiting
+    /// for a decision.
+    Peers(AgentArgs),
+    /// Score every decision against what happened and the actions not
+    /// taken, for one agent's run or every agent of the experiment.
+    Evaluate(EvaluateArgs),
+    /// Print the brief for a session acting as one agent of the experiment.
+    Brief(AgentArgs),
 }
 
 #[derive(Args)]
@@ -372,6 +384,10 @@ struct AgentArgs {
     /// Which of the experiment's runs, by index, when it has several.
     #[arg(long)]
     run: Option<usize>,
+    /// Which of the experiment's runs, by the name of the agent deciding it
+    /// (`agent.name`, or its decisions file's name).
+    #[arg(long)]
+    agent: Option<String>,
     /// Which chain of the config to use.
     #[arg(long, default_value = "ethereum")]
     chain: String,
@@ -401,9 +417,42 @@ struct DecideArgs {
     note: String,
     /// The reasoning behind the decision, as long as it needs to be. It goes
     /// to the reasoning log next to the decisions file (`<name>.log.md`,
-    /// local, not committed), with what the look showed; the run never reads it.
+    /// local, not committed), with what the look showed, and to the shared
+    /// log other agents are handed (`<name>.log.jsonl`); the run never reads it.
     #[arg(long, default_value = "")]
     reasoning: String,
+    /// The lowest price, in percent from now, you expect before the next look.
+    #[arg(long = "expect-low", allow_hyphen_values = true)]
+    expect_low: Option<f64>,
+    /// The highest price, in percent from now, you expect before the next look.
+    #[arg(long = "expect-high", allow_hyphen_values = true)]
+    expect_high: Option<f64>,
+    /// How sure you are that price stays within that band, from 0 to 1.
+    #[arg(long = "expect-confidence")]
+    expect_confidence: Option<f64>,
+    /// What you expect to happen, in words.
+    #[arg(long, default_value = "")]
+    expect: String,
+    /// How the decision relates to the peers' records the look showed: own,
+    /// copy, adapt or depart.
+    #[arg(long)]
+    stance: Option<String>,
+    /// The peer a stance of copy, adapt or depart is toward.
+    #[arg(long)]
+    toward: Option<String>,
+}
+
+#[derive(Args)]
+struct EvaluateArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// How long each decision is left alone before it is scored: `next` (until
+    /// the agent's own next look) or durations, comma-separated.
+    #[arg(long, default_value = "next,1d")]
+    horizons: String,
+    /// Replays run at the same time; all cores by default.
+    #[arg(long)]
+    jobs: Option<usize>,
 }
 
 #[derive(Args)]
@@ -811,20 +860,55 @@ fn real_main() -> Result<()> {
         }
         Command::Agent(command) => {
             let args = match &command {
-                AgentCommand::Next(args) => args,
+                AgentCommand::Next(args)
+                | AgentCommand::Peers(args)
+                | AgentCommand::Brief(args) => args,
                 AgentCommand::Decide(args) => &args.agent,
+                AgentCommand::Evaluate(args) => &args.agent,
             };
             let runs = resolve(&args.experiment)?;
-            let run = match (args.run, runs.len()) {
-                (Some(i), _) => runs.get(i).ok_or_else(|| {
-                    anyhow::anyhow!("--run {i}: the experiment has {} run(s)", runs.len())
-                })?,
-                (None, 1) => &runs[0],
-                (None, n) => bail!("the experiment has {n} runs; say which with --run <index>"),
-            };
             let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            if let AgentCommand::Evaluate(e) = &command {
+                let horizons = agent_eval::parse_horizons(&e.horizons)?;
+                let jobs = e.jobs.unwrap_or_else(|| {
+                    std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
+                });
+                let chosen: Vec<&ResolvedRun> = if args.run.is_some() || args.agent.is_some() {
+                    vec![pick_run(&runs, args.run, args.agent.as_deref())?]
+                } else {
+                    runs.iter().collect()
+                };
+                let mut reports = Vec::new();
+                for run in chosen {
+                    let Some(who) = agent_log::identity(&run.config.strategies[0])? else {
+                        continue;
+                    };
+                    let report =
+                        agent_eval::evaluate(run, &who, &root, &args.chain, &horizons, jobs)?;
+                    print!("{}", report.describe());
+                    reports.push(report);
+                }
+                if reports.is_empty() {
+                    bail!("no run of the experiment is decided by an agent (agent.decisions)");
+                }
+                if reports.len() > 1 {
+                    println!();
+                    print!("{}", agent_eval::compare(&reports));
+                }
+                return Ok(());
+            }
+            let run = pick_run(&runs, args.run, args.agent.as_deref())?;
             match &command {
                 AgentCommand::Next(_) => agent_cmd::next(run, &root, &args.chain).map(|_| ()),
+                AgentCommand::Peers(_) => agent_cmd::peers(run),
+                AgentCommand::Brief(_) => {
+                    let who = agent_cmd::identity_of(run)?;
+                    print!(
+                        "{}",
+                        agent_brief::brief(&args.experiment.experiment, run, &who)?
+                    );
+                    Ok(())
+                }
                 AgentCommand::Decide(d) => agent_cmd::decide(
                     run,
                     &root,
@@ -836,8 +920,17 @@ fn real_main() -> Result<()> {
                         next: &d.next,
                         note: &d.note,
                         reasoning: &d.reasoning,
+                        expect: agent_log::Expectation {
+                            low_pct: d.expect_low,
+                            high_pct: d.expect_high,
+                            confidence: d.expect_confidence,
+                            text: d.expect.clone(),
+                        },
+                        stance: d.stance.as_deref(),
+                        toward: d.toward.as_deref(),
                     },
                 ),
+                AgentCommand::Evaluate(_) => unreachable!("handled above"),
             }
         }
         Command::PoolStats(args) => {
@@ -978,6 +1071,50 @@ fn real_main() -> Result<()> {
                 }
                 None => bail!("fee, volume and depth must all be positive numbers"),
             }
+        }
+    }
+}
+
+/// The run an agent command acts on: by index, by the agent deciding it, or
+/// the only one.
+fn pick_run<'a>(
+    runs: &'a [ResolvedRun],
+    index: Option<usize>,
+    agent: Option<&str>,
+) -> Result<&'a ResolvedRun> {
+    match (index, agent, runs.len()) {
+        (Some(_), Some(_), _) => bail!("say which run with --run or --agent, not both"),
+        (Some(i), None, n) => runs
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("--run {i}: the experiment has {n} run(s)")),
+        (None, Some(name), _) => {
+            let mut names = Vec::new();
+            for run in runs {
+                if let Some(who) = run
+                    .config
+                    .strategies
+                    .first()
+                    .map(agent_log::identity)
+                    .transpose()?
+                    .flatten()
+                {
+                    if who.name == name {
+                        return Ok(run);
+                    }
+                    names.push(who.name);
+                }
+            }
+            if names.is_empty() {
+                bail!("--agent {name}: no run of the experiment is decided by an agent")
+            }
+            bail!(
+                "--agent {name}: the experiment's agents are {}",
+                names.join(", ")
+            )
+        }
+        (None, None, 1) => Ok(&runs[0]),
+        (None, None, n) => {
+            bail!("the experiment has {n} runs; say which with --agent <name> or --run <index>")
         }
     }
 }

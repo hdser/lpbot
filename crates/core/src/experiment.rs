@@ -397,6 +397,14 @@ fn display_value(v: &Value) -> Result<String> {
             let items: Vec<String> = items.iter().map(display_value).collect::<Result<_>>()?;
             Ok(format!("[{}]", items.join(", ")))
         }
+        // A swept group of settings, such as one agent of a panel, on one line.
+        Value::Mapping(map) => {
+            let items: Vec<String> = map
+                .iter()
+                .map(|(k, v)| Ok(format!("{}: {}", display_value(k)?, display_value(v)?)))
+                .collect::<Result<_>>()?;
+            Ok(format!("{{{}}}", items.join(", ")))
+        }
         _ => Ok(serde_yaml::to_string(v)?.trim().to_string()),
     }
 }
@@ -624,5 +632,16 @@ sweep:
     fn unknown_experiment_keys_are_rejected() {
         let typo = EXPERIMENT.replace("sweep:", "sweeep:");
         assert!(serde_yaml::from_str::<ExperimentFile>(&typo).is_err());
+    }
+
+    #[test]
+    fn a_swept_group_of_settings_reads_on_one_line() {
+        let v: Value =
+            serde_yaml::from_str("{ name: b, peers: [a, c], decisions: data/agent/p/b.jsonl }")
+                .unwrap();
+        assert_eq!(
+            display_value(&v).unwrap(),
+            "{name: b, peers: [a, c], decisions: data/agent/p/b.jsonl}"
+        );
     }
 }

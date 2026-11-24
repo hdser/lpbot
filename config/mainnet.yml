@@ -95,6 +95,9 @@ strategies:
       join_within: 1h                # a position is copied only this soon after the provider opened it
     agent:                           # entries and exits decided at each look by a person or a session: `lpbot agent next` / `decide`
       decisions: null                # the decisions file, such as data/agent/x.jsonl; null runs the strategy's own rules
+      name: null                     # the agent's handle, and its decisions file's name (b decides b.jsonl); null: the file's name
+      model: null                    # the Claude model id of the session deciding, or person; recorded with every look
+      peers: null                    # agents whose records it is handed up to its own look, such as [a]; names in the same folder, or paths
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings

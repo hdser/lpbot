@@ -227,13 +227,43 @@ pub fn parse_decisions(content: &str) -> Result<Vec<AgentDecision>> {
     Ok(decisions)
 }
 
-/// One run of an experiment, without writing tables: what `lpbot agent`
-/// replays at every step. Returns the engine's output and the pool's name.
-pub fn simulate_one(
-    run: &ResolvedRun,
-    root: &Path,
-    chain: &str,
-) -> Result<(engine::Output, String)> {
+/// A run's history and settings, read once, to be replayed: what `lpbot
+/// agent next` replays at every step, and what `lpbot agent evaluate` runs
+/// every alternative on, each with a plan of its own.
+pub struct Prepared {
+    pub run_id: String,
+    pub pool_name: String,
+    pub settings: Settings,
+    history: History,
+}
+
+impl Prepared {
+    /// The run with these settings (the prepared ones, or a copy with
+    /// another agent plan) on the prepared history.
+    pub fn replay(&self, settings: &Settings) -> Result<engine::Output> {
+        engine::run(
+            self.history.snapshot.state.clone(),
+            &self.history.events,
+            settings,
+        )
+        .with_context(|| format!("run {} failed", self.run_id))
+    }
+
+    /// The history's events, in chain order.
+    pub fn events(&self) -> &[TimedEvent] {
+        &self.history.events
+    }
+
+    /// The time of a block of the history, if it has events in it.
+    pub fn block_time(&self, block: u64) -> Option<u64> {
+        let events = &self.history.events;
+        let i = events.partition_point(|e| e.block < block);
+        events.get(i).filter(|e| e.block == block).map(|e| e.time)
+    }
+}
+
+/// Reads a run's history and works out its settings, without running it.
+pub fn prepare_one(run: &ResolvedRun, root: &Path, chain: &str) -> Result<Prepared> {
     let config = &run.config;
     let strategy = config
         .strategies
@@ -254,9 +284,12 @@ pub fn simulate_one(
         from,
         &mut FeeCache::new(),
     )?;
-    let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
-        .with_context(|| format!("run {} failed", run.run_id))?;
-    Ok((out, pool_name))
+    Ok(Prepared {
+        run_id: run.run_id.clone(),
+        pool_name,
+        settings,
+        history,
+    })
 }
 
 /// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.

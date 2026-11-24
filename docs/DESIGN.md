@@ -363,6 +363,96 @@ All of these are the fixed starting point the calibrator has to beat, not tuned 
 
 **Paper mode.** The same engine runs on the live event stream with virtual positions and real gas quotes. Its P&L is the yardstick for the live bot later: live results that drift from paper results mean an execution or modeling fault.
 
+## Several agents in the agent mode
+
+In the agent mode one person or session decides a run. A panel puts several deciders on the same run, each in a run of its own: Claude Code sessions of different models, or people. Each publishes its reasoning for every look in a form the others and the tools can read. Every decision is scored afterwards against what happened and against the actions not taken. An agent can read the others' reasoning and decide its own way, and in forward and live runs it can ask them before it decides. One rule about time keeps this a test and not a leak, and the tools enforce it.
+
+**Roles.**
+
+| Role | Who | Does | Reads |
+| --- | --- | --- | --- |
+| Owner | A person | Sets up the panel (the experiment, the agents, their models, who reads whom), starts each agent with its brief (`lpbot agent brief`), compares the runs | Everything |
+| Decider | A session of a named model, or a person | Decides one run look by look | Only what `lpbot agent` prints for its run |
+| Reader | A decider whose panel entry names peers | Reads its peers' records at its looks, and says how its decision relates to them | Its peers' records, handed over up to its look |
+| Advisor | Any agent of a forward or live panel | Answers the questions others ask at a look | The question and the asker's look; the chain head, as anyone does |
+| Reviewer | A session or a person, once a run is over | Evaluates another agent's log, blind first | The finished log and its scores, a step at a time |
+| Scorer | `lpbot agent evaluate` | Scores every decision against what happened and the actions not taken, the same way for every agent | The decisions and the pool history |
+
+**A panel is one experiment.** Each agent's run is one run of the experiment, swept over whole `agent` entries, so the pool, window, capital, loss limit and costs are the same for all and only the decider differs:
+
+```yaml
+sweep:
+  agent:
+    - { name: a, model: claude-haiku-5-5, decisions: data/agent/panel-x/a.jsonl }
+    - { name: b, model: claude-sonnet-5-5, decisions: data/agent/panel-x/b.jsonl, peers: [a] }
+```
+
+`--agent b` picks b's run for every `lpbot agent` command. `name` is the agent's handle and names its decisions file (`b.jsonl` for `b`). `model` is the Claude model id of the session, or `person`. `peers` are the agents whose records it is handed: by name, in the same folder, or by path (`data/agent/panel-w/a`) for an agent of an earlier panel. `lpbot run` on the experiment writes the six tables for every agent's run, so the runs dashboards compare them like any runs. A panel's files share one folder under `data/agent/`, which is never committed:
+
+| File | Written by | Holds |
+| --- | --- | --- |
+| `<name>.jsonl` | `agent decide` | The decisions: the run itself |
+| `<name>.log.md` | `agent decide` | The reasoning log, for people |
+| `<name>.log.jsonl` | `agent decide` | The same, one JSON record a look, for agents and tools |
+| `<name>.eval.jsonl` | `agent evaluate` | One score per decision and horizon |
+| `<name>.review-<reviewer>.jsonl` | `agent review` (not built) | Another agent's evaluation of the log |
+| `board.jsonl` | `agent ask`, `agent answer` (not built) | Questions and answers |
+
+**The record of a look.** `agent decide` appends one JSON object a line to `<name>.log.jsonl`, next to the Markdown entry. Every record names its schema (`"schema": "lpbot.agent/1"`) and its kind (`"kind": "look"`), and holds:
+
+- who wrote it: `agent`, `model`, `experiment`, `run_id`, `pool`, `value_token`;
+- when: `look` (the look's time, the key of the decisions file), `number` and `day` in the run, `block`, and `as_of` (below);
+- what it saw: `seen`, the observation as numbers (every time scale, the fee, gas, the run so far, the position), and `seen_text`, as it was printed;
+- what it decided: `decision` (`action`, `lower_pct` and `upper_pct` for an entry, `next`), the `note` and the `reasoning`;
+- what it expected: `expect`, a band of prices (`low_pct` to `high_pct`, in percent from the price at the look) it expects price to stay within until its next look, how sure it is (`confidence`, 0 to 1), and the expectation in words (`text`). `decide` takes them as `--expect-low`, `--expect-high`, `--expect-confidence` and `--expect`;
+- what it read: `shown`, the peers' records handed to it at this look, and `stance`: `own` (decided without regard to them), `copy`, `adapt` or `depart`, `toward` a peer (`--stance`, `--toward`). A look that handed over peers' records refuses a decision without a stance. The reasoning says why.
+
+Other kinds share the schema and the rule below: `eval`, from the scorer, and once built, `strategy` (the rules an agent says it follows, rewritten when it changes them), `review`, `ask` and `answer`.
+
+**The rule about time.** Every record carries `as_of`: the latest moment whose market its author could have seen. A look's record is as of the block the look was shown at; in a forward run, where showing the look again moves it to the newer head, the block it was last shown at before it was decided. A score is as of the end of the stretch it scores. A review, a strategy note, a question or an answer is as of its author's look when it was written (in forward runs, the chain head then). An agent at a look shown at time *t* is handed only records as of *t* or earlier, and only by the tools:
+
+- `agent next` prints, after the look, the peers' records as of *t* or earlier that its earlier looks were not handed, among them the scores of the peers' earlier decisions whose horizon has passed, and records a peer that was behind has written since;
+- `agent peers` prints all of them again, up to the look waiting for a decision.
+
+Records are shown by look number, day in the run and how long before the current look, never by time or block. Their prices stay in percent from the price at their own look. A handover therefore tells no more about the date than the agent's own look does. A peer that is behind (a backtest run at the same time, or a run not yet finished) shows fewer records, never later ones. A run can read an agent of an earlier panel by the same rule: it is handed that agent's records as of before each look, which is all of them once the earlier window ended before the new one began.
+
+The tools enforce the rule for what they hand over. The rest is in the brief. A deciding agent reads only what `lpbot agent` prints for its run. It does not open the experiment file (it names the window), `config/`, the files under `data/` or `runs/`, `docs/RESEARCH.md`, the result tables or the price history of its window, and it does not look up prices or news. `lpbot agent brief <experiment> --agent <name>` prints the role, the commands and these rules for a session, and names no dates. A backtest over months the model may have seen in training is still not a clean test. Forward, at the chain head, is.
+
+**Scoring decisions.** The `decisions` table holds what a rule expected, not what came of it. `lpbot agent evaluate <experiment> [--agent <name>] [--horizons next,1d]` scores every decision of an agent run the same way for every agent, from the decisions and the pool history alone. It needs no log, so runs from before the log existed can be scored too. For each decision it replays the run to that look. From that state it runs each action the agent could have taken, left alone for the horizon: the decision as made; cash (stay out, or exit what is open); and, with a position open, holding it as it is. The same engine carries them out, with the same gas, latency, share cap, stops and loss limit. A horizon is `next` (until the agent's own next look) or a duration. One that runs past the window ends with it, everything closed. Each score gives:
+
+- the change of the run's equity over the horizon for each alternative, in percent of the capital, in the value token;
+- which alternative was best, the regret (the best less the decision), and the decision's edge over cash and over holding;
+- what price did over the horizon: its change, highest and lowest, in percent from the price at the look;
+- for `next`, whether the expected band held, and the Brier score of the confidence given for it.
+
+The scores go to `<name>.eval.jsonl` (kind `eval`, as of the end of the horizon). The command prints each agent's summary: the run's result against holding the value token and in dollars, campaigns, fees and gas, and for each horizon the mean edge over cash and over holding, the total regret, the share of decisions that were the best, the band's hit rate and the mean Brier score. With several agents it prints them side by side.
+
+A score values one decision left alone. The run's own result is what the decisions did together. An entry pays its gas at once and earns over time, so a short horizon is hard on it: score `next` and at least a day. Ranges the agent did not choose are not searched; in hindsight every entry would lose to the best range. Each alternative is a replay from the start of the stored history: the history is read once and the replays run on every core, about three a decision and horizon. Forking the engine at the look would make it one pass. It is not built.
+
+**Reviews, blind first (not built).** An agent evaluating another's log must form its own view before it sees the first agent's. `agent review next <experiment> --agent <reviewer> --of <name>` shows the reviewer the next look of the log as its author saw it, with the decision, but without the note, reasoning, expectation or score. The reviewer writes what it would have done and why (`agent review write --would <action> --own "..."`). Only then does the tool show the author's reasoning and the scores, and the reviewer writes its verdict (`--verdict agree|disagree|unclear --why "..."`). The record keeps both parts, as of the end of the scored horizon, so a decider is handed a review of a peer's look only once it could have known the outcome itself. In a backtest, an agent that decides the same window reviews only after its own run is over.
+
+**Learning from each other.** A reader decides its own way. At every look that handed it peers' records it says whether it copies, adapts or departs from them, or decides on its own, and why. An agent keeps the strategy it follows in words (`kind: strategy`, not built; until then it is in the reasoning and the agent's final report), and peers are handed it like any record. Whether reading helps is measured, not assumed: run each model alone and as a reader on the same window, two by two, and compare each reader with the same model alone.
+
+**Advice in forward and live runs (not built).** Questions and answers go through one append-only board, `board.jsonl` in the panel's folder (a table once the owner agrees to one). Sessions and people use the same board, so the record of who asked what, and who answered in time, is the same for both.
+
+- `agent ask <experiment> --agent <name> --to <peer,...|all> --question "..." [--wait 10m]` writes an `ask` record: its id, the asker, the addressees, the question, and a deadline on the wall clock, measured from the time the asker's look was shown (its `at`). It is as of the asker's look.
+- Agents poll. `agent inbox <experiment> --agent <name>` lists the open questions to it, each with the asker's look as the asker saw it. A session checks its inbox at each of its own looks, and between them while it waits for answers of its own. A message between Claude Code sessions can nudge a peer to look, but only the board counts.
+- `agent answer <experiment> --agent <name> --ask <id> --answer "..." [--would <action>] [--confidence <p>]` writes an `answer` record as of the answerer's time. An answer after the deadline is kept and marked late.
+- `agent answers <experiment> --agent <name> [--wait]` shows the answers to the agent's open question. With `--wait` it returns once every addressee has answered or the deadline has passed.
+- `decide` records the questions the look asked, the answers read, and the addressees that did not answer.
+
+When no one answers in time, the asker decides alone. Late answers are shown at its next look, marked late, and each agent's answer rate is counted. A look itself has no deadline in a forward run: one left undecided stays open, the position is held as it is and the stops and the loss limit apply, until the agent decides it, at the head as it is then. No `hold` is written for it, since that would schedule a next look at an interval no one chose.
+
+Advice in a backtest would leak, because an answerer at a later look knows what comes. It is allowed only in a lockstep panel, where every agent looks at the same times and the panel's clock moves on once all have decided; `answer` refuses a question asked at a look earlier than the answerer's own. Not built: in backtests agents read logs, they do not ask.
+
+**Comparing runs by different models.**
+
+- Like for like: one panel per comparison, so only the decider differs. Runs on different windows are not ranked against each other.
+- What is compared: each run's result against holding the value token and in dollars, its campaigns, fees, gas and looks (the runs table), and its scores by horizon (`agent evaluate`). A difference of a few decisions in a run of tens is noise, so every figure comes with the number of decisions behind it.
+- Baselines: staying in cash (zero), holding, and the fixed-rule runs on the same window.
+- Clean or not: a backtest before a model's training cutoff counts as practice and is labelled so in any comparison. Forward runs are the test.
+- Where it goes: the panel's files under `data/agent/<panel>/` (local, never committed), and the six tables through `lpbot run` and `lpbot load-results`. A table for looks and scores (`agent_looks`) would let the dashboards show the reasoning next to the run. It is not built: the viewer's tables change only at the owner's say.
+
 ## Strategy framework
 
 A strategy only declares the positions it wants; sizing limits, transaction building and safety live outside it. That separation is what makes strategies small, testable and swappable from config.
