@@ -10,7 +10,17 @@ BEACON="${LPBOT_BEACON:-http://127.0.0.1:5052}"
 
 rpc() {
   curl -s --max-time 5 -H 'content-type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":[]}" "$RPC"
+    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}" "$RPC"
+}
+
+# Seconds as "40 s", "12 min", "5.2 h" or "4.3 days".
+duration() {
+  awk -v s="$1" 'BEGIN {
+    if (s < 120) printf "%d s", s
+    else if (s < 7200) printf "%d min", s / 60
+    else if (s < 172800) printf "%.1f h", s / 3600
+    else printf "%.1f days", s / 86400
+  }'
 }
 
 # Pulls a "key":"value" or "key":value pair out of a small JSON reply.
@@ -44,6 +54,17 @@ else
     echo "  syncing"
   fi
 fi
+# A node cut off from its peers still calls itself synced, or names its own
+# newest block as the highest: the age of that block shows it.
+newest="$(rpc eth_getBlockByNumber '["latest",false]' | field timestamp)"
+if [[ -n "$newest" ]]; then
+  age=$(( $(date +%s) - newest ))
+  echo "  newest block made $(duration "$age") ago"
+  if (( age > 120 )); then
+    echo "  warning: the node is behind the chain. Lighthouse below says by how much;" \
+      "with no peers, check the machine's internet connection."
+  fi
+fi
 
 echo
 echo "Consensus node (Lighthouse)"
@@ -59,6 +80,8 @@ else
   else
     echo "  syncing: head slot $slot, $distance slots behind"
   fi
+  peers="$(curl -s --max-time 5 "$BEACON/eth/v1/node/peer_count" | field connected)"
+  [[ -n "$peers" ]] && echo "  $peers peer(s) connected"
 fi
 
 echo
