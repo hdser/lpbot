@@ -143,7 +143,7 @@
     {
       "type": "table",
       "title": "Agents side by side",
-      "description": "One row per agent's run. Click an agent to set the time range to the run's window; click a run id to open it in the run detail dashboard.",
+      "description": "One row per agent's run. Peers shown: looks that handed it peers' records. Holding: what holding the value token did, in dollars. Click an agent to set the time range to the run's window; click a run id to open it in the run detail dashboard.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -164,7 +164,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select a.agent, a.model, a.looks, a.with_peers as \"looks with peers' records\", r.result_pct as \"result %\", r.result_pct_usd as \"in dollars %\",\n  r.hold_value_pct_usd as \"holding the value token, in dollars %\", r.max_drawdown_pct as \"max drawdown %\", r.campaigns, r.passes as \"round trips\",\n  r.fees, r.gas, r.value_token, r.window_from, r.window_to, r.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a join runs r on r.run_id = a.run_id\norder by a.agent"
+          "rawSql": "select a.agent, a.model, a.looks, a.with_peers as \"peers shown\", r.result_pct as \"result %\", r.result_pct_usd as \"in $ %\",\n  r.hold_value_pct_usd as \"holding, in $ %\", r.max_drawdown_pct as \"max drawdown %\", r.campaigns, r.passes as \"round trips\",\n  r.fees, r.gas, r.value_token, r.window_from, r.window_to, r.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a join runs r on r.run_id = a.run_id\norder by a.agent"
         }
       ],
       "fieldConfig": {
@@ -251,7 +251,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "in dollars %"
+              "options": "in $ %"
             },
             "properties": [
               {
@@ -267,7 +267,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "holding the value token, in dollars %"
+              "options": "holding, in $ %"
             },
             "properties": [
               {
@@ -351,7 +351,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select agent, model, horizon, count(*) as decisions,\n  avg(edge_vs_cash_pct) as \"edge over cash %\", avg(edge_vs_hold_pct) as \"edge over holding %\", count(edge_vs_hold_pct) as \"with a position open\",\n  sum(regret_pct) as \"regret %\", 100.0 * avg(case when best = 'decision' then 1.0 else 0.0 end) as \"best %\",\n  100.0 * avg(case when band_held then 1.0 when band_held is not null then 0.0 end) as \"band held %\", count(band_held) as \"bands\",\n  avg(brier) as \"Brier\"\nfrom agent_scores where run_id in ($run)\ngroup by agent, model, horizon order by horizon, agent"
+          "rawSql": "select agent, model, horizon, count(*) as decisions,\n  avg(edge_vs_cash_pct) as \"edge over cash %\", avg(edge_vs_hold_pct) as \"edge over holding %\", count(edge_vs_hold_pct) as \"with a position open\",\n  sum(regret_pct) as \"regret %\", 100.0 * avg(case when best = 'decision' then 1.0 else 0.0 end) as \"best %\",\n  100.0 * avg(case when band_held then 1.0 when band_held is not null then 0.0 end) as \"band held %\", count(band_held) as \"bands\",\n  avg(brier) as \"Brier\"\nfrom agent_scores where run_id in ($run)\ngroup by agent, model, horizon order by horizon <> 'next', horizon, agent"
         }
       ],
       "fieldConfig": {
@@ -510,8 +510,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Price, and each agent's range",
-      "description": "The pool price, and the bounds of each agent's open range in the same price.",
+      "title": "Price in dollars, and each agent's range",
+      "description": "The pool price in dollars, and the bounds of each agent's open range in the same price.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -532,13 +532,13 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select time, metric, value from (\n  select to_timestamp(s.time) as time, 'price' as metric, s.price as value from series s\n  where s.run_id = (select min(run_id) from agent_looks where run_id in ($run)) and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range low', s.price_lower from series s join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_lower is not null and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range high', s.price_upper from series s join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_upper is not null and $__unixEpochFilter(s.time)\n) x order by 1"
+          "rawSql": "select time, metric, value from (\n  select to_timestamp(s.time) as time, 'price' as metric,\n    case when r.start_usd = r.start_capital then 1 / s.price else s.price end as value\n  from series s join runs r on r.run_id = s.run_id\n  where s.run_id = (select min(run_id) from agent_looks where run_id in ($run)) and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range low',\n    case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_lower is not null and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range high',\n    case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_upper is not null and $__unixEpochFilter(s.time)\n) x order by 1"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
-          "decimals": 2,
+          "unit": "prefix:$",
+          "decimals": 0,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -653,7 +653,7 @@
     {
       "type": "table",
       "title": "How each agent stood toward its peers",
-      "description": "At each look that handed it peers' records, an agent says whether it copies, adapts or departs from them, or decides on its own.",
+      "description": "At each look that handed it peers' records, an agent says whether it copies, adapts or departs from them, or decides on its own. None shown: looks with no peers' records to relate to.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -674,7 +674,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select agent, model, coalesce(stance || coalesce(' toward ' || toward, ''), 'no peers'' records shown') as stance, count(*) as looks\nfrom agent_looks where run_id in ($run)\ngroup by 1, 2, 3 order by 1, 3"
+          "rawSql": "select agent, model, coalesce(stance || coalesce(' toward ' || toward, ''), 'none shown') as stance, count(*) as looks\nfrom agent_looks where run_id in ($run)\ngroup by 1, 2, 3 order by 1, 3"
         }
       ],
       "fieldConfig": {
@@ -723,7 +723,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look, round(l.day::numeric, 2) as day,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.next as \"next look in\",\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\",\n  l.note, l.reasoning\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
+          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
         }
       ],
       "fieldConfig": {
@@ -742,7 +742,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 700
+                "value": 620
               },
               {
                 "id": "custom.wrapText",
@@ -796,7 +796,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 160
+                "value": 150
               },
               {
                 "id": "unit",
