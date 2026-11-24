@@ -230,4 +230,26 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
         table.contains("test-model-a") && table.contains("test-model-b"),
         "{table}"
     );
+
+    // `lpbot run` writes each agent run's looks and scores beside its six
+    // tables, for the viewer.
+    use lpbot_sim::tables::{read_table, table_path, Column};
+    let results = p.root.join("runs");
+    crate::run_cmd::run(&p.runs, &p.lake, &results, chain).unwrap();
+    let looks = read_table(&table_path(&results, "agent_looks", &run_a.run_id)).unwrap();
+    assert_eq!(looks.rows(), 4);
+    assert_eq!(
+        looks.column("model"),
+        Some(&Column::Text(vec![Some("test-model-a".into()); 4]))
+    );
+    let scored = read_table(&table_path(&results, "agent_scores", &run_a.run_id)).unwrap();
+    assert_eq!(scored.rows(), 8);
+    let b_looks = read_table(&table_path(&results, "agent_looks", &run_b.run_id)).unwrap();
+    assert_eq!(b_looks.column("stance").map(Column::len), Some(2));
+    for table in lpbot_sim::RESULT_TABLES {
+        assert!(
+            table_path(&results, table, &run_b.run_id).is_file(),
+            "{table}"
+        );
+    }
 }

@@ -998,6 +998,23 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             config_yaml: run.config_yaml.clone(),
         };
         write_run(results, &info, &out, rank_rows)?;
+        // An agent run writes its looks and scores too, for the viewer.
+        if let Some(who) = crate::agent_log::identity(strategy)? {
+            let (looks, scores) = crate::agent_rows::rows(&who)?;
+            lpbot_sim::agent_tables::write_agent(results, &run.run_id, &looks, &scores)?;
+            println!(
+                "  agent {} ({}): {} look(s) and {} score(s) in the agent tables{}",
+                who.name,
+                who.model,
+                looks.len(),
+                scores.len(),
+                if scores.is_empty() {
+                    "; `lpbot agent evaluate` scores the decisions, then run again"
+                } else {
+                    ""
+                }
+            );
+        }
         if let Some(pending) = &out.pending {
             println!(
                 "  {} stopped at look {} for want of a decision; `lpbot agent next` shows it",

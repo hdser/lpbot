@@ -1,5 +1,6 @@
--- The six result tables, the two pool tables and the five live tables, empty.
--- Generated from the table definitions in crates/sim/src/tables.rs and
+-- The six result tables, the two agent tables, the two pool tables and the
+-- five live tables, empty. Generated from the table definitions in
+-- crates/sim/src/tables.rs, crates/sim/src/agent_tables.rs and
 -- crates/sim/src/live_tables.rs; do not edit by hand. To regenerate:
 --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file
 
@@ -133,6 +134,67 @@ ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS passes_per_day double precision;
 ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS time_in_range double precision;
 ALTER TABLE zone_map ADD COLUMN IF NOT EXISTS return_odds_1d double precision;
 CREATE INDEX IF NOT EXISTS zone_map_run_id ON zone_map (run_id);
+
+CREATE TABLE IF NOT EXISTS agent_looks (run_id text NOT NULL);
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS run_id text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS agent text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS model text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS number bigint;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS time bigint;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS look bigint;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS day double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS block bigint;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS action text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS lower_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS upper_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS next text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS note text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS reasoning text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS expect_low_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS expect_high_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS expect_confidence double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS expect_text text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS stance text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS toward text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS shown bigint;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS result_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS position text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS change_1h_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS change_1d_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS change_7d_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS vol_1d_pct double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS gas_gwei double precision;
+CREATE INDEX IF NOT EXISTS agent_looks_run_id ON agent_looks (run_id);
+
+CREATE TABLE IF NOT EXISTS agent_scores (run_id text NOT NULL);
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS run_id text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS agent text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS model text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS number bigint;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS look bigint;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS time bigint;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS end_time bigint;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS day double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS horizon text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS horizon_seconds bigint;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS ended text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS action text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS lower_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS upper_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS position_open boolean;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS decision_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS cash_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS hold_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS best text;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS regret_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS edge_vs_cash_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS edge_vs_hold_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS price_change_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS price_high_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS price_low_pct double precision;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS band_held boolean;
+ALTER TABLE agent_scores ADD COLUMN IF NOT EXISTS brier double precision;
+CREATE INDEX IF NOT EXISTS agent_scores_run_id ON agent_scores (run_id);
 
 CREATE TABLE IF NOT EXISTS pool_series (pool text NOT NULL);
 ALTER TABLE pool_series ADD COLUMN IF NOT EXISTS pool text;

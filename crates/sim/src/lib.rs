@@ -7,6 +7,7 @@
 //! See `docs/DESIGN.md`, "Simulation and backtesting".
 
 pub mod agent;
+pub mod agent_tables;
 pub mod engine;
 pub mod live_db;
 pub mod live_tables;
@@ -31,3 +32,8 @@ pub const RESULT_TABLES: [&str; 6] = [
 /// The pool tables, keyed by pool instead of by run: what a pool looked
 /// like over its stored history, written by `lpbot pool-stats`.
 pub const POOL_TABLES: [&str; 2] = ["pool_series", "pool_liquidity"];
+
+/// The agent tables, keyed by run like the result tables: what an agent
+/// run's looks showed, decided and expected, and how its decisions scored
+/// (`agent_tables`). Only agent runs write them.
+pub const AGENT_TABLES: [&str; 2] = ["agent_looks", "agent_scores"];

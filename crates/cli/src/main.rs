@@ -15,6 +15,7 @@ mod agent_cmd;
 mod agent_eval;
 mod agent_log;
 mod agent_peers;
+mod agent_rows;
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;

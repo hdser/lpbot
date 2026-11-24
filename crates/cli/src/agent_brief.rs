@@ -14,7 +14,8 @@ use crate::run_cmd::window;
 /// The brief for agent `who` of the experiment at `experiment`.
 pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<String> {
     let (from, to) = window(&run.config)?;
-    let days = to.start().saturating_sub(from.start()) / 86_400;
+    // Both days of the window are traded: it ends where `to` ends.
+    let days = to.end().saturating_sub(from.start()) / 86_400;
     let strategy = &run.config.strategies[0];
     let exp = experiment.display();
     let name = &who.name;
@@ -155,7 +156,7 @@ mod tests {
             text.starts_with("# Brief for agent b (claude-sonnet-5-5)"),
             "{text}"
         );
-        assert!(text.contains("14 days of stored pool history"), "{text}");
+        assert!(text.contains("15 days of stored pool history"), "{text}");
         assert!(!text.contains("2026"), "no dates: {text}");
         assert!(
             text.contains("agent next experiments/panel.yml --agent b"),
