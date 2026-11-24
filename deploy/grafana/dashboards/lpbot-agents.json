@@ -1,0 +1,944 @@
+{
+  "uid": "lpbot-agents",
+  "title": "lpbot: agents",
+  "description": "Agent runs side by side: each agent's result, how its decisions scored against cash and holding, how it stood toward its peers, and every look with what it saw, decided, expected and why. From the agent tables (agent_looks, agent_scores) and the runs and series tables.",
+  "tags": [
+    "lpbot"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-2y",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "experiment",
+        "label": "Experiment",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct r.experiment from runs r where exists (select 1 from agent_looks l where l.run_id = r.run_id) order by 1",
+        "definition": "select distinct r.experiment from runs r where exists (select 1 from agent_looks l where l.run_id = r.run_id) order by 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "run",
+        "label": "Agents",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct l.run_id as __value, l.agent || ' (' || l.model || ')' as __text from agent_looks l join runs r on r.run_id = l.run_id where r.experiment = '$experiment' order by 2",
+        "definition": "select distinct l.run_id as __value, l.agent || ' (' || l.model || ')' as __text from agent_looks l join runs r on r.run_id = l.run_id where r.experiment = '$experiment' order by 2",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "horizon",
+        "label": "Horizon",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "query": "select distinct horizon from agent_scores s join runs r on r.run_id = s.run_id where r.experiment = '$experiment' order by 1 desc",
+        "definition": "select distinct horizon from agent_scores s join runs r on r.run_id = s.run_id where r.experiment = '$experiment' order by 1 desc",
+        "refresh": 1,
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Entries and exits",
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(255, 152, 48, 0.9)",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "target": {
+          "refId": "Anno",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_timestamp(time) as time,\n  agent || ' look ' || number || ': ' || action || case when action = 'enter' then ' ' || (case when lower_pct >= 0 then '+' else '' end || round((lower_pct)::numeric, 2) || '%') || ' to ' || (case when upper_pct >= 0 then '+' else '' end || round((upper_pct)::numeric, 2) || '%') else '' end || coalesce('. ' || nullif(note, ''), '') as text,\n  agent || ',' || action as tags\nfrom agent_looks where run_id in ($run) and action in ('enter', 'exit') and $__unixEpochFilter(time) order by 1"
+        }
+      }
+    ]
+  },
+  "links": [
+    {
+      "title": "Runs",
+      "type": "link",
+      "url": "/d/lpbot-runs",
+      "icon": "dashboard"
+    },
+    {
+      "title": "Compare runs",
+      "type": "link",
+      "url": "/d/lpbot-compare",
+      "icon": "dashboard"
+    }
+  ],
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above, then **click an agent's name** in the first table to set the time range to its window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`."
+      },
+      "id": 1
+    },
+    {
+      "type": "row",
+      "title": "Performance",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 2
+    },
+    {
+      "type": "table",
+      "title": "Agents side by side",
+      "description": "One row per agent's run. Peers shown: looks that handed it peers' records. Holding: what holding the value token did, in dollars. Click an agent to set the time range to the run's window; click a run id to open it in the run detail dashboard.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select a.agent, a.model, a.looks, a.with_peers as \"peers shown\", r.result_pct as \"result %\", r.result_pct_usd as \"in $ %\",\n  r.hold_value_pct_usd as \"holding, in $ %\", r.max_drawdown_pct as \"max drawdown %\", r.campaigns, r.passes as \"round trips\",\n  r.fees, r.gas, r.value_token, r.window_from, r.window_to, r.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a join runs r on r.run_id = a.run_id\norder by a.agent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Set the time range to this run's window",
+                    "url": "/d/lpbot-agents?${experiment:queryparam}&${run:queryparam}&${horizon:queryparam}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run in detail",
+                    "url": "/d/lpbot-run?var-experiment=${experiment}&var-run=${__value.raw}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in $ %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding, in $ %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max drawdown %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm"
+      },
+      "id": 3
+    },
+    {
+      "type": "table",
+      "title": "Scores by agent and horizon",
+      "description": "Each decision left alone for the horizon, against the actions not taken, replayed by the same engine. Edge over cash: the decision's result less staying in cash (or exiting), in percent of the capital, on average. Edge over holding: the same against keeping the open position, for decisions taken with one open. Regret: the best alternative less the decision, summed. Best: the share of decisions that did at least as well as every alternative. Band held: how often price stayed in the band the agent expected until its next look; Brier: the square of the miss of its stated confidence (0 is perfect, 0.25 is a coin).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select agent, model, horizon, count(*) as decisions,\n  avg(edge_vs_cash_pct) as \"edge over cash %\", avg(edge_vs_hold_pct) as \"edge over holding %\", count(edge_vs_hold_pct) as \"with a position open\",\n  sum(regret_pct) as \"regret %\", 100.0 * avg(case when best = 'decision' then 1.0 else 0.0 end) as \"best %\",\n  100.0 * avg(case when band_held then 1.0 when band_held is not null then 0.0 end) as \"band held %\", count(band_held) as \"bands\",\n  avg(brier) as \"Brier\"\nfrom agent_scores where run_id in ($run)\ngroup by agent, model, horizon order by horizon <> 'next', horizon, agent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "edge over cash %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "edge over holding %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "regret %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "best %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "band held %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Brier"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm"
+      },
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Each agent's result, in percent of its capital",
+      "description": "The run's equity, marked at the pool price, in the value token, from the series table (one point every sim.series_every).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(s.time) as time, a.agent || ' (' || a.model || ')' as metric, (s.equity / r.start_capital - 1) * 100 as value\nfrom series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\nwhere $__unixEpochFilter(s.time)\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Price in dollars, and each agent's range",
+      "description": "The pool price in dollars, and the bounds of each agent's open range in the same price.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select time, metric, value from (\n  select to_timestamp(s.time) as time, 'price' as metric,\n    case when r.start_usd = r.start_capital then 1 / s.price else s.price end as value\n  from series s join runs r on r.run_id = s.run_id\n  where s.run_id = (select min(run_id) from agent_looks where run_id in ($run)) and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range low',\n    case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_lower is not null and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range high',\n    case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_upper is not null and $__unixEpochFilter(s.time)\n) x order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "prefix:$",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* range .*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Each decision against cash, over $horizon",
+      "description": "One point a decision, at the time it was made: its result less staying in cash (or exiting), in percent of the capital, over the horizon picked above.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "time_series",
+          "rawSql": "select to_timestamp(time) as time, agent || ' (' || model || ')' as metric, edge_vs_cash_pct as value\nfrom agent_scores where run_id in ($run) and horizon = '$horizon' and $__unixEpochFilter(time)\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "points",
+            "lineWidth": 2,
+            "pointSize": 6,
+            "showPoints": "always",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "id": 7
+    },
+    {
+      "type": "table",
+      "title": "How each agent stood toward its peers",
+      "description": "At each look that handed it peers' records, an agent says whether it copies, adapts or departs from them, or decides on its own. None shown: looks with no peers' records to relate to.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select agent, model, coalesce(stance || coalesce(' toward ' || toward, ''), 'none shown') as stance, count(*) as looks\nfrom agent_looks where run_id in ($run)\ngroup by 1, 2, 3 order by 1, 3"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm"
+      },
+      "id": 8
+    },
+    {
+      "type": "row",
+      "title": "Reasoning",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "id": 9
+    },
+    {
+      "type": "table",
+      "title": "Every look: what the agent saw, decided, expected and why",
+      "description": "One row a look, oldest first. Ranges and bands are in percent from the price at the look. The score is over the agent's own next look. Hover or click a reasoning cell to read it whole; the run's Markdown log (data/agent/<panel>/<agent>.log.md) has the same with the full view the agent saw.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 24,
+        "h": 22
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reasoning"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 620
+              },
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "note"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 280
+              },
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "look"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 55
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "day"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "decision"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "edge over cash %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "regret %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run so far %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "1d move %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "1d vol %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "md",
+        "showHeader": true
+      },
+      "id": 10
+    }
+  ]
+}

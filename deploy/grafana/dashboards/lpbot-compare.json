@@ -32,6 +32,33 @@
         "includeAll": false
       },
       {
+        "name": "gas",
+        "label": "Gas prices",
+        "type": "custom",
+        "query": "chain,fixed",
+        "current": {
+          "selected": true,
+          "text": "chain",
+          "value": "chain"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "chain",
+            "value": "chain"
+          },
+          {
+            "selected": false,
+            "text": "fixed",
+            "value": "fixed"
+          }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "description": "chain: runs charged each block's own gas price; fixed: the older runs, charged 1 gwei on every block"
+      },
+      {
         "name": "runs",
         "label": "Runs to compare",
         "type": "query",
@@ -39,8 +66,8 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) order by r.experiment, r.run_index",
-        "definition": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) order by r.experiment, r.run_index",
+        "query": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) and coalesce(r.gas_prices, 'fixed') = '${gas}' order by r.experiment, r.run_index",
+        "definition": "select r.run_id as __value, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience || '  ' || coalesce(r.sweep, '') as __text\nfrom runs r where r.experiment in ($experiment) and coalesce(r.gas_prices, 'fixed') = '${gas}' order by r.experiment, r.run_index",
         "refresh": 1,
         "sort": 0,
         "multi": true,
@@ -50,7 +77,7 @@
         "name": "group_by",
         "label": "Group by",
         "type": "custom",
-        "query": "patience,value_token,width_ticks,pool,sweep,experiment",
+        "query": "patience,entry_shape,value_token,width_ticks,pool,sweep,experiment,gas_prices",
         "current": {
           "text": "patience",
           "value": "patience"
@@ -60,6 +87,11 @@
             "text": "patience",
             "value": "patience",
             "selected": true
+          },
+          {
+            "text": "entry_shape",
+            "value": "entry_shape",
+            "selected": false
           },
           {
             "text": "value_token",
@@ -85,6 +117,11 @@
             "text": "experiment",
             "value": "experiment",
             "selected": false
+          },
+          {
+            "selected": false,
+            "text": "gas_prices",
+            "value": "gas_prices"
           }
         ],
         "multi": false,
@@ -119,7 +156,7 @@
     },
     {
       "id": 101,
-      "title": "Value in dollars, start = 100, against holding ETH and holding dollars",
+      "title": "Value in dollars, start = 100, against holding ETH, half and half, and dollars",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -141,7 +178,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding the volatile token',\n  avg(case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end * 100)\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding dollars', 100\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\norder by 1"
+          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding the volatile token',\n  avg(case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end * 100)\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding half and half',\n  avg(50 + 50 * case when r.start_usd = r.start_capital then r.start_price / s.price else s.price / r.start_price end)\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\nunion all\nselect date_trunc('hour', to_timestamp(s.time)), 'holding dollars', 100\nfrom series s join runs r using (run_id) where r.run_id = (select min(run_id) from runs where run_id in ($runs)) group by 1\norder by 1"
         }
       ],
       "fieldConfig": {
@@ -172,6 +209,31 @@
                   "dash": [
                     10,
                     10
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding half and half"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    6
                   ]
                 }
               }
@@ -246,7 +308,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity / r.start_capital * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2 order by 1"
+          "rawSql": "select date_trunc('hour', to_timestamp(s.time)) as time, r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience as metric, avg(s.equity / r.start_capital * 100) as value\nfrom series s join runs r using (run_id) where r.run_id in ($runs) group by 1, 2 order by 1"
         }
       ],
       "fieldConfig": {
@@ -299,7 +361,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || r.width_ticks || 't ' || r.patience as run, r.sweep,\n  r.result_pct as result_value_pct, r.result_pct_usd as result_usd_pct, r.hold_value_pct_usd as holding_value_usd_pct,\n  r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as apr_pct, r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as fee_apr_pct,\n  (r.end_capital - r.start_capital) - r.fees + r.gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id) as out_of_range_pct,\n  (select max(seconds_beyond) / 86400.0 from campaigns c where c.run_id = r.run_id) as longest_out_days,\n  r.campaigns, r.passes, r.max_drawdown_pct, r.window_from, r.window_to\nfrom runs r where r.run_id in ($runs) order by r.result_pct_usd desc"
+          "rawSql": "select r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience as run, r.sweep, coalesce(r.gas_prices, 'fixed') as gas_prices, r.gas_gwei,\n  r.result_pct as result_value_pct, r.result_pct_usd as result_usd_pct, r.hold_value_pct_usd as holding_value_usd_pct,\n  50 * case when r.start_usd = r.start_capital then r.start_price / r.end_price - 1 else r.end_price / r.start_price - 1 end as half_and_half_usd_pct,\n  r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as apr_pct, r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as fee_apr_pct,\n  (r.end_capital - r.start_capital) - r.fees + r.gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id) as out_of_range_pct,\n  (select max(seconds_beyond) / 86400.0 from campaigns c where c.run_id = r.run_id) as longest_out_days,\n  r.campaigns, r.passes, r.max_drawdown_pct, r.window_from, r.window_to\nfrom runs r where r.run_id in ($runs) order by r.result_pct_usd desc"
         }
       ],
       "fieldConfig": {
@@ -424,6 +486,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "half_and_half_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "fee_apr_pct"
             },
             "properties": [
@@ -535,7 +609,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select date_trunc('day', to_timestamp(s.time)) as time, cast(r.${group_by} as text) as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.experiment in ($experiment) group by 1, 2 order by 1"
+          "rawSql": "select date_trunc('day', to_timestamp(s.time)) as time, coalesce(cast(r.${group_by} as text), case when '${group_by}' = 'entry_shape' then 'one_sided' end) as metric, avg(s.equity_usd / r.start_usd * 100) as value\nfrom series s join runs r using (run_id) where r.experiment in ($experiment) and coalesce(r.gas_prices, 'fixed') = '${gas}' group by 1, 2 order by 1"
         }
       ],
       "fieldConfig": {
@@ -588,7 +662,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select cast(r.${group_by} as text) as \"group\", count(*) as runs,\n  avg(r.result_pct) as result_value_pct, avg(r.result_pct_usd) as result_usd_pct,\n  min(r.result_pct_usd) as worst_usd_pct, max(r.result_pct_usd) as best_usd_pct,\n  avg(r.hold_value_pct_usd) as holding_value_usd_pct,\n  avg(r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1)) as fee_apr_pct,\n  avg((select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as in_range_pct,\n  avg((select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as out_of_range_pct,\n  avg(r.campaigns) as campaigns, avg(r.max_drawdown_pct) as max_drawdown_pct\nfrom runs r where r.experiment in ($experiment)\ngroup by 1 order by result_usd_pct desc"
+          "rawSql": "select coalesce(cast(r.${group_by} as text), case when '${group_by}' = 'entry_shape' then 'one_sided' end) as \"group\", count(*) as runs,\n  avg(r.result_pct) as result_value_pct, avg(r.result_pct_usd) as result_usd_pct,\n  min(r.result_pct_usd) as worst_usd_pct, max(r.result_pct_usd) as best_usd_pct,\n  avg(r.hold_value_pct_usd) as holding_value_usd_pct,\n  avg(50 * case when r.start_usd = r.start_capital then r.start_price / r.end_price - 1 else r.end_price / r.start_price - 1 end) as half_and_half_usd_pct,\n  avg(r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1)) as fee_apr_pct,\n  avg((select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as in_range_pct,\n  avg((select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id)) as out_of_range_pct,\n  avg(r.campaigns) as campaigns, avg(r.max_drawdown_pct) as max_drawdown_pct\nfrom runs r where r.experiment in ($experiment) and coalesce(r.gas_prices, 'fixed') = '${gas}'\ngroup by 1 order by result_usd_pct desc"
         }
       ],
       "fieldConfig": {
@@ -747,6 +821,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "half_and_half_usd_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "fee_apr_pct"
             },
             "properties": [
@@ -844,7 +930,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select cast(r.${group_by} as text) as \"group\", avg(r.result_pct) as \"value token\", avg(r.result_pct_usd) as dollars\nfrom runs r where r.experiment in ($experiment) group by 1 order by dollars desc"
+          "rawSql": "select coalesce(cast(r.${group_by} as text), case when '${group_by}' = 'entry_shape' then 'one_sided' end) as \"group\", avg(r.result_pct) as \"value token\", avg(r.result_pct_usd) as dollars\nfrom runs r where r.experiment in ($experiment) and coalesce(r.gas_prices, 'fixed') = '${gas}' group by 1 order by dollars desc"
         }
       ],
       "fieldConfig": {

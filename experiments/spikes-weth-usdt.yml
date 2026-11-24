@@ -1,0 +1,29 @@
+# After a fast move, on WETH/USDT 0.3%, May 2025 to October 2026: enter only once
+# the price of ETH moved 3% or 6% within four hours (up, down or either
+# way), in a range a day's volatility wide, where volume gathers near a
+# possible top or bottom; leave after six hours or a day, or at a 2% loss.
+# One-sided and around the price. Expands into 48 runs, each counted in
+# ETH and in USD.
+#
+#   cargo run --release -p lpbot -- run experiments/spikes-weth-usdt.yml
+
+experiment: spikes-weth-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool: ["0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"]   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  entry.min_gas_multiple: [100]
+  patience.mode: [wait]
+  entry.shape: [one_sided, around_price]
+  entry.width_ticks: [120]
+  entry.width_vol_multiple: [1]
+  entry.after_move_pct: [3, 6]
+  entry.move_window: [4h]
+  entry.move_direction: [any, up, down]
+  exit.max_hold: [6h, 1d]
+  exit.max_loss_pct: [2]

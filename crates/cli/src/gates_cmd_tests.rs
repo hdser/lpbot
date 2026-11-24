@@ -513,6 +513,7 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
             "pools",
             "replica",
             "history",
+            "gas",
             "fees",
             "backtest",
             "load",
@@ -521,14 +522,17 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
     );
     assert_eq!(
         statuses(&results),
-        ["left out", "left out", "left out", "left out", "open", "pass", "left out", "left out"]
+        [
+            "left out", "left out", "left out", "left out", "left out", "open", "pass", "left out",
+            "left out"
+        ]
     );
     // The demo pool has no Collect events, so nothing confirms the fees.
     assert!(
-        matches!(&results[4].outcome, Some(Outcome::Open(note)) if note.contains("asks for 20"))
+        matches!(&results[5].outcome, Some(Outcome::Open(note)) if note.contains("asks for 20"))
     );
     assert_eq!(
-        results[5].outcome,
+        results[6].outcome,
         Some(Outcome::Pass(format!(
             "2 runs written to {}",
             root.join("runs").display()
@@ -536,10 +540,10 @@ fn on_stored_history_the_steps_that_need_no_node_run_through() {
     );
     // Without a database the load says so and does not fail.
     assert!(
-        matches!(&results[6].outcome, Some(Outcome::Skipped(note)) if note.contains("no database"))
+        matches!(&results[7].outcome, Some(Outcome::Skipped(note)) if note.contains("no database"))
     );
     assert_eq!(
-        results[7].outcome,
+        results[8].outcome,
         Some(Outcome::Skipped("left out on request".into()))
     );
     for run in &gates.runs {
@@ -571,10 +575,10 @@ fn a_database_that_is_not_there_fails_the_load_without_showing_its_password() {
         skip: vec![],
     };
     let results = run_steps(Gates::steps(), &mut gates, &plan).unwrap();
-    let Some(Outcome::Fail(note)) = &results[6].outcome else {
+    let Some(Outcome::Fail(note)) = &results[7].outcome else {
         panic!("the load must fail");
     };
-    assert_eq!(results[7].outcome, None);
+    assert_eq!(results[8].outcome, None);
     assert!(
         note.contains("cannot connect to the database") && !note.contains("topsecret"),
         "{note}"

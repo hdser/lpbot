@@ -13,8 +13,9 @@ pub struct ZoneScore {
     pub passes_per_day_long: f64,
     /// Full passes per day on the shortest lookback.
     pub passes_per_day_short: f64,
-    /// Days of history behind the long figure.
-    pub observed_days: f64,
+    /// Whether the long figure stands on enough history to rank on: a day
+    /// of it, or the whole lookback when that is shorter.
+    pub enough_history: bool,
 }
 
 fn round_down(tick: Tick, step: Tick) -> Tick {
@@ -77,10 +78,32 @@ pub fn entry_candidates(
     ranges
 }
 
+/// The range of `width` around the price: the one, on the tick spacing,
+/// that holds `tick` (`lower <= tick < upper`) and whose middle is nearest
+/// to it, the higher one on a tie. Such a range holds both tokens. `None`
+/// when `width` is not a positive multiple of `spacing`.
+pub fn around_price(tick: Tick, spacing: Tick, width: Tick) -> Option<(Tick, Tick)> {
+    if spacing <= 0 || width <= 0 || width % spacing != 0 {
+        return None;
+    }
+    // The lower bound of a range centred exactly on the tick, rounded to
+    // the nearest bound on the spacing, then moved one step if that range
+    // misses the tick.
+    let centred = tick - width / 2;
+    let mut lower = (centred + spacing / 2).div_euclid(spacing) * spacing;
+    if lower > tick {
+        lower -= spacing;
+    }
+    if lower + width <= tick {
+        lower += spacing;
+    }
+    Some((lower, lower + width))
+}
+
 /// Picks the range to enter from candidates listed nearest first.
 ///
-/// Without a day of history there is nothing to rank on, and the nearest
-/// range is taken. With history, a range must have been crossed on the
+/// Without enough history (`ZoneScore::enough_history`) there is nothing
+/// to rank on, and the nearest range is taken. With history, a range must have been crossed on the
 /// short lookback to qualify, and at least `min_passes_per_day` times a day
 /// on the long one: a range that only a sudden move crossed, where price
 /// has not been trading, is not a zone. Of those, the one crossed most on
@@ -95,7 +118,7 @@ pub fn choose_zone(
         .iter()
         .map(|&(lower, upper)| ((lower, upper), score(lower, upper)))
         .collect();
-    if scored.iter().all(|(_, s)| s.observed_days < 1.0) {
+    if scored.iter().all(|(_, s)| !s.enough_history) {
         return candidates.first().copied();
     }
     let mut best: Option<((Tick, Tick), f64)> = None;
@@ -118,8 +141,48 @@ mod tests {
         ZoneScore {
             passes_per_day_long: long,
             passes_per_day_short: short,
-            observed_days: days,
+            enough_history: days >= 1.0,
         }
+    }
+
+    #[test]
+    fn the_range_around_the_price_holds_the_tick_and_is_centred_on_it() {
+        // Centred exactly: the tick is the middle.
+        assert_eq!(around_price(0, 10, 20), Some((-10, 10)));
+        assert_eq!(around_price(180, 60, 120), Some((120, 240)));
+        assert_eq!(around_price(200, 60, 120), Some((120, 240)));
+        // Between two centred ranges the higher one wins the tie.
+        assert_eq!(around_price(5, 10, 20), Some((0, 20)));
+        assert_eq!(around_price(4, 10, 20), Some((-10, 10)));
+        // A width of one spacing has a single range holding the tick.
+        assert_eq!(around_price(7, 10, 10), Some((0, 10)));
+        assert_eq!(around_price(10, 10, 10), Some((10, 20)));
+        // Negative ticks, as for USDC/WETH, round the same way.
+        assert_eq!(around_price(-198_969, 10, 40), Some((-198_990, -198_950)));
+        assert_eq!(around_price(-7, 10, 10), Some((-10, 0)));
+        for tick in -200..200 {
+            for (spacing, width) in [(1, 1), (1, 7), (10, 10), (10, 20), (10, 50), (60, 120)] {
+                let (lower, upper) = around_price(tick, spacing, width).unwrap();
+                assert!(lower <= tick && tick < upper, "{tick} {spacing} {width}");
+                assert_eq!(upper - lower, width);
+                assert_eq!(lower.rem_euclid(spacing), 0);
+                // No other range on the spacing holding the tick is closer
+                // to centred.
+                let off = |l: Tick| (2 * (tick - l) - width).abs();
+                let mut other = lower - spacing;
+                while other + width > tick {
+                    assert!(off(other) >= off(lower), "{tick} {spacing} {width}");
+                    other -= spacing;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_width_off_the_spacing_has_no_range_around_the_price() {
+        assert_eq!(around_price(0, 10, 15), None);
+        assert_eq!(around_price(0, 10, 0), None);
+        assert_eq!(around_price(0, 0, 10), None);
     }
 
     #[test]

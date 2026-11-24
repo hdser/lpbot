@@ -30,11 +30,23 @@ pub enum Autonomy {
     Approve,
 }
 
-/// Backtest window, as ISO dates (`YYYY-MM-DD`).
+/// Backtest window, as ISO dates (`YYYY-MM-DD`). `to: open` leaves it open
+/// at the end: the run goes as far as the stored history does, which a
+/// forward run in the agent mode brings up to the chain's head look by look.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub from: String,
     pub to: String,
+}
+
+/// The `to` of a window that is open at the end.
+pub const OPEN_END: &str = "open";
+
+impl Window {
+    /// Whether the window is open at the end (`to: open`).
+    pub fn is_open(&self) -> bool {
+        self.to == OPEN_END
+    }
 }
 
 /// Inputs given per run. Capital and the loss limit have no default.
@@ -183,7 +195,10 @@ pub enum ConfigError {
     MissingLossLimit,
     #[error("a backtest needs a window with `from` and `to` dates")]
     BacktestNeedsWindow,
-    #[error("window dates must be YYYY-MM-DD with `from` before `to` (got from={from}, to={to})")]
+    #[error(
+        "window dates must be YYYY-MM-DD with `from` before `to`, or `to: open` for a window open \
+         at the end (got from={from}, to={to})"
+    )]
     BadWindow { from: String, to: String },
     #[error("universe.tokens is empty")]
     EmptyUniverse,
@@ -212,7 +227,10 @@ impl Config {
 
         match &self.window {
             None if self.mode == Mode::Backtest => errors.push(ConfigError::BacktestNeedsWindow),
-            Some(w) if !(is_iso_date(&w.from) && is_iso_date(&w.to) && w.from < w.to) => {
+            Some(w)
+                if !(is_iso_date(&w.from)
+                    && (w.is_open() || (is_iso_date(&w.to) && w.from < w.to))) =>
+            {
                 errors.push(ConfigError::BadWindow {
                     from: w.from.clone(),
                     to: w.to.clone(),
@@ -347,6 +365,28 @@ risk: { max_actions_per_day: 12 }
             c.validate().unwrap_err()[0],
             ConfigError::BadWindow { .. }
         ));
+
+        // Open at the end: the start must still be a date.
+        c.window = Some(Window {
+            from: "2026-11-24".into(),
+            to: OPEN_END.into(),
+        });
+        assert!(c.window.as_ref().unwrap().is_open());
+        assert!(c.validate().is_ok());
+        c.window = Some(Window {
+            from: "today".into(),
+            to: OPEN_END.into(),
+        });
+        assert!(matches!(
+            c.validate().unwrap_err()[0],
+            ConfigError::BadWindow { .. }
+        ));
+        c.window = Some(Window {
+            from: "2026-11-24".into(),
+            to: "later".into(),
+        });
+        assert!(!c.window.as_ref().unwrap().is_open());
+        assert!(c.validate().is_err());
     }
 
     #[test]

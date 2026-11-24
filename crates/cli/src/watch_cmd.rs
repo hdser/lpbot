@@ -944,6 +944,7 @@ fn rebuild(
             source: &node,
             block: head.block,
             time: head.time,
+            final_block: None,
         };
         println!("storing the position manager's logs from {missing} to {to}");
         let started = Instant::now();

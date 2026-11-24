@@ -10,11 +10,12 @@ use std::path::Path;
 
 use postgres::Client;
 
+use crate::agent_tables::agent_tables;
 use crate::engine::Output;
 use crate::tables::{
     pool_tables, read_table, result_tables, Column, PoolInfo, RunInfo, Table, TableError,
 };
-use crate::{LIVE_TABLES, POOL_TABLES, RESULT_TABLES};
+use crate::{AGENT_TABLES, LIVE_TABLES, POOL_TABLES, RESULT_TABLES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -69,6 +70,10 @@ pub fn key_column(table: &str) -> &'static str {
     }
 }
 
+/// Columns that were whole numbers before and are fractions now: their
+/// type is changed in place in an older database.
+const WIDENED: &[(&str, &str)] = &[("zone_map", "lookback_days")];
+
 /// Statements that make sure the table exists with every column of `table`.
 pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     let name = identifier(&table.name)?;
@@ -82,6 +87,14 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
             "ALTER TABLE {name} ADD COLUMN IF NOT EXISTS {column} {}",
             sql_type(values)
         ));
+        // A column that held whole numbers in older databases and holds
+        // fractions now.
+        if WIDENED.contains(&(name, column)) {
+            statements.push(format!(
+                "ALTER TABLE {name} ALTER COLUMN {column} TYPE {}",
+                sql_type(values)
+            ));
+        }
     }
     statements.push(format!(
         "CREATE INDEX IF NOT EXISTS {name}_{key} ON {name} ({key})"
@@ -89,8 +102,8 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     Ok(statements)
 }
 
-/// The six result tables, the two pool tables and the five live tables
-/// as SQL, for a database that has no runs yet.
+/// The six result tables, the two agent tables, the two pool tables and
+/// the five live tables as SQL, for a database that has no runs yet.
 ///
 /// The viewer's dashboards query these tables. Creating them empty lets a
 /// fresh database show "no data" instead of an error. The same text is
@@ -98,10 +111,12 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
 /// applies; a test keeps the two in step.
 pub fn full_schema_sql() -> String {
     let mut tables = result_tables(&RunInfo::default(), &Output::default(), &[]);
+    tables.extend(agent_tables("", &[], &[]));
     tables.extend(pool_tables(&PoolInfo::default(), &[], &[]));
     let mut sql = String::from(
-        "-- The six result tables, the two pool tables and the five live tables, empty.\n\
-         -- Generated from the table definitions in crates/sim/src/tables.rs and\n\
+        "-- The six result tables, the two agent tables, the two pool tables and the\n\
+         -- five live tables, empty. Generated from the table definitions in\n\
+         -- crates/sim/src/tables.rs, crates/sim/src/agent_tables.rs and\n\
          -- crates/sim/src/live_tables.rs; do not edit by hand. To regenerate:\n\
          --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file\n",
     );
@@ -212,11 +227,15 @@ pub struct LoadReport {
     pub rows: usize,
 }
 
-/// Loads every run, and every pool's tables, found under `results` into
-/// the database.
+/// Loads every run, with an agent run's agent tables, and every pool's
+/// tables, found under `results` into the database.
 pub fn load_results(client: &mut Client, results: &Path) -> Result<LoadReport, LoadError> {
     let mut report = LoadReport::default();
-    for table in RESULT_TABLES.into_iter().chain(POOL_TABLES) {
+    for table in RESULT_TABLES
+        .into_iter()
+        .chain(AGENT_TABLES)
+        .chain(POOL_TABLES)
+    {
         let dir = results.join(table);
         if !dir.is_dir() {
             continue;
@@ -323,6 +342,16 @@ mod tests {
             assert!(current.contains(&format!("CREATE TABLE IF NOT EXISTS {table} ")));
             assert!(current.contains(&format!("CREATE INDEX IF NOT EXISTS {table}_run_id")));
         }
+        // The agent tables, keyed by run like the result tables.
+        for table in crate::AGENT_TABLES {
+            assert!(current.contains(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (run_id text NOT NULL)"
+            )));
+            assert!(current.contains(&format!("CREATE INDEX IF NOT EXISTS {table}_run_id")));
+        }
+        assert!(
+            current.contains("ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS reasoning text;")
+        );
         // And the pool tables, keyed by pool.
         for table in crate::POOL_TABLES {
             assert!(current.contains(&format!(

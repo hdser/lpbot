@@ -337,10 +337,26 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
     ) -> RpcResult<Vec<Log>> {
+        self.get_logs_where(addresses, &[topic0s.to_vec()], from_block, to_block)
+    }
+
+    /// Logs of several contracts in a block range whose topics match:
+    /// `topics[i]` lists the values allowed at position `i`, and an empty
+    /// list, or a position past the end, allows any. In chain order, with
+    /// the same checks as `get_logs_many`. Filtering on an indexed
+    /// argument, such as a token id or an owner, lets the node skip blocks
+    /// by their bloom filter.
+    pub fn get_logs_where(
+        &self,
+        addresses: &[Address],
+        topics: &[Vec<B256>],
+        from_block: u64,
+        to_block: u64,
+    ) -> RpcResult<Vec<Log>> {
         if addresses.is_empty() {
             return Ok(Vec::new());
         }
-        let filter = log_filter(addresses, topic0s, from_block, to_block);
+        let filter = log_filter_where(addresses, topics, from_block, to_block);
         let result = self.call("eth_getLogs", json!([filter]))?;
         let mut logs = result
             .as_array()
@@ -392,6 +408,26 @@ impl RpcClient {
         from_block: u64,
         to_block: u64,
         initial_chunk: u64,
+        on_progress: impl FnMut(u64, usize),
+    ) -> RpcResult<Vec<Log>> {
+        self.get_logs_chunked_where(
+            addresses,
+            &[topic0s.to_vec()],
+            from_block,
+            to_block,
+            initial_chunk,
+            on_progress,
+        )
+    }
+
+    /// `get_logs_where` for a long range, in chunks as `get_logs_chunked`.
+    pub fn get_logs_chunked_where(
+        &self,
+        addresses: &[Address],
+        topics: &[Vec<B256>],
+        from_block: u64,
+        to_block: u64,
+        initial_chunk: u64,
         mut on_progress: impl FnMut(u64, usize),
     ) -> RpcResult<Vec<Log>> {
         let mut logs = Vec::new();
@@ -402,7 +438,7 @@ impl RpcClient {
         let mut start = from_block;
         while start <= to_block {
             let end = to_block.min(start.saturating_add(chunk - 1));
-            match self.get_logs_many(addresses, topic0s, start, end) {
+            match self.get_logs_where(addresses, topics, start, end) {
                 Ok(mut batch) => {
                     logs.append(&mut batch);
                     on_progress(end, logs.len());
@@ -446,6 +482,66 @@ impl RpcClient {
     }
 }
 
+/// Base fee and median priority fee of each block in a range, from
+/// `eth_feeHistory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeHistory {
+    /// The first block the lists cover.
+    pub oldest: u64,
+    /// Base fee per gas of each block, in wei.
+    pub base_fees: Vec<u64>,
+    /// The median priority fee per gas paid in each block, in wei; zero
+    /// for an empty block.
+    pub median_tips: Vec<u64>,
+}
+
+impl RpcClient {
+    /// The fees of the `count` blocks ending at `newest`. Nodes serve at
+    /// most 1,024 blocks per request.
+    pub fn fee_history(&self, newest: u64, count: u64) -> RpcResult<FeeHistory> {
+        const M: &str = "eth_feeHistory";
+        let reply = self.call(M, json!([quantity(count), quantity(newest), [50.0]]))?;
+        let oldest = parse_quantity(M, reply.get("oldestBlock").unwrap_or(&Value::Null))?;
+        let list = |name: &str| {
+            reply
+                .get(name)
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| bad(M, format!("no `{name}` in the reply")))
+        };
+        // The base fees list one more entry: the block after `newest`.
+        let mut base_fees = list("baseFeePerGas")?
+            .iter()
+            .map(|v| parse_quantity(M, v))
+            .collect::<RpcResult<Vec<u64>>>()?;
+        let rewards = list("reward")?;
+        let blocks = newest + 1 - oldest;
+        base_fees.truncate(blocks as usize);
+        let median_tips = rewards
+            .iter()
+            .map(|r| match r.as_array().and_then(|r| r.first()) {
+                Some(value) => parse_quantity(M, value),
+                None => Ok(0),
+            })
+            .collect::<RpcResult<Vec<u64>>>()?;
+        if base_fees.len() as u64 != blocks || median_tips.len() as u64 != blocks {
+            return Err(bad(
+                M,
+                format!(
+                    "asked for blocks {oldest} to {newest}, got {} base fees and {} tips",
+                    base_fees.len(),
+                    median_tips.len()
+                ),
+            ));
+        }
+        Ok(FeeHistory {
+            oldest,
+            base_fees,
+            median_tips,
+        })
+    }
+}
+
 impl RpcClient {
     /// Many view calls at one block, sent in batches, each with its own
     /// outcome: a call that reverts is an error in its place, and the
@@ -483,8 +579,20 @@ impl RpcClient {
     }
 }
 
-/// The filter of an `eth_getLogs` request.
+/// The filter of an `eth_getLogs` request on the event types `topic0s`;
+/// empty means all.
 fn log_filter(addresses: &[Address], topic0s: &[B256], from_block: u64, to_block: u64) -> Value {
+    log_filter_where(addresses, &[topic0s.to_vec()], from_block, to_block)
+}
+
+/// The filter of an `eth_getLogs` request whose topics match `topics`, as
+/// `RpcClient::get_logs_where` describes.
+fn log_filter_where(
+    addresses: &[Address],
+    topics: &[Vec<B256>],
+    from_block: u64,
+    to_block: u64,
+) -> Value {
     let address = match addresses {
         [one] => json!(format!("{one:#x}")),
         many => json!(many.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
@@ -494,9 +602,20 @@ fn log_filter(addresses: &[Address], topic0s: &[B256], from_block: u64, to_block
         "fromBlock": quantity(from_block),
         "toBlock": quantity(to_block),
     });
-    if !topic0s.is_empty() {
-        let list: Vec<String> = topic0s.iter().map(|t| format!("{t:#x}")).collect();
-        filter["topics"] = json!([list]);
+    // Trailing positions that allow anything are left out.
+    let used = topics
+        .iter()
+        .rposition(|t| !t.is_empty())
+        .map_or(0, |i| i + 1);
+    if used > 0 {
+        let positions: Vec<Value> = topics[..used]
+            .iter()
+            .map(|allowed| match allowed.as_slice() {
+                [] => Value::Null,
+                some => json!(some.iter().map(|t| format!("{t:#x}")).collect::<Vec<_>>()),
+            })
+            .collect();
+        filter["topics"] = json!(positions);
     }
     filter
 }
@@ -585,6 +704,34 @@ mod tests {
     }
 
     #[test]
+    fn fee_history_drops_the_next_block_and_reads_the_median_tip() {
+        let node = MockNode::start(|method, params| {
+            assert_eq!(method, "eth_feeHistory");
+            assert_eq!(params[0], json!("0x3"));
+            assert_eq!(params[1], json!("0xc"));
+            Ok(json!({
+                "oldestBlock": "0xa",
+                "baseFeePerGas": ["0x64", "0x65", "0x66", "0x67"],
+                "gasUsedRatio": [0.5, 0.5, 0.0],
+                "reward": [["0x5"], ["0x6"], []]
+            }))
+        });
+        let fees = RpcClient::new(node.url()).fee_history(12, 3).unwrap();
+        assert_eq!(fees.oldest, 10);
+        assert_eq!(fees.base_fees, vec![100, 101, 102]);
+        assert_eq!(
+            fees.median_tips,
+            vec![5, 6, 0],
+            "an empty block pays no tip"
+        );
+
+        let short = MockNode::start(|_, _| {
+            Ok(json!({"oldestBlock": "0xa", "baseFeePerGas": ["0x64"], "reward": [["0x5"]]}))
+        });
+        assert!(RpcClient::new(short.url()).fee_history(12, 3).is_err());
+    }
+
+    #[test]
     fn block_times_come_back_in_the_order_asked_across_batches() {
         let requests = Arc::new(Mutex::new(0usize));
         let seen = Arc::clone(&requests);
@@ -606,6 +753,40 @@ mod tests {
         assert_eq!(client.block_times(&[]).unwrap(), Vec::<u64>::new());
         let error = client.block_times(&[5, 999]).unwrap_err();
         assert!(error.to_string().contains("999"), "{error}");
+    }
+
+    #[test]
+    fn a_filter_on_later_topics_is_sent_position_by_position() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let node = MockNode::start(move |method, params| {
+            assert_eq!(method, "eth_getLogs");
+            record.lock().unwrap().push(params[0]["topics"].clone());
+            Ok(json!([]))
+        });
+        let client = RpcClient::new(node.url());
+        let a = B256::repeat_byte(0xaa);
+        let b = B256::repeat_byte(0xbb);
+        let c = B256::repeat_byte(0xcc);
+        client
+            .get_logs_where(&[pool()], &[vec![a], vec![], vec![b, c]], 1, 2)
+            .unwrap();
+        // Positions that allow anything at the end are left out.
+        client
+            .get_logs_where(&[pool()], &[vec![a], vec![], vec![]], 1, 2)
+            .unwrap();
+        client.get_logs_where(&[pool()], &[], 1, 2).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            json!([
+                [format!("{a:#x}")],
+                null,
+                [format!("{b:#x}"), format!("{c:#x}")]
+            ])
+        );
+        assert_eq!(seen[1], json!([[format!("{a:#x}")]]));
+        assert_eq!(seen[2], Value::Null);
     }
 
     #[test]

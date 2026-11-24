@@ -22,11 +22,17 @@ Backtests, and the pools followed live. The bot reads pools from a node, replays
 | Fee check: the replica's fees against what real positions collected, confirmed with the node's position records (`lpbot verify-fees`) | |
 | One command for every check against real chain data, then the backtest, the load and the calibration (`make gates`) | |
 | Simulated pool history to try everything without a node (`lpbot demo-data`) | |
-| Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit | |
+| Replay engine: virtual position, exact fees, gas and swap costs, action latency, loss limit, decided and counted block by block | |
+| `lpbot gas-history`: each block's base fee and priority fee from the node; backtests charge every action the gas of its block | |
 | `lpbot run`: backtests of the zone round trip, written as the six result tables, with results in the value token and in dollars | |
+| Entries one-sided or around the price (`entry.shape`), with an optional move back around the price once price has left (`exit.recenter_after`) | |
+| Per-campaign exits (time limit, stop from entry, stop from the best, leaving on the return after a deep excursion), an entry signal on fast moves, ranges sized by volatility | |
+| `lpbot lp-positions`: a provider's positions from the node's position manager records; backtests that follow them (`strategy.follow`) | |
+| The agent mode: a run decided look by look by a person or a session (`lpbot agent next`, `lpbot agent decide`), replayed from its decisions; forward at the head of the chain (`window: { to: open }`), the store brought up to the node's head before each look and the next look waited for by the wall clock (`agent next --wait`) | |
+| Panels of agents on backtests: one run per agent (`agent.name`, `agent.model`, `agent.peers`), a shared JSON record a look with what it saw, decided and expected, peers' records handed over only up to each look (`lpbot agent next`, `lpbot agent peers`), every decision scored against cash and holding (`lpbot agent evaluate`), the brief for each session (`lpbot agent brief`), and the agents' looks and scores in the viewer (`agent_looks`, `agent_scores`, the `lpbot: agents` dashboard) | Reviews blind first, strategy notes, agents asking each other at a look (forward and live), lockstep panels |
 | Adaptive patience decision: wait, flip or close by expected result, from the pool's own history | |
 | `lpbot calibrate`: fits the adaptive decision walk-forward; it ships only if it beats the three fixed rules out of sample | |
-| Viewer: `lpbot load-results` puts the tables in Postgres; five Grafana dashboards read them (runs; run detail with the price, the range shaded by state, time in and out of range, APR and fee APR; compare, for runs and strategies side by side; pools and zones; pool) | |
+| Viewer: `lpbot load-results` puts the tables in Postgres; six Grafana dashboards read them (runs; run detail with the price, the range shaded by state, time in and out of range, APR and fee APR; compare, for runs and strategies side by side; pools and zones; pool; agents, with each agent's result, scores, stances and every look's reasoning side by side) | |
 | `lpbot pool-stats`: each pool's price, value held, volume and fees hour by hour, and the liquidity around the price day by day, for the pool dashboard | |
 | `lpbot watch-pools` (the watcher service): every pool followed from the node block by block, with reorgs taken back; every position and position NFT with its owner, range, amounts, fees and when it opened and closed; the live tables and the live dashboard | |
 | Implied-volatility metric, fixed patience rules, loss-limit check | |

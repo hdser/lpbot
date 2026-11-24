@@ -1,0 +1,26 @@
+# One-sided entries on the WETH/USDT pools, May 2025 to October 2026, with the
+# plain "wait" rule: the baseline for around-weth-usdt.yml over the same
+# window and widths, plus the narrow width the first research round
+# favoured. Expands into 16 runs, each counted in ETH and in USD.
+#
+# Research settings: all capital in each campaign, a 50% loss limit so
+# every run sees the whole window, gas at 1 gwei.
+#
+#   cargo run --release -p lpbot -- run experiments/one-sided-weth-usdt.yml
+
+experiment: one-sided-weth-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0x11b815efB8f581194ae79006d24E0d814B7697F6"   # WETH/USDT 0.05%
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"   # WETH/USDT 0.3%
+  value_token: [WETH, USDT]
+  capital_share: [1.0]
+  entry.shape: [one_sided]
+  entry.width_ticks: [40, 120, 600, 2000]
+  entry.min_gas_multiple: [100]
+  patience.mode: [wait]

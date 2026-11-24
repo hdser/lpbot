@@ -54,11 +54,14 @@ strategies:
     pools: ranked                    # top pools holding the value token; fee tier follows the ranking
     pool: null                       # or a pool address to trade instead of the ranked one; sweep it to compare fee tiers
     capital_share: 0.25
+    signal_step: 10m                 # price steps the volatility, move and odds signals count on; down to 12s, one block
     zone:
-      lookbacks: [7d, 30d, 90d]
+      lookbacks: [7d, 30d, 90d]      # durations; the shortest and longest rank ranges; under a day, such as [1h, 6h], for intraday ranges
       rank_by: [passes_per_day, zone_implied_vol]
     entry:
-      shapes: [one_sided, around_price]
+      shape: one_sided               # or around_price: swap part into the other token and hold the range centred on the price
+      shapes: [one_sided, around_price]   # what the calibrator may choose from, once it searches shapes
+      check_every: 1h                # how often a flat run looks for an entry and a resting one whether to move; 12s is every block
       width_ticks: { min: 10, max: 80 }   # search space, not a choice
       max_gap_ticks: null            # how far from the price an entry may sit; null is one width
       move_margin: 1.5               # a resting range moves to one crossed this many times as often
@@ -66,6 +69,13 @@ strategies:
       max_vol_to_width: null         # enter only while the day's volatility is at most this many range widths
       max_daily_vol_pct: null        # enter only while the day's volatility is at most this, in percent
       min_gas_multiple: null         # an entry must put in this many times the gas of its open, close and swap
+      after_move_pct: null           # enter only after price moved this many percent within move_window: a fast move up or down
+      move_window: 4h
+      move_direction: any            # any | up | down, as the volatile token's dollar price
+      vol_window: 1d                 # how far back the volatility gates and width_vol_multiple measure; per day whatever the window
+      cooldown: null                 # after a campaign ends, no new one for this long, such as 12h: one entry per move
+      reposition: true               # move a resting range price has left, or for a much busier one; false leaves it until an exit
+      width_vol_multiple: null       # ranges this many times the day's volatility wide, instead of width_ticks
     patience:
       mode: adaptive                 # or a fixed rule: wait | flip | close
       decide_every: 1h
@@ -73,6 +83,21 @@ strategies:
       max_wait: null                 # close a position stranded beyond its range this long, such as 72h
     exit:
       max_vol_to_width: null         # a resting range steps aside to cash while the day's volatility exceeds this many widths
+      recenter_after: null           # around the price only: move a position price has left this long (0: at once) to the range around the price, with one swap
+      max_hold: null                 # close a campaign open this long, such as 6h or 7d
+      max_loss_pct: null             # close a campaign that fell this many percent below what went in, back to the value token
+      max_drawdown_pct: null         # close a campaign that fell this many percent of what went in from its best
+      exit_on_return_pct: null       # once price ran this many percent past the range, close as soon as it is back in the range
+      after_round_trips: null        # close once back wholly in the value token, fees on top, after this many round trips (1: the first)
+    follow:                          # copy a provider's positions instead of choosing ranges
+      file: null                     # positions written by `lpbot lp-positions`, such as data/follow/x.csv
+      owner: null                    # one owner of the file, "0x..."; null follows every owner in it
+      join_within: 1h                # a position is copied only this soon after the provider opened it
+    agent:                           # entries and exits decided at each look by a person or a session: `lpbot agent next` / `decide`
+      decisions: null                # the decisions file, such as data/agent/x.jsonl; null runs the strategy's own rules
+      name: null                     # the agent's handle, and its decisions file's name (b decides b.jsonl); null: the file's name
+      model: null                    # the Claude model id of the session deciding, or person; recorded with every look
+      peers: null                    # agents whose records it is handed up to its own look, such as [a]; names in the same folder, or paths
     allocator:
       campaign_size_usd: 500         # placeholder
       min_explore_share: 0.2         # capital kept on non-leading settings
@@ -89,8 +114,10 @@ sim:                                 # backtest and paper runs
   latency_blocks: 1                  # blocks between a decision and its fill; at least 1
   series_every: 1h                   # spacing of the rows in the series table
 
-costs:                               # what the simulator charges; placeholders
-  gas_price_gwei: 1.0
+costs:                               # what the simulator charges
+  gas: chain                         # chain: each block's base fee plus priority fee, stored by `lpbot gas-history`; fixed: gas_price_gwei on every block
+  priority_fee_gwei: median          # on top of the base fee; median is the median tip of the last 20 blocks, as a wallet sets it
+  gas_price_gwei: 1.0                # with gas: fixed
   gas_units: { open: 450000, close: 300000, swap: 180000 }
   # eth_price_usd: 2000              # only for pools that hold no WETH
 

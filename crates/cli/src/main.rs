@@ -10,12 +10,20 @@
 //! backtest, the load and the calibration). `watch-pools` keeps the live
 //! tables current from the node, block by block.
 
+mod agent_brief;
+mod agent_cmd;
+mod agent_eval;
+mod agent_log;
+mod agent_peers;
+mod agent_rows;
 mod backfill_cmd;
 mod chain_cmd;
 mod demo_cmd;
 mod fees_cmd;
+mod gas_history_cmd;
 mod gates_cmd;
 mod load_cmd;
+mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
@@ -76,6 +84,20 @@ enum Command {
     /// fees over time, and the liquidity around the price, as the two pool
     /// tables for the pool dashboard.
     PoolStats(PoolStatsArgs),
+    /// A liquidity provider's positions on the stored pools, from the
+    /// node's position manager records, one row per stretch with liquidity
+    /// in place: what a backtest can follow (`strategy.follow`).
+    LpPositions(LpPositionsCli),
+    /// Store each block's base fee and median priority fee from the node's
+    /// fee history, so backtests charge gas at the price of the block an
+    /// action lands in.
+    GasHistory(GasHistoryArgs),
+    /// Decide a run look by look, as a person or a session would: `next`
+    /// shows the pool at the first look without a decision, `decide`
+    /// writes one. The experiment's strategy names the decisions file
+    /// (`agent.decisions`).
+    #[command(subcommand)]
+    Agent(AgentCommand),
     /// Follow the stored pools live from the node, block by block, and keep
     /// the live tables in Postgres current: price, liquidity, swaps, minute
     /// rows and every position. Runs until stopped.
@@ -311,6 +333,179 @@ struct PoolStatsArgs {
     /// Folder the pool tables are written to, beside the run tables.
     #[arg(long, default_value = "runs")]
     results_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct LpPositionsCli {
+    /// A position's NFT id, such as one seen on revert.finance; its owner's
+    /// positions are read. Repeat for several.
+    #[arg(long = "nft")]
+    nfts: Vec<String>,
+    /// An owner's address. Repeat for several.
+    #[arg(long = "account")]
+    accounts: Vec<String>,
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to read, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder with the stored pools. Defaults to LPBOT_DATA_DIR, then
+    /// data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// File the positions are written to, as CSV.
+    #[arg(long, default_value = "data/follow/positions.csv")]
+    out: PathBuf,
+    /// Blocks per log request; the node refuses more than 100,000.
+    #[arg(long, default_value_t = 100_000)]
+    log_chunk: u64,
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Replay the run to its first look without a decision and show the
+    /// pool there, with the peers' records up to that look. A forward run
+    /// (window `to: open`) is first brought up to the node's head.
+    Next(NextArgs),
+    /// Write the decision for the look `next` showed, then show the next.
+    Decide(Box<DecideArgs>),
+    /// Show again every record of the run's peers up to the look waiting
+    /// for a decision.
+    Peers(AgentArgs),
+    /// Score every decision against what happened and the actions not
+    /// taken, for one agent's run or every agent of the experiment.
+    Evaluate(EvaluateArgs),
+    /// Print the brief for a session acting as one agent of the experiment.
+    Brief(AgentArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Which of the experiment's runs, by index, when it has several.
+    #[arg(long)]
+    run: Option<usize>,
+    /// Which of the experiment's runs, by the name of the agent deciding it
+    /// (`agent.name`, or its decisions file's name).
+    #[arg(long)]
+    agent: Option<String>,
+    /// Which chain of the config to use.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder for the pool history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// A forward run: the node endpoint the store is brought up to the
+    /// head from. Defaults to LPBOT_RPC, then the config's local endpoint.
+    #[arg(long)]
+    rpc: Option<String>,
+    /// A forward run: replay what is stored, without bringing it up to the
+    /// head first.
+    #[arg(long)]
+    no_sync: bool,
+    /// A forward run: how old the newest block may be, by the wall clock,
+    /// for a look to be shown. An older one means the node is behind.
+    #[arg(long, default_value = "5m")]
+    max_lag: String,
+}
+
+impl AgentArgs {
+    fn forward(&self, wait: u64) -> Result<agent_cmd::Forward> {
+        let max_lag = run_cmd::parse_duration(&self.max_lag).ok_or_else(|| {
+            anyhow::anyhow!("--max-lag {}: give a duration such as 5m", self.max_lag)
+        })?;
+        Ok(agent_cmd::Forward {
+            sync: !self.no_sync,
+            rpc: self.rpc.clone(),
+            max_lag,
+            wait,
+        })
+    }
+}
+
+#[derive(Args)]
+struct NextArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A forward run: when no look is due yet, wait for it, up to this
+    /// long (such as 4h or 1d), then show it.
+    #[arg(long)]
+    wait: Option<String>,
+}
+
+#[derive(Args)]
+struct DecideArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// stay_out, hold, exit or enter.
+    #[arg(long)]
+    action: String,
+    /// For an entry: the range's lower price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    lower: Option<f64>,
+    /// For an entry: the range's upper price, in percent from now.
+    #[arg(long, allow_hyphen_values = true)]
+    upper: Option<f64>,
+    /// When to look again, such as 30m, 4h or 2d.
+    #[arg(long)]
+    next: String,
+    /// Why, in a sentence. Kept with the decision in the decisions file.
+    #[arg(long, default_value = "")]
+    note: String,
+    /// The reasoning behind the decision, as long as it needs to be. It goes
+    /// to the reasoning log next to the decisions file (`<name>.log.md`,
+    /// local, not committed), with what the look showed, and to the shared
+    /// log other agents are handed (`<name>.log.jsonl`); the run never reads it.
+    #[arg(long, default_value = "")]
+    reasoning: String,
+    /// The lowest price, in percent from now, you expect before the next look.
+    #[arg(long = "expect-low", allow_hyphen_values = true)]
+    expect_low: Option<f64>,
+    /// The highest price, in percent from now, you expect before the next look.
+    #[arg(long = "expect-high", allow_hyphen_values = true)]
+    expect_high: Option<f64>,
+    /// How sure you are that price stays within that band, from 0 to 1.
+    #[arg(long = "expect-confidence")]
+    expect_confidence: Option<f64>,
+    /// What you expect to happen, in words.
+    #[arg(long, default_value = "")]
+    expect: String,
+    /// How the decision relates to the peers' records the look showed: own,
+    /// copy, adapt or depart.
+    #[arg(long)]
+    stance: Option<String>,
+    /// The peer a stance of copy, adapt or depart is toward.
+    #[arg(long)]
+    toward: Option<String>,
+}
+
+#[derive(Args)]
+struct EvaluateArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// How long each decision is left alone before it is scored: `next` (until
+    /// the agent's own next look) or durations, comma-separated.
+    #[arg(long, default_value = "next,1d")]
+    horizons: String,
+    /// Replays run at the same time; all cores by default.
+    #[arg(long)]
+    jobs: Option<usize>,
+}
+
+#[derive(Args)]
+struct GasHistoryArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// First day to store, as YYYY-MM-DD.
+    #[arg(long)]
+    from: String,
+    /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Requests sent at the same time.
+    #[arg(long, default_value_t = 2)]
+    threads: usize,
 }
 
 #[derive(Args)]
@@ -613,6 +808,184 @@ fn real_main() -> Result<()> {
             )
             .map(|_| ())
         }
+        Command::LpPositions(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let config = chain_cmd::load_base_config(&args.chain.config)?;
+            let nfts = args
+                .nfts
+                .iter()
+                .map(|text| {
+                    text.parse::<alloy_primitives::U256>()
+                        .map_err(|_| anyhow::anyhow!("--nft {text}: give the NFT id as a number"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let accounts = args
+                .accounts
+                .iter()
+                .map(|a| chain_cmd::checked_address("account", a))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            if nfts.is_empty() && accounts.is_empty() {
+                anyhow::bail!("say whose positions to read: --nft <id> or --account <address>");
+            }
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let written = lp_positions_cmd::run(
+                &config,
+                &chain.client,
+                &lp_positions_cmd::LpPositionsArgs {
+                    nfts: &nfts,
+                    accounts: &accounts,
+                    from,
+                    root: &root,
+                    out: &args.out,
+                    chain: &args.chain.chain,
+                    log_chunk: args.log_chunk,
+                },
+            )?;
+            println!("{written} stretch(es) written to {}", args.out.display());
+            Ok(())
+        }
+        Command::GasHistory(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let from = args
+                .from
+                .parse::<lpbot_data::day::Day>()
+                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+            let client = &chain.client;
+            let source = lpbot_data::backfill::NodeSource {
+                client,
+                head_margin: 0,
+                log_chunk: 2_000,
+            };
+            // Up to the newest block no reorg can change.
+            let to = match client.finalized_block()? {
+                Some((block, _)) => block,
+                None => client.block_number()?.saturating_sub(64),
+            };
+            let first =
+                lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            println!(
+                "  gas prices of blocks {first} to {to} into {}",
+                root.display()
+            );
+            let done = gas_history_cmd::run(
+                client,
+                &root,
+                &args.chain.chain,
+                first,
+                to,
+                to,
+                args.threads,
+            )?;
+            let stored =
+                lpbot_data::gas::GasStore::new(&root).read(&args.chain.chain, first, to)?;
+            let average = stored
+                .as_ref()
+                .and_then(|fees| fees.summary())
+                .map_or(String::new(), |(_, wei)| {
+                    format!(", {:.3} gwei a block on average", wei / 1e9)
+                });
+            println!(
+                "{} chunk(s) read from the node, {} already stored{average}",
+                done.chunks, done.kept
+            );
+            Ok(())
+        }
+        Command::Agent(command) => {
+            let args = match &command {
+                AgentCommand::Next(args) => &args.agent,
+                AgentCommand::Peers(args) | AgentCommand::Brief(args) => args,
+                AgentCommand::Decide(args) => &args.agent,
+                AgentCommand::Evaluate(args) => &args.agent,
+            };
+            let runs = resolve(&args.experiment)?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            if let AgentCommand::Evaluate(e) = &command {
+                let horizons = agent_eval::parse_horizons(&e.horizons)?;
+                let jobs = e.jobs.unwrap_or_else(|| {
+                    std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
+                });
+                let chosen: Vec<&ResolvedRun> = if args.run.is_some() || args.agent.is_some() {
+                    vec![pick_run(&runs, args.run, args.agent.as_deref())?]
+                } else {
+                    runs.iter().collect()
+                };
+                let mut reports = Vec::new();
+                for run in chosen {
+                    let Some(who) = agent_log::identity(&run.config.strategies[0])? else {
+                        continue;
+                    };
+                    let report =
+                        agent_eval::evaluate(run, &who, &root, &args.chain, &horizons, jobs)?;
+                    print!("{}", report.describe());
+                    reports.push(report);
+                }
+                if reports.is_empty() {
+                    bail!("no run of the experiment is decided by an agent (agent.decisions)");
+                }
+                if reports.len() > 1 {
+                    println!();
+                    print!("{}", agent_eval::compare(&reports));
+                }
+                return Ok(());
+            }
+            let run = pick_run(&runs, args.run, args.agent.as_deref())?;
+            match &command {
+                AgentCommand::Next(n) => {
+                    let wait = match &n.wait {
+                        None => 0,
+                        Some(text) => run_cmd::parse_duration(text).ok_or_else(|| {
+                            anyhow::anyhow!("--wait {text}: give a duration such as 4h or 1d")
+                        })?,
+                    };
+                    agent_cmd::next(run, &root, &args.chain, &args.forward(wait)?).map(|_| ())
+                }
+                AgentCommand::Peers(_) => agent_cmd::peers(run),
+                AgentCommand::Brief(_) => {
+                    let who = agent_cmd::identity_of(run)?;
+                    print!(
+                        "{}",
+                        agent_brief::brief(&args.experiment.experiment, run, &who)?
+                    );
+                    Ok(())
+                }
+                AgentCommand::Decide(d) => agent_cmd::decide(
+                    run,
+                    &root,
+                    &args.chain,
+                    &agent_cmd::Decision {
+                        action: &d.action,
+                        lower_pct: d.lower,
+                        upper_pct: d.upper,
+                        next: &d.next,
+                        note: &d.note,
+                        reasoning: &d.reasoning,
+                        expect: agent_log::Expectation {
+                            low_pct: d.expect_low,
+                            high_pct: d.expect_high,
+                            confidence: d.expect_confidence,
+                            text: d.expect.clone(),
+                        },
+                        stance: d.stance.as_deref(),
+                        toward: d.toward.as_deref(),
+                    },
+                    &args.forward(0)?,
+                ),
+                AgentCommand::Evaluate(_) => unreachable!("handled above"),
+            }
+        }
         Command::PoolStats(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
             let pools = args
@@ -751,6 +1124,50 @@ fn real_main() -> Result<()> {
                 }
                 None => bail!("fee, volume and depth must all be positive numbers"),
             }
+        }
+    }
+}
+
+/// The run an agent command acts on: by index, by the agent deciding it, or
+/// the only one.
+fn pick_run<'a>(
+    runs: &'a [ResolvedRun],
+    index: Option<usize>,
+    agent: Option<&str>,
+) -> Result<&'a ResolvedRun> {
+    match (index, agent, runs.len()) {
+        (Some(_), Some(_), _) => bail!("say which run with --run or --agent, not both"),
+        (Some(i), None, n) => runs
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("--run {i}: the experiment has {n} run(s)")),
+        (None, Some(name), _) => {
+            let mut names = Vec::new();
+            for run in runs {
+                if let Some(who) = run
+                    .config
+                    .strategies
+                    .first()
+                    .map(agent_log::identity)
+                    .transpose()?
+                    .flatten()
+                {
+                    if who.name == name {
+                        return Ok(run);
+                    }
+                    names.push(who.name);
+                }
+            }
+            if names.is_empty() {
+                bail!("--agent {name}: no run of the experiment is decided by an agent")
+            }
+            bail!(
+                "--agent {name}: the experiment's agents are {}",
+                names.join(", ")
+            )
+        }
+        (None, None, 1) => Ok(&runs[0]),
+        (None, None, n) => {
+            bail!("the experiment has {n} runs; say which with --agent <name> or --run <index>")
         }
     }
 }
