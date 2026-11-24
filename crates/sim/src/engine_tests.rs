@@ -142,6 +142,7 @@ fn settings(rule: FixedRule) -> Settings {
         follow: None,
         follow_join_within: HOUR,
         agent: None,
+        agent_forward: false,
         gas: GasModel::free(),
         block_fees: None,
         series_every: HOUR,
@@ -251,6 +252,7 @@ fn a_resting_range_can_be_left_where_it_was_placed() {
 fn decision(look: u64, action: AgentAction, next_look: u64) -> AgentDecision {
     AgentDecision {
         look,
+        at: None,
         action,
         next_look,
         note: String::new(),
@@ -322,6 +324,82 @@ fn an_agent_enters_where_it_says_and_exits_when_it_says() {
     let out = run(snapshot, &events, &stale).unwrap();
     assert_eq!(out.pending.map(|p| p.look), Some(T0));
     assert_eq!(out.unused_decisions, 1);
+}
+
+fn forward(decisions: Vec<AgentDecision>) -> Settings {
+    Settings {
+        agent_forward: true,
+        ..agent(decisions)
+    }
+}
+
+#[test]
+fn a_forward_run_shows_a_due_look_at_the_newest_block() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    // Due at T0, still undecided: shown at the last block, hour 8.
+    let out = run(snapshot.clone(), &events, &forward(vec![])).unwrap();
+    let pending = out.pending.expect("the first look asks");
+    assert_eq!(pending.look, T0, "the look keeps the time it was due");
+    assert_eq!((pending.time, pending.block), (T0 + 8 * HOUR, 3_400));
+    assert_eq!(pending.looks_before, 0);
+    assert_eq!(out.summary.events, 8, "every block is replayed");
+    assert_eq!(out.next_look, None);
+
+    // The second look, due two hours after the first was acted on, is
+    // shown at the newest block too.
+    let enter = AgentAction::Enter {
+        lower_pct: 0.1,
+        upper_pct: 1.0,
+    };
+    let first = AgentDecision {
+        at: Some(T0 + 3 * HOUR),
+        ..decision(T0, enter, 2 * HOUR)
+    };
+    let out = run(snapshot, &events, &forward(vec![first])).unwrap();
+    let pending = out.pending.expect("the second look asks");
+    assert_eq!(pending.look, T0 + 5 * HOUR);
+    assert_eq!(pending.time, T0 + 8 * HOUR);
+    assert_eq!(pending.looks_before, 1);
+    assert!(pending.position.is_some());
+    assert_eq!(out.campaigns[0].exit_reason, "agent_pending");
+}
+
+#[test]
+fn a_decision_is_acted_on_where_its_look_was_shown() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    let enter = AgentAction::Enter {
+        lower_pct: 0.1,
+        upper_pct: 1.0,
+    };
+    let opened = |at: Option<u64>, settings: fn(Vec<AgentDecision>) -> Settings| {
+        let d = AgentDecision {
+            at,
+            ..decision(T0, enter, 30 * DAY)
+        };
+        let out = run(snapshot.clone(), &events, &settings(vec![d])).unwrap();
+        assert!(out.pending.is_none(), "the next look is past the history");
+        assert_eq!(out.next_look.map(|t| t > T0 + 8 * HOUR), Some(true));
+        assert_eq!(out.campaigns.len(), 1);
+        out.campaigns[0].opened_time
+    };
+    // Due at T0, acted on at the first block, carried out a block later.
+    assert_eq!(opened(None, agent), T0 + 2 * HOUR);
+    // Shown at hour 3: nothing happens before it, in either mode.
+    assert_eq!(opened(Some(T0 + 3 * HOUR), agent), T0 + 4 * HOUR);
+    assert_eq!(opened(Some(T0 + 3 * HOUR), forward), T0 + 4 * HOUR);
+    // An `at` before the look's time changes nothing.
+    assert_eq!(opened(Some(T0 - HOUR), agent), T0 + 2 * HOUR);
+
+    // Shown at the newest block, the history has no block left to carry
+    // it out: the next look is due a day after that block.
+    let d = AgentDecision {
+        at: Some(T0 + 8 * HOUR),
+        ..decision(T0, enter, DAY)
+    };
+    let out = run(snapshot, &events, &forward(vec![d])).unwrap();
+    assert!(out.pending.is_none() && out.campaigns.is_empty());
+    assert_eq!(out.next_look, Some(T0 + 8 * HOUR + DAY));
+    assert_eq!(out.unused_decisions, 0);
 }
 
 #[test]

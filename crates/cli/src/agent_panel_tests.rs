@@ -57,6 +57,17 @@ fn panel(label: &str) -> Panel {
     Panel { root, lake, runs }
 }
 
+/// What `next` and `decide` do about a forward run: nothing here, where
+/// the windows are closed.
+fn stored() -> agent_cmd::Forward {
+    agent_cmd::Forward {
+        sync: false,
+        rpc: None,
+        max_lag: u64::MAX,
+        wait: 0,
+    }
+}
+
 fn decision<'a>(action: &'a str, next: &'a str) -> Decision<'a> {
     Decision {
         action,
@@ -88,7 +99,9 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
     let chain = "ethereum";
 
     // Agent a decides four looks, six hours apart, then twelve.
-    assert!(agent_cmd::next(run_a, &p.lake, chain).unwrap().is_some());
+    assert!(agent_cmd::next(run_a, &p.lake, chain, &stored())
+        .unwrap()
+        .is_some());
     let enter = Decision {
         lower_pct: Some(-1.0),
         upper_pct: Some(1.0),
@@ -100,10 +113,17 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
         },
         ..decision("enter", "6h")
     };
-    agent_cmd::decide(run_a, &p.lake, chain, &enter).unwrap();
-    agent_cmd::decide(run_a, &p.lake, chain, &decision("hold", "6h")).unwrap();
-    agent_cmd::decide(run_a, &p.lake, chain, &decision("exit", "6h")).unwrap();
-    agent_cmd::decide(run_a, &p.lake, chain, &decision("stay_out", "12h")).unwrap();
+    agent_cmd::decide(run_a, &p.lake, chain, &enter, &stored()).unwrap();
+    agent_cmd::decide(run_a, &p.lake, chain, &decision("hold", "6h"), &stored()).unwrap();
+    agent_cmd::decide(run_a, &p.lake, chain, &decision("exit", "6h"), &stored()).unwrap();
+    agent_cmd::decide(
+        run_a,
+        &p.lake,
+        chain,
+        &decision("stay_out", "12h"),
+        &stored(),
+    )
+    .unwrap();
     let who_a = agent_cmd::identity_of(run_a).unwrap();
     let a_looks = agent_log::read_records(&agent_log::records_path(&who_a.decisions)).unwrap();
     assert_eq!(a_looks.len(), 4);
@@ -122,7 +142,9 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
     assert!(a_as_of.windows(2).all(|w| w[0] < w[1]));
 
     // Agent b's first look is a's first: it is handed that one only.
-    assert!(agent_cmd::next(run_b, &p.lake, chain).unwrap().is_some());
+    assert!(agent_cmd::next(run_b, &p.lake, chain, &stored())
+        .unwrap()
+        .is_some());
     let b_first = pending_record(run_b);
     let b_as_of = b_first["as_of"].as_u64().unwrap();
     assert_eq!(b_as_of, a_as_of[0]);
@@ -133,16 +155,22 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
     // It cannot decide without saying how it relates to a, and nothing is
     // written when it is refused.
     let who_b = agent_cmd::identity_of(run_b).unwrap();
-    let err = agent_cmd::decide(run_b, &p.lake, chain, &decision("stay_out", "3h"))
-        .unwrap_err()
-        .to_string();
+    let err = agent_cmd::decide(
+        run_b,
+        &p.lake,
+        chain,
+        &decision("stay_out", "3h"),
+        &stored(),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("--stance"), "{err}");
     assert!(!who_b.decisions.exists());
     let depart = Decision {
         stance: Some("depart"),
         ..decision("stay_out", "3h")
     };
-    agent_cmd::decide(run_b, &p.lake, chain, &depart).unwrap();
+    agent_cmd::decide(run_b, &p.lake, chain, &depart, &stored()).unwrap();
     let b_looks = agent_log::read_records(&agent_log::records_path(&who_b.decisions)).unwrap();
     assert_eq!(b_looks[0]["stance"]["kind"], "depart");
     assert_eq!(b_looks[0]["stance"]["toward"], "a", "the one peer shown");
@@ -152,7 +180,14 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
         .as_array()
         .unwrap()
         .is_empty());
-    agent_cmd::decide(run_b, &p.lake, chain, &decision("stay_out", "4h")).unwrap();
+    agent_cmd::decide(
+        run_b,
+        &p.lake,
+        chain,
+        &decision("stay_out", "4h"),
+        &stored(),
+    )
+    .unwrap();
     // Seven hours on it is handed a's second look, and not its third.
     let third = pending_record(run_b);
     let b_as_of = third["as_of"].as_u64().unwrap();

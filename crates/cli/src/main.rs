@@ -364,8 +364,9 @@ struct LpPositionsCli {
 #[derive(Subcommand)]
 enum AgentCommand {
     /// Replay the run to its first look without a decision and show the
-    /// pool there, with the peers' records up to that look.
-    Next(AgentArgs),
+    /// pool there, with the peers' records up to that look. A forward run
+    /// (window `to: open`) is first brought up to the node's head.
+    Next(NextArgs),
     /// Write the decision for the look `next` showed, then show the next.
     Decide(Box<DecideArgs>),
     /// Show again every record of the run's peers up to the look waiting
@@ -395,6 +396,42 @@ struct AgentArgs {
     /// Data folder for the pool history. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// A forward run: the node endpoint the store is brought up to the
+    /// head from. Defaults to LPBOT_RPC, then the config's local endpoint.
+    #[arg(long)]
+    rpc: Option<String>,
+    /// A forward run: replay what is stored, without bringing it up to the
+    /// head first.
+    #[arg(long)]
+    no_sync: bool,
+    /// A forward run: how old the newest block may be, by the wall clock,
+    /// for a look to be shown. An older one means the node is behind.
+    #[arg(long, default_value = "5m")]
+    max_lag: String,
+}
+
+impl AgentArgs {
+    fn forward(&self, wait: u64) -> Result<agent_cmd::Forward> {
+        let max_lag = run_cmd::parse_duration(&self.max_lag).ok_or_else(|| {
+            anyhow::anyhow!("--max-lag {}: give a duration such as 5m", self.max_lag)
+        })?;
+        Ok(agent_cmd::Forward {
+            sync: !self.no_sync,
+            rpc: self.rpc.clone(),
+            max_lag,
+            wait,
+        })
+    }
+}
+
+#[derive(Args)]
+struct NextArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// A forward run: when no look is due yet, wait for it, up to this
+    /// long (such as 4h or 1d), then show it.
+    #[arg(long)]
+    wait: Option<String>,
 }
 
 #[derive(Args)]
@@ -843,8 +880,15 @@ fn real_main() -> Result<()> {
                 "  gas prices of blocks {first} to {to} into {}",
                 root.display()
             );
-            let done =
-                gas_history_cmd::run(client, &root, &args.chain.chain, first, to, args.threads)?;
+            let done = gas_history_cmd::run(
+                client,
+                &root,
+                &args.chain.chain,
+                first,
+                to,
+                to,
+                args.threads,
+            )?;
             let stored =
                 lpbot_data::gas::GasStore::new(&root).read(&args.chain.chain, first, to)?;
             let average = stored
@@ -861,9 +905,8 @@ fn real_main() -> Result<()> {
         }
         Command::Agent(command) => {
             let args = match &command {
-                AgentCommand::Next(args)
-                | AgentCommand::Peers(args)
-                | AgentCommand::Brief(args) => args,
+                AgentCommand::Next(args) => &args.agent,
+                AgentCommand::Peers(args) | AgentCommand::Brief(args) => args,
                 AgentCommand::Decide(args) => &args.agent,
                 AgentCommand::Evaluate(args) => &args.agent,
             };
@@ -900,7 +943,15 @@ fn real_main() -> Result<()> {
             }
             let run = pick_run(&runs, args.run, args.agent.as_deref())?;
             match &command {
-                AgentCommand::Next(_) => agent_cmd::next(run, &root, &args.chain).map(|_| ()),
+                AgentCommand::Next(n) => {
+                    let wait = match &n.wait {
+                        None => 0,
+                        Some(text) => run_cmd::parse_duration(text).ok_or_else(|| {
+                            anyhow::anyhow!("--wait {text}: give a duration such as 4h or 1d")
+                        })?,
+                    };
+                    agent_cmd::next(run, &root, &args.chain, &args.forward(wait)?).map(|_| ())
+                }
                 AgentCommand::Peers(_) => agent_cmd::peers(run),
                 AgentCommand::Brief(_) => {
                     let who = agent_cmd::identity_of(run)?;
@@ -930,6 +981,7 @@ fn real_main() -> Result<()> {
                         stance: d.stance.as_deref(),
                         toward: d.toward.as_deref(),
                     },
+                    &args.forward(0)?,
                 ),
                 AgentCommand::Evaluate(_) => unreachable!("handled above"),
             }

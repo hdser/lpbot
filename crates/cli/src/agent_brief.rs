@@ -9,13 +9,11 @@ use anyhow::Result;
 use lpbot_core::experiment::ResolvedRun;
 
 use crate::agent_log::Identity;
-use crate::run_cmd::window;
+use crate::run_cmd::run_window;
 
 /// The brief for agent `who` of the experiment at `experiment`.
 pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<String> {
-    let (from, to) = window(&run.config)?;
-    // Both days of the window are traded: it ends where `to` ends.
-    let days = to.end().saturating_sub(from.start()) / 86_400;
+    let (from, end) = run_window(&run.config)?;
     let strategy = &run.config.strategies[0];
     let exp = experiment.display();
     let name = &who.name;
@@ -32,13 +30,27 @@ pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<Str
         .loss_limit_pct
         .map(|l| format!("{l}%"))
         .unwrap_or_else(|| "its loss limit".into());
+    let span = match end {
+        // Both days of the window are traded: it ends where `to` ends.
+        Some(to) => format!(
+            "The run covers {} days of stored pool history. You are not told which days, and \
+             you must not try to find out.",
+            to.end().saturating_sub(from.start()) / 86_400
+        ),
+        None => "The run is forward, at the head of the chain: every look shows the pool as it \
+                 is now, on blocks no model has seen. Before each look `next` brings the stored \
+                 history up to the node's head; when no look is due yet it says when by the \
+                 wall clock, and `next --wait <duration>`, run in the background, waits for it \
+                 and shows it. A look is refused while the node is behind the chain: try again \
+                 later."
+            .to_string(),
+    };
     let mut text = String::new();
     let _ = writeln!(
         text,
         "# Brief for agent {name} ({})\n\nYou decide one run of lpbot's agent mode, look by \
          look: run `{}` of experiment `{exp}`, as agent `{name}`. {capital} in {}; the run \
-         stops if it loses {loss}. The run covers {days} days of stored pool history. You are \
-         not told which days, and you must not try to find out.\n",
+         stops if it loses {loss}. {span}\n",
         who.model, run.run_id, strategy.value_token
     );
     let _ = writeln!(
@@ -104,13 +116,23 @@ pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<Str
          `runs/` or `data/`, the decision, log or score files of any agent, or the result \
          tables.\n\
          - Do not look up prices or news.\n\
-         - Do not edit code, commit or switch branches.\n"
+         - Do not edit code, commit or switch branches.\n{}",
+        if end.is_none() {
+            "- Do not pass `--no-sync`, `--max-lag`, `--rpc` or `--data-dir`.\n"
+        } else {
+            ""
+        }
     );
     let _ = writeln!(
         text,
-        "## At the end\n\nWhen `next` says the window is over, report the result it prints and \
-         your campaigns, and in a few lines the strategy you followed, what earned, what cost, \
-         and what you would change."
+        "## At the end\n\n{}, report the result it prints and your campaigns, and in a few \
+         lines the strategy you followed, what earned, what cost, and what you would change.",
+        if end.is_none() {
+            "When the owner stops the run, or `next` says the loss limit stopped it, run `lpbot \
+             run` on the experiment"
+        } else {
+            "When `next` says the window is over"
+        }
     );
     Ok(text)
 }
@@ -120,6 +142,22 @@ mod tests {
     use super::*;
     use crate::agent_log::Peer;
     use lpbot_core::experiment::{resolve_experiment, RunOverrides};
+
+    #[test]
+    fn a_forward_run_is_briefed_as_one_at_the_head_with_no_dates() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let experiment = repo.join("experiments/agent-usdc-weth-forward.yml");
+        let runs = resolve_experiment(&experiment, &RunOverrides::default()).unwrap();
+        let who = crate::agent_log::identity(&runs[0].config.strategies[0])
+            .unwrap()
+            .unwrap();
+        let text = brief(Path::new("experiments/forward.yml"), &runs[0], &who).unwrap();
+        assert!(text.contains("forward, at the head of the chain"), "{text}");
+        assert!(text.contains("`next --wait <duration>`"), "{text}");
+        assert!(text.contains("Do not pass `--no-sync`"), "{text}");
+        assert!(!text.contains("days of stored pool history"), "{text}");
+        assert!(!text.contains("2026"), "no dates: {text}");
+    }
 
     #[test]
     fn a_brief_names_the_agent_its_peers_and_no_dates() {

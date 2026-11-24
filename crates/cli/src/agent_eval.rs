@@ -107,9 +107,49 @@ fn end_of(out: &Output, prepared: &Prepared) -> End {
         },
         None => End {
             result_pct: out.summary.result_pct,
-            as_of: prepared.settings.trade_to,
+            // A window open at the end ends at the newest stored block, not
+            // at the end of its last day, which is still to come.
+            as_of: match (prepared.open, prepared.newest) {
+                (true, Some((_, time))) => time.min(prepared.settings.trade_to),
+                _ => prepared.settings.trade_to,
+            },
             at_look: false,
         },
+    }
+}
+
+/// Where a replay stops at the look after its last decision. In a forward
+/// run a look that is due without a decision is shown at the newest block,
+/// which is not where the run's own looks were seen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stop {
+    /// As the run is set up.
+    Head,
+    /// A forward run's look that was seen at the block of this time: the
+    /// history ends there, so the look is shown where it was.
+    Seen(u64),
+    /// At the first block at or after the look is due, as in a backtest.
+    Due,
+}
+
+impl Stop {
+    /// The run's settings with this stop.
+    fn apply(self, settings: &mut Settings) {
+        match self {
+            Stop::Head => {}
+            Stop::Seen(time) => {
+                settings.trade_to = settings.trade_to.min(time.saturating_add(1));
+            }
+            Stop::Due => settings.agent_forward = false,
+        }
+    }
+
+    /// Where the look answered by `decision` was seen, in a forward run.
+    fn seen(prepared: &Prepared, decision: Option<&AgentDecision>) -> Stop {
+        match decision.and_then(|d| d.at) {
+            Some(at) if prepared.open => Stop::Seen(at),
+            _ => Stop::Head,
+        }
     }
 }
 
@@ -117,7 +157,7 @@ fn end_of(out: &Output, prepared: &Prepared) -> End {
 /// keeps what `keep` takes from each output.
 fn replay_all<T: Send>(
     prepared: &Prepared,
-    plans: &[Vec<AgentDecision>],
+    plans: &[(Vec<AgentDecision>, Stop)],
     jobs: usize,
     keep: impl Fn(&Output) -> T + Sync,
 ) -> Result<Vec<T>> {
@@ -128,13 +168,14 @@ fn replay_all<T: Send>(
         for _ in 0..jobs.clamp(1, plans.len().max(1)) {
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(plan) = plans.get(i) else {
+                let Some((plan, stop)) = plans.get(i) else {
                     break;
                 };
                 let mut settings: Settings = prepared.settings.clone();
                 settings.agent = Some(AgentPlan {
                     decisions: plan.clone(),
                 });
+                stop.apply(&mut settings);
                 let result = prepared.replay(&settings).map(|out| keep(&out));
                 results.lock().expect("no thread panicked")[i] = Some(result);
             });
@@ -476,7 +517,13 @@ pub fn evaluate(
 
     // The run at every look: each plan stops at the look after its last
     // decision, which is also where the decision before it, as made, ends.
-    let prefixes: Vec<Vec<AgentDecision>> = (0..=used).map(|k| decisions[..k].to_vec()).collect();
+    // In a forward run each look is shown where it was seen.
+    let prefixes: Vec<(Vec<AgentDecision>, Stop)> = (0..=used)
+        .map(|k| {
+            let answered = (k < used).then(|| &decisions[k]);
+            (decisions[..k].to_vec(), Stop::seen(&prepared, answered))
+        })
+        .collect();
     let looks: Vec<(Option<Observation>, End)> = replay_all(&prepared, &prefixes, jobs, |out| {
         (out.pending.clone(), end_of(out, &prepared))
     })?;
@@ -493,7 +540,7 @@ pub fn evaluate(
 
     // Every alternative that needs a replay of its own.
     let mut jobs_list: Vec<(usize, usize, Alt)> = Vec::new();
-    let mut plans: Vec<Vec<AgentDecision>> = Vec::new();
+    let mut plans: Vec<(Vec<AgentDecision>, Stop)> = Vec::new();
     for (k, (o, _)) in at.iter().enumerate() {
         let open = o.position.is_some();
         let chosen = amounts_to(&decisions[k].action, open);
@@ -518,12 +565,20 @@ pub fn evaluate(
                 let mut plan = decisions[..k].to_vec();
                 plan.push(AgentDecision {
                     look: decisions[k].look,
+                    // Acted on where the decision was, never earlier.
+                    at: decisions[k].at,
                     action,
                     next_look: horizon.seconds.unwrap_or(decisions[k].next_look),
                     note: String::new(),
                 });
+                // A fixed horizon ends when it is due; until the next look,
+                // where that look was seen.
+                let stop = match horizon.seconds {
+                    Some(_) => Stop::Due,
+                    None => Stop::seen(&prepared, decisions.get(k + 1).filter(|_| k + 1 < used)),
+                };
                 jobs_list.push((k, h, alt));
-                plans.push(plan);
+                plans.push((plan, stop));
             }
         }
     }

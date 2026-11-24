@@ -10,7 +10,10 @@
 //! A file holds the blocks `first` to `first + CHUNK - 1`, with `first` a
 //! multiple of `CHUNK`. A chunk the chain has finished is written once; the
 //! chunk at the head is `.partial` and rewritten by every fetch until it
-//! is whole.
+//! is whole. A partial chunk may reach past the finalized block, as a
+//! forward run's catch-up stores it: it then records the last of its
+//! blocks that was final, the next fetch keeps those and reads the rest
+//! again, and the chunk is written whole only once its last block is final.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -22,6 +25,7 @@ use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
 use crate::store::{write_durably, StoreError, StoreResult};
@@ -202,10 +206,24 @@ impl GasStore {
         Ok(chunks)
     }
 
-    /// Stores one chunk's fees, starting at its first block. A chunk with
-    /// all its blocks is written whole and replaces the partial file;
-    /// fewer is written as the partial file.
+    /// Stores one chunk's fees, starting at its first block, every one of
+    /// them final. A chunk with all its blocks is written whole and replaces
+    /// the partial file; fewer is written as the partial file.
     pub fn write_chunk(&self, chain: &str, fees: &BlockFees) -> StoreResult<()> {
+        self.write_head_chunk(chain, fees, u64::MAX)
+    }
+
+    /// Stores one chunk's fees, starting at its first block, when its newest
+    /// blocks may be past `final_block`, the newest block no reorg can
+    /// change. It is written whole only once it has all its blocks and the
+    /// last of them is final; otherwise as the partial file, which records
+    /// the last of its blocks that is final (`final_part`).
+    pub fn write_head_chunk(
+        &self,
+        chain: &str,
+        fees: &BlockFees,
+        final_block: u64,
+    ) -> StoreResult<()> {
         let first = fees.first();
         if !first.is_multiple_of(CHUNK) || fees.len() as u64 > CHUNK {
             return Err(StoreError::BadFile {
@@ -217,9 +235,12 @@ impl GasStore {
                 ),
             });
         }
-        let whole = fees.len() as u64 == CHUNK;
+        let last = fees.end().saturating_sub(1);
+        let whole = fees.len() as u64 == CHUNK && last <= final_block;
         let path = self.path(chain, first, !whole);
-        write_fees(&path, fees)?;
+        // The mark is left out when every block is final, as before it existed.
+        let mark = (!whole && final_block < last).then_some(final_block);
+        write_fees(&path, fees, mark)?;
         if whole {
             let partial = self.path(chain, first, true);
             if partial.is_file() {
@@ -227,6 +248,22 @@ impl GasStore {
             }
         }
         Ok(())
+    }
+
+    /// The blocks of a chunk's partial file that were final when it was
+    /// written: all of them, unless it records an earlier final block.
+    /// `None` when the chunk has no partial file.
+    pub fn final_part(&self, chain: &str, first: u64) -> StoreResult<Option<BlockFees>> {
+        let path = self.path(chain, first, true);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let (fees, mark) = read_fees_marked(&path)?;
+        Ok(Some(match mark {
+            Some(final_block) if final_block < first => BlockFees::default(),
+            Some(final_block) => fees.range(first, final_block),
+            None => fees,
+        }))
     }
 
     /// The fees of the blocks `from` to `to` with each tip the median of
@@ -282,7 +319,11 @@ fn schema() -> Arc<Schema> {
     ]))
 }
 
-fn write_fees(path: &Path, fees: &BlockFees) -> StoreResult<()> {
+/// The key under which a partial chunk records the last of its blocks
+/// that was final when it was written.
+const FINAL_KEY: &str = "lpbot.final_block";
+
+fn write_fees(path: &Path, fees: &BlockFees, final_block: Option<u64>) -> StoreResult<()> {
     let columns: Vec<ArrayRef> = vec![
         Arc::new(UInt64Array::from_iter_values(fees.first()..fees.end())),
         Arc::new(UInt64Array::from(fees.base.clone())),
@@ -298,6 +339,9 @@ fn write_fees(path: &Path, fees: &BlockFees) -> StoreResult<()> {
     };
     let properties = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
+        .set_key_value_metadata(
+            final_block.map(|block| vec![KeyValue::new(FINAL_KEY.to_string(), block.to_string())]),
+        )
         .build();
     let mut bytes = Vec::new();
     let mut writer =
@@ -311,6 +355,11 @@ fn write_fees(path: &Path, fees: &BlockFees) -> StoreResult<()> {
 }
 
 fn read_fees(path: &Path) -> StoreResult<BlockFees> {
+    read_fees_marked(path).map(|(fees, _)| fees)
+}
+
+/// A file's fees and the final block it records, if any.
+fn read_fees_marked(path: &Path) -> StoreResult<(BlockFees, Option<u64>)> {
     let bad = |reason: String| StoreError::Unreadable {
         path: path.to_path_buf(),
         reason,
@@ -319,9 +368,20 @@ fn read_fees(path: &Path) -> StoreResult<BlockFees> {
         path: path.to_path_buf(),
         source,
     })?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .and_then(|builder| builder.build())
-        .map_err(|e| bad(e.to_string()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| bad(e.to_string()))?;
+    let mark = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|pairs| pairs.iter().find(|kv| kv.key == FINAL_KEY))
+        .and_then(|kv| kv.value.as_deref())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| bad(format!("`{FINAL_KEY}` is {value}, not a block number")))
+        })
+        .transpose()?;
+    let reader = builder.build().map_err(|e| bad(e.to_string()))?;
     let mut fees = BlockFees::default();
     for batch in reader {
         let batch = batch.map_err(|e| bad(e.to_string()))?;
@@ -343,7 +403,7 @@ fn read_fees(path: &Path) -> StoreResult<BlockFees> {
             .ok_or_else(|| bad("the columns differ in length".into()))?;
         fees.extend(next).map_err(bad)?;
     }
-    Ok(fees)
+    Ok((fees, mark))
 }
 
 #[cfg(test)]
@@ -444,6 +504,57 @@ mod tests {
             .read_with_recent_tips("ethereum", CHUNK + 5, CHUNK + 20, 3)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_chunk_past_the_final_block_keeps_only_its_final_part_for_the_next_fetch() {
+        let dir = TempDir::new("gas-head");
+        let store = GasStore::new(dir.path());
+        assert_eq!(store.final_part("ethereum", CHUNK).unwrap(), None);
+        // Ten blocks stored, the first six of them final.
+        store
+            .write_head_chunk("ethereum", &fees(CHUNK, 10), CHUNK + 5)
+            .unwrap();
+        assert_eq!(
+            store.read("ethereum", CHUNK, CHUNK + 9).unwrap(),
+            Some(fees(CHUNK, 10)),
+            "a run reads every stored block"
+        );
+        assert_eq!(
+            store.final_part("ethereum", CHUNK).unwrap(),
+            Some(fees(CHUNK, 6))
+        );
+        // Nothing final yet in the chunk.
+        store
+            .write_head_chunk("ethereum", &fees(CHUNK, 3), CHUNK - 1)
+            .unwrap();
+        assert_eq!(
+            store.final_part("ethereum", CHUNK).unwrap(),
+            Some(BlockFees::default())
+        );
+        // A chunk written as before, or with every block final, is all final.
+        store.write_chunk("ethereum", &fees(CHUNK, 4)).unwrap();
+        assert_eq!(
+            store.final_part("ethereum", CHUNK).unwrap(),
+            Some(fees(CHUNK, 4))
+        );
+        // All its blocks, the last not yet final: still partial.
+        store
+            .write_head_chunk("ethereum", &fees(CHUNK, CHUNK), 2 * CHUNK - 2)
+            .unwrap();
+        assert!(store.complete_chunks("ethereum").unwrap().is_empty());
+        assert_eq!(
+            store.final_part("ethereum", CHUNK).unwrap(),
+            Some(fees(CHUNK, CHUNK - 1))
+        );
+        store
+            .write_head_chunk("ethereum", &fees(CHUNK, CHUNK), 2 * CHUNK - 1)
+            .unwrap();
+        assert_eq!(
+            store.complete_chunks("ethereum").unwrap(),
+            BTreeSet::from([CHUNK])
+        );
+        assert_eq!(store.final_part("ethereum", CHUNK).unwrap(), None);
     }
 
     #[test]

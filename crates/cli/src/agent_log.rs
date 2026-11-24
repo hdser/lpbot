@@ -644,6 +644,7 @@ mod tests {
             looks_before: 4,
             day: 1.25,
             block: 77,
+            time: 1_012,
             scales: vec![ScaleView {
                 label: "1h",
                 seconds: 3_600,

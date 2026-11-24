@@ -118,6 +118,7 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
         source: &node,
         block: head.block,
         time: head.time,
+        final_block: None,
     };
     let (head, head_time) = (head.block, head.time);
     let from = first_day(args.from, args.days, head_time);

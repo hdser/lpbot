@@ -8,12 +8,23 @@
 //! decisions are kept in a file and the run is replayed from them, so a
 //! finished session is an ordinary, reproducible run. Stops, time limits
 //! and the loss limit still apply between looks.
+//!
+//! A look is due at its time and shown at the first block of the pool at or
+//! after it. In a forward run (`Settings::agent_forward`, a window open at
+//! the end) a look that is due and not yet decided is shown at the newest
+//! stored block instead, so a session that comes back late sees the pool
+//! as it is, and its decision records that block's time (`at`): the replay
+//! acts on it there and nowhere earlier.
 
 /// What the agent decided at one look.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentDecision {
     /// The time of the look it answers: the time the engine asked at.
     pub look: u64,
+    /// The time of the block the look was shown at, when recorded. The
+    /// decision is carried out from the first block at or after it, never
+    /// earlier than its look. `None` acts at the look's first block.
+    pub at: Option<u64>,
     pub action: AgentAction,
     /// Seconds until the next look.
     pub next_look: u64,
@@ -58,7 +69,9 @@ pub struct Observation {
     pub looks_before: usize,
     /// Days since trading started.
     pub day: f64,
+    /// The block the pool is seen at, and its time.
     pub block: u64,
+    pub time: u64,
     /// One row per time scale, shortest first.
     pub scales: Vec<ScaleView>,
     /// The pool's fee and one tick spacing, in percent.

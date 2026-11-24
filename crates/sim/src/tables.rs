@@ -806,6 +806,7 @@ mod tests {
             },
             pending: None,
             unused_decisions: 0,
+            next_look: None,
         }
     }
 

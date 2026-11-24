@@ -176,9 +176,11 @@ pub fn agent_plan(strategy: &StrategyConfig) -> Result<Option<AgentPlan>> {
     Ok(Some(AgentPlan { decisions }))
 }
 
-/// Decisions, one JSON object a line: `look` (the look's time), `action`
-/// (`stay_out`, `hold`, `exit` or `enter`), `lower_pct` and `upper_pct`
-/// for an entry, `next` (a duration) and `note`.
+/// Decisions, one JSON object a line: `look` (the look's time), `at` (the
+/// time of the block it was shown at; optional), `action` (`stay_out`,
+/// `hold`, `exit` or `enter`), `lower_pct` and `upper_pct` for an entry,
+/// `next` (a duration) and `note`. Other keys, such as `decided` (when it
+/// was written, by the wall clock), are kept for the record and not read.
 pub fn parse_decisions(content: &str) -> Result<Vec<AgentDecision>> {
     let mut decisions = Vec::new();
     for (i, line) in content
@@ -214,8 +216,18 @@ pub fn parse_decisions(content: &str) -> Result<Vec<AgentDecision>> {
                 i + 1
             ),
         };
+        let at = match field("at") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                anyhow!(
+                    "line {}: `at` must be the time of the block the look was shown at",
+                    i + 1
+                )
+            })?),
+        };
         decisions.push(AgentDecision {
             look,
+            at,
             action,
             next_look: next,
             note: field("note")
@@ -234,6 +246,10 @@ pub struct Prepared {
     pub run_id: String,
     pub pool_name: String,
     pub settings: Settings,
+    /// Whether the window is open at the end: a forward run.
+    pub open: bool,
+    /// The newest stored event the history holds, as block and time.
+    pub newest: Option<(u64, u64)>,
     history: History,
 }
 
@@ -270,11 +286,20 @@ pub fn prepare_one(run: &ResolvedRun, root: &Path, chain: &str) -> Result<Prepar
         .first()
         .ok_or_else(|| anyhow!("the run has no strategy"))?;
     let policy = policy(strategy)?;
-    let (from, to) = window(config)?;
+    let (from, end) = run_window(config)?;
     let (_, tokens) = chain_addresses(config, chain)?;
-    let (pool, _) = choose_pool(root, chain, &tokens, config, strategy, from)?;
+    // A named pool needs no ranking, which reads every pool's last week.
+    let pool = match named_pool(strategy)? {
+        Some(pool) => checked_named_pool(root, chain, &tokens, strategy, pool, from)?,
+        None => choose_pool(root, chain, &tokens, config, strategy, from)?.0,
+    };
+    let to = match end {
+        Some(to) => to,
+        None => stored_end(root, chain, pool)?,
+    };
     let history = load_history(root, chain, pool, from, to, history_days(strategy)?)?;
     let (mut settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+    settings.agent_forward = end.is_none();
     settings.block_fees = block_fees(
         config,
         root,
@@ -284,12 +309,60 @@ pub fn prepare_one(run: &ResolvedRun, root: &Path, chain: &str) -> Result<Prepar
         from,
         &mut FeeCache::new(),
     )?;
+    let newest = history.events.last().map(|e| (e.block, e.time));
     Ok(Prepared {
         run_id: run.run_id.clone(),
         pool_name,
         settings,
+        open: end.is_none(),
+        newest,
         history,
     })
+}
+
+/// The pool a strategy names, once it is known to be stored and to hold
+/// the value token.
+fn checked_named_pool(
+    root: &Path,
+    chain: &str,
+    tokens: &Tokens,
+    strategy: &StrategyConfig,
+    pool: Address,
+    from: Day,
+) -> Result<Address> {
+    let value = tokens
+        .get(&strategy.value_token)
+        .map(|(address, _)| *address)
+        .ok_or_else(|| anyhow!("value token {} has no address", strategy.value_token))?;
+    let snapshot = SnapshotStore::new(root)
+        .latest_on_or_before(chain, pool, from)?
+        .ok_or_else(|| {
+            anyhow!(
+                "pool {pool:#x} has no snapshot stored on or before {from}; run `lpbot backfill \
+                 --pool {pool:#x} --from <a day before {from}>` first"
+            )
+        })?;
+    if snapshot.token0 != value && snapshot.token1 != value {
+        bail!(
+            "pool {pool:#x} does not hold the value token {}",
+            strategy.value_token
+        );
+    }
+    Ok(pool)
+}
+
+/// The last day a window open at the end reaches: the newest day stored
+/// for its pool.
+pub(crate) fn stored_end(root: &Path, chain: &str, pool: Address) -> Result<Day> {
+    EventStore::new(root)
+        .days(chain, pool)?
+        .last()
+        .map(|(day, _)| *day)
+        .ok_or_else(|| {
+            anyhow!(
+                "pool {pool:#x} has no stored days; run `lpbot backfill --pool {pool:#x}` first"
+            )
+        })
 }
 
 /// The rows of an `lpbot lp-positions` file on `pool`, of `owner` if given.
@@ -866,6 +939,7 @@ fn settings(
         follow: follow_spans(strategy, history.snapshot.pool)?,
         follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
         agent: agent_plan(strategy)?,
+        agent_forward: false,
         gas,
         block_fees: None,
         series_every: duration(&config.extra, &["sim", "series_every"], 3_600)?,
@@ -879,14 +953,30 @@ fn settings(
     Ok((settings, pool_name))
 }
 
-pub(crate) fn window(config: &Config) -> Result<(Day, Day)> {
+/// A run's window: its first day, and its last unless it is open at the
+/// end (`to: open`).
+pub(crate) fn run_window(config: &Config) -> Result<(Day, Option<Day>)> {
     let window = config
         .window
         .as_ref()
         .ok_or_else(|| anyhow!("a backtest needs a window"))?;
     let from: Day = window.from.parse().map_err(anyhow::Error::msg)?;
+    if window.is_open() {
+        return Ok((from, None));
+    }
     let to: Day = window.to.parse().map_err(anyhow::Error::msg)?;
-    Ok((from, to))
+    Ok((from, Some(to)))
+}
+
+/// A window with a last day, for what cannot run on one open at the end.
+pub(crate) fn window(config: &Config) -> Result<(Day, Day)> {
+    match run_window(config)? {
+        (from, Some(to)) => Ok((from, to)),
+        (from, None) => bail!(
+            "the window from {from} is open at the end (`to: open`), which only `lpbot agent` \
+             and `lpbot run` take; give `to` a date"
+        ),
+    }
 }
 
 /// Runs every run of an experiment and writes its tables under `results`.
@@ -926,7 +1016,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             bail!("strategy kind `{}` is not built yet", strategy.kind);
         }
         let policy = policy(strategy)?;
-        let (from, to) = window(config)?;
+        let (from, end) = run_window(config)?;
         let (_, tokens) = chain_addresses(config, chain)?;
 
         let key = pool_key(strategy, from)?;
@@ -935,6 +1025,11 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             pools.insert(key.clone(), chosen);
         }
         let (pool, rank_rows) = &pools[&key];
+        // A window open at the end runs as far as the pool is stored.
+        let to = match end {
+            Some(to) => to,
+            None => stored_end(root, chain, *pool)?,
+        };
 
         let longest = history_days(strategy)?;
         let history_key = (*pool, from, to, longest);
@@ -949,6 +1044,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
 
         let (mut settings, pool_name) =
             settings(run, strategy, policy, &history, &tokens, from, to)?;
+        settings.agent_forward = end.is_none();
         settings.block_fees = block_fees(
             config,
             root,
@@ -1400,7 +1496,7 @@ pub(crate) mod tests {
 
     /// The demo history over `days` days in a fresh folder, and the demo
     /// experiment's runs on a window of three days so the test stays quick.
-    fn demo(label: &str, days: u32) -> (PathBuf, Vec<ResolvedRun>, Tokens) {
+    pub(crate) fn demo(label: &str, days: u32) -> (PathBuf, Vec<ResolvedRun>, Tokens) {
         let root = std::env::temp_dir().join(format!("lpbot-run-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1713,6 +1809,29 @@ pub(crate) mod tests {
         late.config.window.as_mut().unwrap().to = "2026-03-01".into();
         let error = run(&[late], &lake, &results, "ethereum").unwrap_err();
         assert!(format!("{error:#}").contains("lpbot backfill"), "{error:#}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_window_open_at_the_end_is_read_and_refused_where_it_cannot_run() {
+        let (root, mut runs, _) = demo("open-window", 3);
+        let config = &mut runs[0].config;
+        assert_eq!(
+            run_window(config).unwrap(),
+            (day("2026-01-08"), Some(day("2026-01-10")))
+        );
+        config.window.as_mut().unwrap().to = lpbot_core::config::OPEN_END.into();
+        assert_eq!(run_window(config).unwrap(), (day("2026-01-08"), None));
+        // A calibration or the gates need a last day, and say so.
+        let refused = window(config).unwrap_err().to_string();
+        assert!(refused.contains("open at the end"), "{refused}");
+        assert!(refused.contains("give `to` a date"), "{refused}");
+        // The open end is the newest day stored for the pool.
+        assert_eq!(
+            stored_end(&root.join("lake"), "ethereum", DEMO_POOL).unwrap(),
+            day("2026-01-03")
+        );
+        assert!(stored_end(&root.join("lake"), "ethereum", OTHER_POOL).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

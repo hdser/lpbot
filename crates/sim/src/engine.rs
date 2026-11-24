@@ -358,6 +358,12 @@ pub struct Settings {
     /// the entry signals do not apply; the campaign exits and the loss
     /// limit do.
     pub agent: Option<AgentPlan>,
+    /// A forward run in the agent mode, its window open at the end: a look
+    /// that is due without a decision is shown at the newest block of the
+    /// history rather than the first one at or after its time, and the run
+    /// goes on to that block before it stops. With the history kept up to
+    /// the chain's head, a look is always shown as the pool is now.
+    pub agent_forward: bool,
     pub gas: GasModel,
     /// Each block's base fee and median priority fee. `None` charges
     /// `gas.gas_price_gwei` on every block. When given it must cover every
@@ -548,6 +554,9 @@ pub struct Output {
     pub pending: Option<Observation>,
     /// In the agent mode, decisions left over that no look asked for.
     pub unused_decisions: usize,
+    /// In the agent mode, when the history ended before the next look was
+    /// due (a forward run waiting for blocks): the time it is due.
+    pub next_look: Option<u64>,
 }
 
 /// What may hold a new leg back: the cap on its share of the liquidity in
@@ -829,6 +838,10 @@ struct Engine<'a> {
     agent_used: usize,
     agent_reenter: Option<(Tick, Tick)>,
     stopped: bool,
+    /// A forward run: whether a look is due without a decision, and the
+    /// newest block end's time, block, equity and state, where it is shown.
+    agent_due: bool,
+    last_end: Option<(u64, u64, f64, &'static str)>,
 }
 
 impl<'a> Engine<'a> {
@@ -1934,10 +1947,19 @@ impl<'a> Engine<'a> {
             .get(self.agent_used)
             .filter(|d| d.look == look)
         else {
+            if self.s.agent_forward {
+                // Shown at the newest block, once the history is over.
+                self.agent_due = true;
+                return Ok(());
+            }
             self.out.pending = Some(self.observe(look, time, block, equity, state)?);
             self.stopped = true;
             return Ok(());
         };
+        // A look shown later than it was due is acted on where it was shown.
+        if decision.at.is_some_and(|at| time < at) {
+            return Ok(());
+        }
         self.agent_used += 1;
         self.agent_next = time + decision.next_look.max(60);
         self.apply_agent(decision, time, block)
@@ -2122,6 +2144,7 @@ impl<'a> Engine<'a> {
             looks_before: self.agent_used,
             day: time.saturating_sub(self.s.trade_from) as f64 / DAY as f64,
             block,
+            time,
             scales,
             fee_pct: f64::from(self.pool.fee_pips()) / 10_000.0,
             spacing_pct: ticks_to_pct(f64::from(self.pool.tick_spacing())),
@@ -2245,6 +2268,9 @@ impl<'a> Engine<'a> {
 
         // The loss limit is checked on every block, before anything else.
         let equity = self.equity()?;
+        if self.s.agent_forward {
+            self.last_end = Some((time, block, equity, state));
+        }
         if let Some(campaign) = &mut self.campaign {
             campaign.best = campaign.best.max(equity);
         }
@@ -2688,6 +2714,8 @@ pub fn run(
         agent_used: 0,
         agent_reenter: None,
         stopped: false,
+        agent_due: false,
+        last_end: None,
     };
 
     let mut last = (settings.trade_from, 0u64);
@@ -2783,10 +2811,21 @@ pub fn run(
         }
     }
 
+    // A forward run shows a look that came due at the newest block.
+    if engine.agent_due && !engine.halted && !engine.stopped {
+        if let Some((time, block, equity, state)) = engine.last_end {
+            engine.out.pending =
+                Some(engine.observe(engine.agent_next, time, block, equity, state)?);
+            engine.stopped = true;
+        }
+    }
     // The run is over: whatever is open is closed on the last state.
     engine.pending = None;
     if let Some(plan) = &settings.agent {
         engine.out.unused_decisions = plan.decisions.len().saturating_sub(engine.agent_used);
+        if engine.out.pending.is_none() && !engine.halted {
+            engine.out.next_look = Some(engine.agent_next);
+        }
     }
     if engine.leg.is_some() {
         engine.execute(

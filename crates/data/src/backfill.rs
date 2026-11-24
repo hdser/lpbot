@@ -54,6 +54,13 @@ pub trait ChainSource {
     }
     /// The pool's full state after a block.
     fn snapshot(&self, pool: Address, block: u64) -> Result<PoolSnapshot, ChainError>;
+    /// The newest block no reorg can change. A day is stored complete only
+    /// once its last block is at or below it; the day in progress is stored
+    /// up to the head all the same, and stored again by the next run. The
+    /// head itself, unless the source says otherwise.
+    fn final_block(&self) -> Result<u64, ChainError> {
+        Ok(self.head()?.0)
+    }
     /// Whether a contract is deployed at `address` after `block`. A pool
     /// that the factory created later has no code there yet. A source
     /// that cannot tell says yes, and a missing pool then shows up as a
@@ -130,11 +137,18 @@ pub struct AtHead<'a, S> {
     pub block: u64,
     /// Unix time of `block`.
     pub time: u64,
+    /// The finalized block, when `block` is past it: days close only up to
+    /// it. `None` when `block` is itself final.
+    pub final_block: Option<u64>,
 }
 
 impl<S: ChainSource> ChainSource for AtHead<'_, S> {
     fn head(&self) -> Result<(u64, u64), ChainError> {
         Ok((self.block, self.time))
+    }
+
+    fn final_block(&self) -> Result<u64, ChainError> {
+        Ok(self.final_block.map_or(self.block, |b| b.min(self.block)))
     }
 
     fn block_time(&self, block: u64) -> Result<u64, ChainError> {
@@ -451,6 +465,7 @@ pub fn backfill_pools(
 ) -> Result<Vec<Result<BackfillReport, BackfillError>>, BackfillError> {
     let events = EventStore::new(root);
     let (head, head_time) = source.head()?;
+    let final_block = source.final_block()?.min(head);
     let empty = BackfillReport {
         head_block: head,
         head_time,
@@ -484,9 +499,10 @@ pub fn backfill_pools(
     let mut day = first;
     while day <= last_day {
         // The next day's first block closes this day. Past the head it does
-        // not exist yet, and the day is still in progress.
+        // not exist yet, and the day is still in progress; so is a day whose
+        // last block is not final yet.
         let next_start = first_block_at_or_after(source, day.end(), start, head)?;
-        let complete = next_start <= head;
+        let complete = next_start <= head && next_start <= final_block + 1;
         let state = if complete {
             DayState::Complete
         } else {
@@ -1045,6 +1061,74 @@ mod tests {
         assert_eq!(logs.len(), report.rows_written());
     }
 
+    #[test]
+    fn a_day_closes_only_once_its_last_block_is_final() {
+        let dir = TempDir::new("backfill");
+        let chain = chain();
+        let from = day("2026-11-01");
+        let store = EventStore::new(dir.path());
+        let state = |d: &str| store.day_state("ethereum", pool().address, day(d));
+        // The head an hour into 2 November, the finalized block an hour
+        // before the end of 1 November.
+        let next_day =
+            first_block_at_or_after(&chain, day("2026-11-02").start(), 0, 24_999).unwrap();
+        let head =
+            first_block_at_or_after(&chain, day("2026-11-02").start() + 3_600, 0, 24_999).unwrap();
+        let late =
+            first_block_at_or_after(&chain, day("2026-11-02").start() - 3_600, 0, 24_999).unwrap();
+        let time = chain.block_time(head).unwrap();
+        let ahead = AtHead {
+            source: &chain,
+            block: head,
+            time,
+            final_block: Some(late),
+        };
+        let report =
+            backfill_pool(&ahead, dir.path(), "ethereum", pool(), from, |_, _, _| {}).unwrap();
+        assert_eq!(report.head_block, head);
+        assert_eq!(
+            report.written.iter().map(|w| w.2).collect::<Vec<_>>(),
+            vec![false, false],
+            "both days are still open"
+        );
+        assert_eq!(
+            (state("2026-11-01"), state("2026-11-02")),
+            (DayState::Partial, DayState::Partial)
+        );
+        // The day in progress reaches the head all the same.
+        let logs = store
+            .read_days("ethereum", pool().address, from, day("2026-11-02"))
+            .unwrap();
+        let last = logs.last().unwrap().block_number;
+        assert!(
+            last > next_day && last <= head && head - last < 100,
+            "{last} {head}"
+        );
+
+        // Once the end of 1 November is final, it closes.
+        let ahead = AtHead {
+            final_block: Some(next_day - 1),
+            ..ahead
+        };
+        let report =
+            backfill_pool(&ahead, dir.path(), "ethereum", pool(), from, |_, _, _| {}).unwrap();
+        assert_eq!(
+            report.written.iter().map(|w| w.2).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        assert_eq!(
+            (state("2026-11-01"), state("2026-11-02")),
+            (DayState::Complete, DayState::Partial)
+        );
+        assert_eq!(
+            store
+                .read_days("ethereum", pool().address, from, day("2026-11-02"))
+                .unwrap(),
+            logs,
+            "the same logs, in the same order"
+        );
+    }
+
     /// A pool that really ran for three days, with swaps, mints and burns,
     /// served as a chain whose head is an hour into the fourth day. Its
     /// blocks are twelve seconds apart, block 100 starting the first day.
@@ -1175,6 +1259,7 @@ mod tests {
             source: &chain,
             block: first_head,
             time: first_time,
+            final_block: None,
         };
         let report =
             backfill_pool(&pinned, dir.path(), "ethereum", pool, start, |_, _, _| {}).unwrap();

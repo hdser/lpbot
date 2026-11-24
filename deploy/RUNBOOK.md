@@ -47,6 +47,7 @@ Then Ctrl-b, d. `tmux attach -t node` shows how far it is.
 | `make gas-history FROM=<day>` | After `make history`, from the same first day, before any backtest: each block's base fee and priority fee, about 30 minutes for two years of blocks. `make gates` runs it as its `gas` step | The same command again: only the newest chunk of 100,000 blocks is read again |
 | `make pool-stats` | After `make history`, for the pool dashboard (price, value held, volume, fees, the liquidity around the price); `make load` then loads it | The same command again: it replaces each pool's tables |
 | `make watch` | Only to run the watcher by hand instead of as a service: stop the service first (`make watch-stop`), the two must not run at once. See "The live tables" below | The same command again: it carries on from its checkpoint |
+| A forward run in the agent mode | A Claude Code session deciding `experiments/agent-usdc-weth-forward.yml` at the head of the chain. See "A forward run in the agent mode" below | Start the session again with the same brief: it carries on from the decisions file, and the next look is shown at the head as it is then |
 
 ### Is the snapshot download working?
 
@@ -111,6 +112,52 @@ make watch-stop
 tmux new -s watch
 make watch                     # or: make watch ARGS="--once" to catch up, write once and stop
 ```
+
+## A forward run in the agent mode
+
+A Claude Code session decides a run look by look at the head of the chain, on blocks no model has seen: `experiments/agent-usdc-weth-forward.yml`, USDC/WETH 0.05%, $10,000 in USDC, loss limit 20%. Before every look `lpbot agent next` brings the pool's events and the gas prices up to the node's head, and it shows a look only while the node is at the head. What it does and why is in `docs/DESIGN.md`, "Forward runs in the agent mode". The brief for the deciding session is `data/agent/BRIEF-forward.md` on the machine it runs on; like everything under `data/`, it is not committed.
+
+**Before it starts.**
+
+1. The node is at the head: `make status` shows the newest block seconds old, and Lighthouse synced. Otherwise `agent next` refuses with `the node is behind the chain` and shows no look.
+2. `from:` in the experiment is the day the session starts. The first look is due at 00:00 UTC that day and is shown at the head when `agent next` first runs. Once there are decisions, change nothing in the experiment: they answer the looks of this run as it is.
+3. The binary is built: `cargo build --release -p lpbot` (`CARGO_BUILD_JOBS=2 cargo build --release -p lpbot` on the node machine, which runs hot).
+
+**Where it runs.** The same commands work in both places. The node machine is the better one for a run of more than a day or two: it is always on and needs no tunnel.
+
+| | On the node machine | On the laptop |
+| --- | --- | --- |
+| The node's RPC | Local: the config's `http://127.0.0.1:8545` | Through a tunnel left open: `ssh -N -L 18545:127.0.0.1:8545 <user>@<node machine>`, and `export LPBOT_RPC=http://127.0.0.1:18545` in the session's shell |
+| The pool history | `/data/lpbot/lake`: the make targets read it from `deploy/.env`; for `target/release/lpbot` itself, `export LPBOT_DATA_DIR=/data/lpbot/lake` | `data/lake`, the copy of the history. The first catch-up stores what the copy lacks since it was made, a minute or two through the tunnel |
+| The session | Claude Code in `tmux` (`tmux new -s agent`, then `claude` in `~/lpbot`), or the desktop app's SSH connection to the machine | The desktop app, on the repository |
+| What stops it | A restart: start the session again | Sleep, a closed lid or a dropped tunnel: open it again and start the session again |
+
+Decide a run from one place only: the run is its decisions file, `data/agent/usdc-weth-forward.jsonl`, next to the store it was decided on.
+
+**How the session comes back at each look.** `agent decide` records the decision and prints when the next look is due by the wall clock, as `Next look due: 2026-11-25T04:00:00Z`.
+
+1. Best: the session starts `target/release/lpbot agent next experiments/agent-usdc-weth-forward.yml --wait 2d` as a background command (Claude Code's Bash tool with `run_in_background`). It sleeps until the look is due, brings the store up to the head, prints the look and exits, and Claude Code wakes the session when it exits. Nothing runs in the session meanwhile.
+2. Otherwise `/loop` with no interval: each round runs `agent next` without `--wait`, decides the look if one is shown, and otherwise schedules its next wake-up for when the look is due. A wake-up is at most an hour away, so a look a day ahead costs up to 24 short checks.
+
+If the session ends, nothing is lost: the decisions file and the reasoning log beside it hold the run. A new session with the same brief runs `agent next` and carries on; a look that came due meanwhile is shown at the head as it is then, and acted on there.
+
+| To | Type |
+| --- | --- |
+| See the next look, after the catch-up | `make agent-next` (node machine), or `target/release/lpbot agent next experiments/agent-usdc-weth-forward.yml` |
+| Wait for it | `make agent-next ARGS="--wait 1d"` |
+| Decide it | `target/release/lpbot agent decide experiments/agent-usdc-weth-forward.yml --action stay_out\|hold\|exit\|enter [--lower <pct> --upper <pct>] --next <duration> --note "..." --reasoning "..."` |
+| Score the decisions and put the run on the dashboards so far | `target/release/lpbot agent evaluate experiments/agent-usdc-weth-forward.yml` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run experiments/agent-usdc-weth-forward.yml --results-dir runs/agent-forward`, then `make load RESULTS=runs/agent-forward`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `lpbot: agents` dashboard reads; run it again after each `evaluate`. A panel of several agents is scored and loaded the same way, `--results-dir runs/<panel>` |
+
+**Its messages.**
+
+| It says | It means |
+| --- | --- |
+| `No look is due yet. Look N is due at ...` | Come back then, or wait for it with `--wait` |
+| `block N, the newest the store reaches, was made ... ago: the node is behind the chain` | No look until the node is at the head again: `make status`, and "After the internet was down" below if the connection dropped |
+| `note: the node is still syncing (block X of Y)` | Reth is catching up. The store goes no further than the block it has executed; looks are refused until it is at the head |
+| `note: the catch-up failed (...); trying again in 12 s` | The node answered out of step for a moment, as Reth does while it commits a batch of blocks. It tries once more |
+| `bringing the store up to the node's head before the look; is the node reachable ...` | No answer from the node: on the laptop, the tunnel is down or `LPBOT_RPC` points elsewhere; on the node machine, Reth is down (`make status`) |
+| `Look N is due since ...; the store does not reach its block yet` | The look's block is made but not yet stored, a minute or so after it is due. Run it again; `--wait` asks again every block |
 
 ## After the machine was off
 

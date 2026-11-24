@@ -628,7 +628,7 @@ impl Gates {
             log_chunk,
         };
         let first = lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
-        let done = gas_history_cmd::run(client, &root, &chain_name, first, to, 2)?;
+        let done = gas_history_cmd::run(client, &root, &chain_name, first, to, to, 2)?;
         Ok(Outcome::Pass(format!(
             "gas prices of blocks {first} to {to} stored ({} chunk(s) read, {} already stored)",
             done.chunks, done.kept

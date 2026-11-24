@@ -1,0 +1,39 @@
+# The agent mode forward, at the head of the chain: USDC/WETH 0.05%, value
+# token USDC, $10,000, decided look by look by a Claude Code session on
+# blocks no model has seen. The clean test of the agent mode; a backtest
+# over past months is not one.
+#
+# The window is open at the end. Before each look, `agent next` and `agent
+# decide` bring the pool's events and the gas prices up to the node's head
+# (LPBOT_RPC, or the config's local endpoint), and a look that is due is
+# shown at the newest block. It is still `mode: backtest`: the run is
+# replayed from the stored history and its decisions every time, so
+# `lpbot run` writes its six tables up to the newest stored block.
+#
+# The first look is due as `from` starts and is shown at the head when
+# `agent next` first runs; set `from` to the day the deciding session
+# starts. The decisions and the reasoning log are kept in data/agent/ (not
+# committed). deploy/RUNBOOK.md, "A forward run in the agent mode", has the
+# commands, where to run them and how the session comes back at each look.
+#
+#   cargo run --release -p lpbot -- agent next experiments/agent-usdc-weth-forward.yml
+#   cargo run --release -p lpbot -- agent decide experiments/agent-usdc-weth-forward.yml \
+#       --action enter --lower -3 --upper -1 --next 4h --note "why" \
+#       --reasoning "what you saw and weighed"
+#   cargo run --release -p lpbot -- agent next experiments/agent-usdc-weth-forward.yml --wait 1d
+#   cargo run --release -p lpbot -- run experiments/agent-usdc-weth-forward.yml
+
+experiment: agent-usdc-weth-forward
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-11-25, to: open }
+run: { capital_usd: 10000, loss_limit_pct: 20, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"]   # USDC/WETH 0.05%
+  value_token: [USDC]
+  capital_share: [1.0]
+  signal_step: [5m]
+  agent.decisions: [data/agent/usdc-weth-forward.jsonl]

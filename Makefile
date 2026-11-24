@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate load pool-stats watch watch-build watch-start watch-stop watch-logs
+.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -102,8 +102,9 @@ history:
 	cargo run --release -p lpbot -- backfill --from $(FROM) --verify
 
 ## Store each block's base fee and priority fee from FROM on, for the
-## backtests to charge gas at each block's price. Safe to run again; only the
-## newest chunk of 100,000 blocks is read again.
+## backtests to charge gas at each block's price. Safe to run again; of the
+## newest chunk of 100,000 blocks only what follows its last final block is
+## read again.
 gas-history:
 	cargo run --release -p lpbot -- gas-history --from $(FROM)
 
@@ -126,6 +127,13 @@ backtest:
 ## fixed rules, for the same experiment file.
 calibrate:
 	cargo run --release -p lpbot -- calibrate $(EXPERIMENT)
+
+## The agent mode: the next look of AGENT, after bringing a forward run (its
+## window open at the end) up to the node's head. ARGS="--wait 1d" waits for
+## the look when none is due yet. deploy/RUNBOOK.md has the rest.
+AGENT ?= experiments/agent-usdc-weth-forward.yml
+agent-next:
+	cargo run --release -p lpbot -- agent next $(AGENT) $(ARGS)
 
 ## Load the result tables under RESULTS into Postgres, for the dashboards.
 ## Safe to run again: a run that is loaded twice replaces itself.
