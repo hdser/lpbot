@@ -60,6 +60,8 @@ Write code so the data-dependent parts take their input from files or traits, an
 
 The owner runs the stack on a NUC (Ubuntu Server 26.04, 4 TB NVMe, 32 GB of memory), set up with `deploy/REMOTE.md`. Cloud sessions cannot reach it: the owner runs the commands and pastes the output. `deploy/RUNBOOK.md` is what he types there: long jobs run in `tmux`, services come back after a restart and jobs do not. Give him commands from it, and keep it in step when a job or its resume command changes.
 
+A session on the laptop reaches the machine over SSH. Before checking, operating or debugging it, read `deploy/NODE.md`: how to connect and open the tunnels, what runs there, where every file, table and dashboard is, how to check health, and the rules (sudo is the owner's, secrets stay unprinted, containers only from `~/lpbot`). The real SSH login is in `data/NODE.local.md` on the laptop, never in a committed file. An agent-mode decider is pointed at `lpbot agent brief`, not at that handout.
+
 - Done there, November 2026: `scripts/host-setup.sh`, a 3.4 TB data volume at `/data`, `make env`.
 - Done, 17 to 19 November 2026: `make snapshot` (archive snapshot 26414278, 1.72 TB to download, 2.88 TB unpacked). What it taught, each now handled by the scripts or the runbooks:
   - The machine went off twice. At about 13:36 UTC on 17 November the journal just stops, with no shutdown: a power cut, not the button. At 17:51 a short press of the box's own button switched it off. `HandlePowerKey=ignore` works only once the login service reads it; `deploy/REMOTE.md` reloads it and checks. After a double start `journalctl -b -1` is the wrong boot: `deploy/RUNBOOK.md` lists the boots first.
