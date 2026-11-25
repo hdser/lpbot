@@ -702,7 +702,7 @@
     {
       "type": "table",
       "title": "Every look: what the agent saw, decided, expected and why",
-      "description": "One row a look, oldest first. Ranges and bands are in percent from the price at the look. The score is over the agent's own next look. Hover or click a reasoning cell to read it whole; the run's Markdown log (data/agent/<panel>/<agent>.log.md) has the same with the full view the agent saw.",
+      "description": "One row a look, oldest first. Ranges and bands are in percent from the price at the look. The score is over the agent's own next look. In a forward or live panel, the questions the look asked the other agents on the board, the answers it had (on time or late, read before deciding or not) and who did not answer. Hover or click a reasoning cell to read it whole; the run's Markdown log (data/agent/<panel>/<agent>.log.md) has the same with the full view the agent saw.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -723,7 +723,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
+          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  l.questions as \"asked the panel\", l.answers as \"answers\", l.unanswered as \"no answer from\",\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
         }
       ],
       "fieldConfig": {
@@ -758,6 +758,72 @@
               {
                 "id": "custom.inspect",
                 "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "asked the panel"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 320
+              },
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "answers"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              },
+              {
+                "id": "custom.wrapText",
+                "value": true
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no answer from"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
               }
             ]
           },

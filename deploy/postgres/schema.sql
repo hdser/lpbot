@@ -164,6 +164,9 @@ ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS change_1d_pct double precision;
 ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS change_7d_pct double precision;
 ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS vol_1d_pct double precision;
 ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS gas_gwei double precision;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS questions text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS answers text;
+ALTER TABLE agent_looks ADD COLUMN IF NOT EXISTS unanswered text;
 CREATE INDEX IF NOT EXISTS agent_looks_run_id ON agent_looks (run_id);
 
 CREATE TABLE IF NOT EXISTS agent_scores (run_id text NOT NULL);
