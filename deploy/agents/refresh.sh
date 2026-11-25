@@ -63,8 +63,10 @@ fi
 if [ $# -eq 0 ]; then
   for exp in experiments/*.yml; do
     grep -qE '\bto:[[:space:]]*open\b' "$exp" || continue
-    for decisions in $(grep -oE 'decisions:[[:space:]]*[^ ,}]+' "$exp" |
-      sed -E 's/decisions:[[:space:]]*//' | tr -d "\"'"); do
+    # `decisions: <path>` in a panel, `agent.decisions: [<path>, ...]` in a
+    # single-agent run.
+    for decisions in $(grep -oE 'decisions:[[:space:]]*(\[[^]]*\]|[^ ,}]+)' "$exp" |
+      sed -E "s/decisions:[[:space:]]*//; s/[][\"']//g; s/,/ /g"); do
       if [ -e "$decisions" ]; then
         set -- "$@" "$exp"
         break
