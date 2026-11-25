@@ -141,14 +141,19 @@ pub fn score_row(r: &Value, who: &Identity) -> AgentScoreRow {
     }
 }
 
-/// The rows of an agent run: its decided looks from the shared log and its
-/// scores, if `lpbot agent evaluate` has written them.
-pub fn rows(who: &Identity) -> Result<(Vec<AgentLookRow>, Vec<AgentScoreRow>)> {
-    let looks = read_records(&records_path(&who.decisions))?
+/// The decided looks of an agent run, from its shared log.
+pub fn looks(who: &Identity) -> Result<Vec<AgentLookRow>> {
+    Ok(read_records(&records_path(&who.decisions))?
         .iter()
         .filter(|r| r["kind"] == "look" && r.get("decision").is_some())
         .map(|r| look_row(r, who))
-        .collect();
+        .collect())
+}
+
+/// The rows of an agent run: its decided looks from the shared log and its
+/// scores, if `lpbot agent evaluate` has written them.
+pub fn rows(who: &Identity) -> Result<(Vec<AgentLookRow>, Vec<AgentScoreRow>)> {
+    let looks = looks(who)?;
     let scores = read_records(&scores_path(&who.decisions))?
         .iter()
         .filter(|r| r["kind"] == "eval")

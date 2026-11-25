@@ -126,7 +126,7 @@ On 25 November 2026:
 
 | Session | Holds |
 | --- | --- |
-| `agent` | Claude Code deciding the two-agent forward panel `experiments/agent-panel-forward.yml` (agents `a` and `b`). Leave it alone |
+| `agent` | Claude Code deciding the two-agent forward panel `experiments/agent-panel-forward.yml`, one window an agent (`a`, `b`), each started with `deploy/agents/start-agent.sh`. Leave it alone |
 | `gates` | The shell `make gates` ran in on 19 November 2026; idle |
 | `history` | The shell `make history` ran in on 19 November 2026; idle |
 
@@ -188,7 +188,7 @@ Database and user `lpbot`. Fifteen tables, created empty by the start-up script 
 | The six run tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map` | `make load` (`lpbot load-results`), from `runs/` |
 | The two pool tables: `pool_series`, `pool_liquidity` | `make pool-stats`, then `make load` |
 | The five live tables: `live_pools`, `live_pool_series`, `live_liquidity`, `live_swaps`, `live_positions` | The watcher, continuously |
-| The two agent tables: `agent_looks`, `agent_scores` | `lpbot run` on an agent experiment, then `make load RESULTS=runs/<name>` |
+| The two agent tables: `agent_looks`, `agent_scores` | `lpbot run` on an agent experiment, then `make load RESULTS=runs/<name>`. For the forward panels, cron does it (`crontab -l`): `deploy/agents/refresh.sh --looks` every minute (the looks, from the logs) and `deploy/agents/refresh.sh` hourly (scores and results); its log is `logs/agent-refresh.log` |
 
 ### Grafana
 

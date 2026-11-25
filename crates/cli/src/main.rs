@@ -24,6 +24,7 @@ mod fees_cmd;
 mod gas_history_cmd;
 mod gates_cmd;
 mod load_cmd;
+mod load_looks_cmd;
 mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
@@ -73,6 +74,11 @@ enum Command {
     VerifyFees(VerifyFeesArgs),
     /// Load the result tables into Postgres, where the viewer reads them.
     LoadResults(LoadArgs),
+    /// Load each agent's decided looks, with their reasoning, from its log
+    /// into Postgres at once, without replays, for the agents dashboard.
+    /// Safe to run every minute: runs whose looks are loaded are left alone.
+    /// Results and scores still need `lpbot run` and `lpbot load-results`.
+    LoadLooks(LoadLooksArgs),
     /// Once the node is synced: every check against real chain data, then
     /// the backtest, the load and the calibration. Stops at the first
     /// step that fails.
@@ -211,6 +217,16 @@ struct LoadArgs {
     /// Folder the result tables were written to.
     #[arg(long, default_value = "runs")]
     results_dir: PathBuf,
+    /// Database to load into, as postgres://user:password@host:port/name.
+    /// Defaults to LPBOT_DB_URL.
+    #[arg(long)]
+    db: Option<String>,
+}
+
+#[derive(Args)]
+struct LoadLooksArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
     /// Database to load into, as postgres://user:password@host:port/name.
     /// Defaults to LPBOT_DB_URL.
     #[arg(long)]
@@ -824,6 +840,29 @@ fn real_main() -> Result<()> {
                 report.rows,
                 args.results_dir.display()
             );
+            Ok(())
+        }
+        Command::LoadLooks(args) => {
+            let url = load_cmd::database(args.db).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no database given: pass --db or set LPBOT_DB_URL \
+                     (`deploy/agents/refresh.sh --looks` takes it from deploy/.env)"
+                )
+            })?;
+            let runs = resolve(&args.experiment)?;
+            let mut failed = 0;
+            for (agent, outcome) in load_looks_cmd::run(&url, &runs)? {
+                match outcome {
+                    Ok(outcome) => println!("{}", outcome.describe()),
+                    Err(error) => {
+                        failed += 1;
+                        eprintln!("agent {agent}: the looks were not loaded: {error:#}");
+                    }
+                }
+            }
+            if failed > 0 {
+                bail!("the looks of {failed} agent run(s) were not loaded");
+            }
             Ok(())
         }
         Command::VerifyFees(args) => {
