@@ -33,18 +33,31 @@ use crate::rank_cmd::{floors, rank_readings, reading_from_events, token_of};
 const DAY: u64 = 86_400;
 const RANK_DAYS: u32 = 7;
 
-/// Reads `90s`, `30m`, `1h` or `7d` as seconds.
+/// Reads `90s`, `30m`, `1h` or `7d` as seconds, and units combined from
+/// the largest down, each at most once: `4h30m`, `1d12h`, `2h0m15s`.
 pub fn parse_duration(text: &str) -> Option<u64> {
-    let text = text.trim();
-    let (number, unit) = text.split_at(text.len().checked_sub(1)?);
-    let seconds = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3_600,
-        "d" => DAY,
-        _ => return None,
-    };
-    number.parse::<u64>().ok()?.checked_mul(seconds)
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // The units in the order they may follow one another.
+    const UNITS: [(char, u64); 4] = [('d', DAY), ('h', 3_600), ('m', 60), ('s', 1)];
+    let mut next_unit = 0;
+    let mut total: u64 = 0;
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+        if digits == 0 {
+            return None;
+        }
+        let number: u64 = rest[..digits].parse().ok()?;
+        let unit = rest[digits..].chars().next()?;
+        let offset = UNITS[next_unit..].iter().position(|(u, _)| *u == unit)?;
+        let seconds = UNITS[next_unit + offset].1;
+        total = total.checked_add(number.checked_mul(seconds)?)?;
+        next_unit += offset + 1;
+        rest = &rest[digits + unit.len_utf8()..];
+    }
+    Some(total)
 }
 
 /// Follows a path of keys into a settings map.
@@ -94,7 +107,7 @@ fn duration(map: &BTreeMap<String, Value>, path: &[&str], default: u64) -> Resul
             .filter(|seconds| *seconds > 0)
             .ok_or_else(|| {
                 anyhow!(
-                    "`{}` must be a duration such as 30m, 1h or 7d",
+                    "`{}` must be a duration such as 30m, 1h, 1h30m or 7d",
                     path.join(".")
                 )
             }),
@@ -1929,7 +1942,34 @@ pub(crate) mod tests {
         assert_eq!(parse_duration("30m"), Some(1_800));
         assert_eq!(parse_duration("1h"), Some(3_600));
         assert_eq!(parse_duration("7d"), Some(604_800));
+        assert_eq!(parse_duration(" 0m "), Some(0));
         for bad in ["", "h", "1", "1w", "-1h", "1.5h", "one hour"] {
+            assert_eq!(parse_duration(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn units_combine_from_the_largest_down_each_once() {
+        assert_eq!(parse_duration("4h10m"), Some(4 * 3_600 + 600));
+        assert_eq!(parse_duration("1d12h"), Some(86_400 + 12 * 3_600));
+        assert_eq!(parse_duration("2h0m15s"), Some(7_215));
+        assert_eq!(parse_duration("1d1s"), Some(86_401));
+        assert_eq!(parse_duration("90m"), Some(5_400));
+        assert_eq!(parse_duration("213503982334601d7h0m15s"), Some(u64::MAX));
+        for bad in [
+            "10m4h",
+            "1h1h",
+            "4h 10m",
+            "4h10",
+            "h10m",
+            "4h-10m",
+            "4h10mm",
+            "4h10x",
+            "4h½m",
+            "99999999999999999999s",
+            "213503982334602d",
+            "213503982334601d7h0m16s",
+        ] {
             assert_eq!(parse_duration(bad), None, "{bad}");
         }
     }

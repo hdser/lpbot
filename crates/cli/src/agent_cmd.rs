@@ -730,7 +730,7 @@ pub fn decision_line(
 ) -> Result<String> {
     if crate::run_cmd::parse_duration(decision.next).is_none() {
         bail!(
-            "--next {} is not a duration such as 30m, 4h or 2d",
+            "--next {} is not a duration such as 30m, 4h, 4h30m or 2d",
             decision.next
         );
     }
