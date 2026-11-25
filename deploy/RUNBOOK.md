@@ -1,6 +1,6 @@
 # Runbook for the node machine
 
-What to type on the node machine for the things that come up: starting a long job so that a dropped connection does not stop it, coming back to it, and getting going again after the machine was off. Setting the machine up is in [REMOTE.md](REMOTE.md); what the services are and what the checks do is in [README.md](README.md).
+What to type on the node machine for the things that come up: starting a long job so that a dropped connection does not stop it, coming back to it, and getting going again after the machine was off. Setting the machine up is in [REMOTE.md](REMOTE.md); what the services are and what the checks do is in [README.md](README.md). A Claude Code session that checks, operates or debugs the machine starts with [NODE.md](NODE.md): how to connect, what runs there, where everything is, and the rules it keeps.
 
 ## Two kinds of things run here
 
