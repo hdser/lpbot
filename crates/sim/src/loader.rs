@@ -218,6 +218,46 @@ pub fn load_table(client: &mut Client, key: &str, table: &Table) -> Result<usize
     Ok(table.rows())
 }
 
+/// What the database holds of one agent run's looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LoadedLooks {
+    /// Whether the run has its row in `runs`, which the agents dashboard
+    /// lists experiments from.
+    pub run_loaded: bool,
+    /// Its rows in `agent_looks`, and the highest look number among them.
+    pub looks: i64,
+    pub last: Option<i64>,
+}
+
+/// What the database holds of a run's looks. A table not created yet holds
+/// none.
+pub fn loaded_looks(client: &mut Client, run_id: &str) -> Result<LoadedLooks, LoadError> {
+    let database = |what: &str| {
+        let what = what.to_string();
+        move |source| LoadError::Database { what, source }
+    };
+    let exists = "SELECT to_regclass('runs') IS NOT NULL, to_regclass('agent_looks') IS NOT NULL";
+    let row = client.query_one(exists, &[]).map_err(database(exists))?;
+    let (runs, looks): (bool, bool) = (row.get(0), row.get(1));
+    let mut loaded = LoadedLooks::default();
+    if runs {
+        let query = "SELECT EXISTS (SELECT 1 FROM runs WHERE run_id = $1)";
+        loaded.run_loaded = client
+            .query_one(query, &[&run_id])
+            .map_err(database(query))?
+            .get(0);
+    }
+    if looks {
+        let query = "SELECT count(*), max(number) FROM agent_looks WHERE run_id = $1";
+        let row = client
+            .query_one(query, &[&run_id])
+            .map_err(database(query))?;
+        loaded.looks = row.get(0);
+        loaded.last = row.get(1);
+    }
+    Ok(loaded)
+}
+
 /// What a load did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadReport {

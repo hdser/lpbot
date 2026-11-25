@@ -11,6 +11,8 @@ What to type on the node machine for the things that come up: starting a long jo
 | When your SSH connection drops | Keep running | Keep running if they were started inside `tmux`; stop otherwise |
 | When the machine restarts | Come back by themselves | Are gone. Start them again: each carries on from what it already stored |
 
+A third kind runs on a schedule from the user's crontab (`crontab -l` lists it) and comes back after a restart by itself: the refresh of the agents dashboard, "Keeping the agents dashboard current" below.
+
 ## tmux
 
 `tmux` keeps a terminal alive on the machine after you disconnect. Use one session per job, named after it.
@@ -139,9 +141,17 @@ Decide a run from one place only: the run is its decisions file, `data/agent/usd
 1. Best: the session starts `target/release/lpbot agent next experiments/agent-usdc-weth-forward.yml --wait 2d` as a background command (Claude Code's Bash tool with `run_in_background`). It sleeps until the look is due, brings the store up to the head, prints the look and exits, and Claude Code wakes the session when it exits. Nothing runs in the session meanwhile.
 2. Otherwise `/loop` with no interval: each round runs `agent next` without `--wait`, decides the look if one is shown, and otherwise schedules its next wake-up for when the look is due. A wake-up is at most an hour away, so a look a day ahead costs up to 24 short checks.
 
-**A panel of agents forward.** Several sessions decide one panel experiment, one agent each (`--agent <name>` on every command), on the same machine. They share the panel's folder under `data/agent/`, and so its `board.jsonl`, where they ask each other and answer. Between its looks a session runs two commands in the background, `agent next ... --wait 2d` for its next look and `agent inbox ... --wait 2d` for questions to it; whichever returns first wakes it. After answering a question it starts `inbox --wait` again. At a look it may ask the others and wait for their answers before deciding. The decision acts no earlier than the newest answer it read, and no answer in time means it decides alone. `docs/DESIGN.md`, "Advice in forward and live runs", has the rest.
+**A panel of agents forward.** Several sessions decide one panel experiment, one agent each (`--agent <name>` on every command), on the same machine. They share the panel's folder under `data/agent/`, and so its `board.jsonl`, where they ask each other and answer. Each session starts in its own window of the `agent` session, with the agent's brief and model, and may run only `target/release/lpbot agent ...`: reading files, the web and every other command are denied without asking, so it never stops on a question and cannot open what its brief puts off limits:
 
-If the session ends, nothing is lost: the decisions file and the reasoning log beside it hold the run. A new session with the same brief runs `agent next` and carries on; a look that came due meanwhile is shown at the head as it is then, and acted on there.
+```sh
+tmux new -s agent            # once; then, for each agent of the panel:
+tmux new-window -d -t agent -n a deploy/agents/start-agent.sh experiments/agent-panel-forward.yml a
+tmux new-window -d -t agent -n b deploy/agents/start-agent.sh experiments/agent-panel-forward.yml b
+```
+
+The first start on a machine shows Claude Code's first-run screens in that window (theme, security notes, trust of the folder): answer them there once. Between its looks a session runs two commands in the background, `agent next ... --wait 2d` for its next look and `agent inbox ... --wait 2d` for questions to it; whichever returns first wakes it. After answering a question it starts `inbox --wait` again. At a look it may ask the others and wait for their answers before deciding. The decision acts no earlier than the newest answer it read, and no answer in time means it decides alone. `docs/DESIGN.md`, "Advice in forward and live runs", has the rest.
+
+If the session ends, nothing is lost: the decisions file and the reasoning log beside it hold the run. Its window stays open and prints the command that starts it again. A new session with the same brief runs `agent next` and carries on; a look that came due meanwhile is shown at the head as it is then, and acted on there.
 
 | To | Type |
 | --- | --- |
@@ -152,7 +162,21 @@ If the session ends, nothing is lost: the decisions file and the reasoning log b
 | Wait for questions between looks | `target/release/lpbot agent inbox <experiment> --agent <name> --wait 1d`, in the background: it returns as soon as a question arrives |
 | Answer one | `target/release/lpbot agent answer <experiment> --agent <name> --ask <id> --answer "..." [--would stay_out\|hold\|exit\|enter] [--confidence <0-1>]` |
 | See who asked and answered what | `target/release/lpbot agent board <experiment>` |
-| Score the decisions and put the run on the dashboards so far | `target/release/lpbot agent evaluate experiments/agent-usdc-weth-forward.yml` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run experiments/agent-usdc-weth-forward.yml --results-dir runs/agent-forward`, then `make load RESULTS=runs/agent-forward`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `lpbot: agents` dashboard reads; run it again after each `evaluate`. A panel of several agents is scored and loaded the same way, `--results-dir runs/<panel>` |
+| Score the decisions and put the run on the dashboards so far | On the node machine cron does it, below. By hand: `deploy/agents/refresh.sh experiments/agent-usdc-weth-forward.yml`, which runs `target/release/lpbot agent evaluate` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run ... --results-dir runs/usdc-weth-forward`, then `lpbot load-results`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `lpbot: agents` dashboard reads. A panel of several agents is scored and loaded the same way |
+| Put the looks decided since on the dashboard, without the replays | `deploy/agents/refresh.sh --looks`, which runs `target/release/lpbot load-looks <experiment>`: each look with its reasoning, in seconds |
+
+**Keeping the agents dashboard current.** Grafana reads Postgres, not the agents' files, so something has to load them. Two cron lines on the node machine do it for every forward panel with decisions on disk (an experiment under `experiments/` with `to: open`):
+
+```sh
+crontab -e     # then add these two lines
+* * * * *  $HOME/lpbot/deploy/agents/refresh.sh --looks >> $HOME/lpbot/logs/agent-refresh.log 2>&1
+17 * * * * $HOME/lpbot/deploy/agents/refresh.sh >> $HOME/lpbot/logs/agent-refresh.log 2>&1
+```
+
+- Every minute, `--looks` loads the looks decided since, with their reasoning and stances, from each agent's log (`lpbot load-looks`). It needs no replay, does nothing when nothing changed, and writes a line to the log only when it loads something.
+- At 17 minutes past each hour, the full refresh scores every decision, replays each run into `runs/<experiment without "agent-">` and loads the results, the scores and the looks: a minute or two a panel, at low priority. Its full output is in `logs/agent-refresh-last.log`.
+- Both read only what is stored. The agents bring the store up to the head at each look, so results and scores reach as far as the newest look of any agent on the pool; nothing runs `agent next` for them. The dashboard itself refreshes every minute.
+- A new panel shows on the dashboard from the first full refresh after its first decision: the dashboard lists an experiment once its runs are loaded.
 
 **Its messages.**
 
@@ -180,7 +204,7 @@ If the session ends, nothing is lost: the decisions file and the reasoning log b
 
 2. **Services need nothing.** Docker starts at boot and brings back every container that was running. If `make status` lists none, they had been stopped with `make down`: start them with `make up`, or with `make viewer` if the node has not been started yet. While a snapshot download is unfinished, `make up` refuses to start the node and says to resume the download first.
 
-3. **Jobs have to be started again**, in a new `tmux` session, with the command from the table above. For a snapshot download that was under way:
+3. **Jobs have to be started again**, in a new `tmux` session, with the command from the table above. The sessions of a forward agent panel are such jobs: start each again with `deploy/agents/start-agent.sh`, "A forward run in the agent mode" above; cron's refresh of the dashboard comes back by itself. For a snapshot download that was under way:
 
    ```sh
    tmux new -s node
