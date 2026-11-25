@@ -1002,7 +1002,7 @@ fn real_main() -> Result<()> {
                 run_cmd::parse_duration(text)
                     .filter(|s| *s > 0)
                     .ok_or_else(|| {
-                        anyhow::anyhow!("--{flag} {text}: give a duration such as 10m or 6h")
+                        anyhow::anyhow!("--{flag} {text}: give a duration such as 10m, 6h or 1h30m")
                     })
             };
             let poll = std::time::Duration::from_secs(5);
@@ -1045,7 +1045,9 @@ fn real_main() -> Result<()> {
                     let wait = match &n.wait {
                         None => 0,
                         Some(text) => run_cmd::parse_duration(text).ok_or_else(|| {
-                            anyhow::anyhow!("--wait {text}: give a duration such as 4h or 1d")
+                            anyhow::anyhow!(
+                                "--wait {text}: give a duration such as 4h, 4h30m or 1d"
+                            )
                         })?,
                     };
                     agent_cmd::next(run, &root, &args.chain, &args.forward(wait)?).map(|_| ())
