@@ -139,6 +139,8 @@ Decide a run from one place only: the run is its decisions file, `data/agent/usd
 1. Best: the session starts `target/release/lpbot agent next experiments/agent-usdc-weth-forward.yml --wait 2d` as a background command (Claude Code's Bash tool with `run_in_background`). It sleeps until the look is due, brings the store up to the head, prints the look and exits, and Claude Code wakes the session when it exits. Nothing runs in the session meanwhile.
 2. Otherwise `/loop` with no interval: each round runs `agent next` without `--wait`, decides the look if one is shown, and otherwise schedules its next wake-up for when the look is due. A wake-up is at most an hour away, so a look a day ahead costs up to 24 short checks.
 
+**A panel of agents forward.** Several sessions decide one panel experiment, one agent each (`--agent <name>` on every command), on the same machine. They share the panel's folder under `data/agent/`, and so its `board.jsonl`, where they ask each other and answer. Between its looks a session runs two commands in the background, `agent next ... --wait 2d` for its next look and `agent inbox ... --wait 2d` for questions to it; whichever returns first wakes it. After answering a question it starts `inbox --wait` again. At a look it may ask the others and wait for their answers before deciding. The decision acts no earlier than the newest answer it read, and no answer in time means it decides alone. `docs/DESIGN.md`, "Advice in forward and live runs", has the rest.
+
 If the session ends, nothing is lost: the decisions file and the reasoning log beside it hold the run. A new session with the same brief runs `agent next` and carries on; a look that came due meanwhile is shown at the head as it is then, and acted on there.
 
 | To | Type |
@@ -146,6 +148,10 @@ If the session ends, nothing is lost: the decisions file and the reasoning log b
 | See the next look, after the catch-up | `make agent-next` (node machine), or `target/release/lpbot agent next experiments/agent-usdc-weth-forward.yml` |
 | Wait for it | `make agent-next ARGS="--wait 1d"` |
 | Decide it | `target/release/lpbot agent decide experiments/agent-usdc-weth-forward.yml --action stay_out\|hold\|exit\|enter [--lower <pct> --upper <pct>] --next <duration> --note "..." --reasoning "..."` |
+| Ask the panel at a look | `target/release/lpbot agent ask <experiment> --agent <name> --to all --question "..." [--wait 10m]`, then `target/release/lpbot agent answers <experiment> --agent <name> --wait`, which returns once all have answered or the deadline has passed |
+| Wait for questions between looks | `target/release/lpbot agent inbox <experiment> --agent <name> --wait 1d`, in the background: it returns as soon as a question arrives |
+| Answer one | `target/release/lpbot agent answer <experiment> --agent <name> --ask <id> --answer "..." [--would stay_out\|hold\|exit\|enter] [--confidence <0-1>]` |
+| See who asked and answered what | `target/release/lpbot agent board <experiment>` |
 | Score the decisions and put the run on the dashboards so far | `target/release/lpbot agent evaluate experiments/agent-usdc-weth-forward.yml` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run experiments/agent-usdc-weth-forward.yml --results-dir runs/agent-forward`, then `make load RESULTS=runs/agent-forward`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `lpbot: agents` dashboard reads; run it again after each `evaluate`. A panel of several agents is scored and loaded the same way, `--results-dir runs/<panel>` |
 
 **Its messages.**
@@ -158,6 +164,9 @@ If the session ends, nothing is lost: the decisions file and the reasoning log b
 | `note: the catch-up failed (...); trying again in 12 s` | The node answered out of step for a moment, as Reth does while it commits a batch of blocks. It tries once more |
 | `bringing the store up to the node's head before the look; is the node reachable ...` | No answer from the node: on the laptop, the tunnel is down or `LPBOT_RPC` points elsewhere; on the node machine, Reth is down (`make status`) |
 | `Look N is due since ...; the store does not reach its block yet` | The look's block is made but not yet stored, a minute or so after it is due. Run it again; `--wait` asks again every block |
+| `the look was shown ... ago, so answers due ... after it are already late` | A question is due `--wait` after the look was shown. Run `agent next` again to see the look at the head, then ask |
+| `asking and answering are for forward and live panels` | The experiment's window has a last day: a backtest, where agents read each other's logs but do not ask |
+| `It acts from the block at ..., the newest market the board's answers you read are as of` | An answer you read was as of a later market than your look, so the decision acts there, not where the look was shown |
 
 ## After the machine was off
 

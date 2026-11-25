@@ -53,6 +53,12 @@ pub struct AgentLookRow {
     pub change_7d_pct: Option<f64>,
     pub vol_1d_pct: Option<f64>,
     pub gas_gwei: Option<f64>,
+    /// A forward or live panel's advice at the look, from its board: the
+    /// questions it asked, the answers it had (who, on time or late, read
+    /// or not, and what they said), and the addressees that did not answer.
+    pub questions: Option<String>,
+    pub answers: Option<String>,
+    pub unanswered: Option<String>,
 }
 
 /// One decision scored over one horizon.
@@ -183,6 +189,18 @@ pub fn agent_tables(run_id: &str, looks: &[AgentLookRow], scores: &[AgentScoreRo
                 ),
                 ("vol_1d_pct", float_or_empty(l.iter().map(|r| r.vol_1d_pct))),
                 ("gas_gwei", float_or_empty(l.iter().map(|r| r.gas_gwei))),
+                (
+                    "questions",
+                    text_or_empty(l.iter().map(|r| r.questions.clone())),
+                ),
+                (
+                    "answers",
+                    text_or_empty(l.iter().map(|r| r.answers.clone())),
+                ),
+                (
+                    "unanswered",
+                    text_or_empty(l.iter().map(|r| r.unanswered.clone())),
+                ),
             ],
         ),
         keyed(
@@ -276,6 +294,7 @@ mod tests {
             stance: Some("adapt".into()),
             toward: Some("a".into()),
             shown: 2,
+            questions: Some("to a (b-1-1): is the floor holding?".into()),
             ..AgentLookRow::default()
         }];
         let scores = vec![

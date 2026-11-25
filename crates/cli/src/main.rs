@@ -10,6 +10,7 @@
 //! backtest, the load and the calibration). `watch-pools` keeps the live
 //! tables current from the node, block by block.
 
+mod agent_board;
 mod agent_brief;
 mod agent_cmd;
 mod agent_eval;
@@ -377,6 +378,76 @@ enum AgentCommand {
     Evaluate(EvaluateArgs),
     /// Print the brief for a session acting as one agent of the experiment.
     Brief(AgentArgs),
+    /// A forward or live panel: ask other agents a question at the waiting
+    /// look, on the panel's board.
+    Ask(AskArgs),
+    /// The open questions to the agent; with --wait, wait for one to arrive.
+    Inbox(InboxArgs),
+    /// Answer a question on the board.
+    Answer(AnswerArgs),
+    /// The answers to the agent's questions at the waiting look; with
+    /// --wait, wait until all have answered or the deadline has passed.
+    Answers(AnswersArgs),
+    /// The panel's board: every agent's questions and answers so far.
+    Board(AgentArgs),
+}
+
+#[derive(Args)]
+struct AskArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Who to ask: names of the panel's other agents, comma-separated, or all.
+    #[arg(long)]
+    to: String,
+    /// The question, as long as it needs to be.
+    #[arg(long)]
+    question: String,
+    /// How long they have to answer, counted from when the look was shown.
+    #[arg(long, default_value = "10m")]
+    wait: String,
+}
+
+#[derive(Args)]
+struct InboxArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Wait up to this long (such as 6h) for a question to arrive, and
+    /// return as soon as one does.
+    #[arg(long)]
+    wait: Option<String>,
+}
+
+#[derive(Args)]
+struct AnswerArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// The question's id, as `agent inbox` shows it.
+    #[arg(long)]
+    ask: String,
+    /// The answer, as long as it needs to be.
+    #[arg(long)]
+    answer: String,
+    /// What you would do in the asker's place: stay_out, hold, exit or enter.
+    #[arg(long)]
+    would: Option<String>,
+    /// For --would enter: the range's lower price, in percent from the asker's price.
+    #[arg(long, allow_hyphen_values = true)]
+    lower: Option<f64>,
+    /// For --would enter: the range's upper price, in percent from the asker's price.
+    #[arg(long, allow_hyphen_values = true)]
+    upper: Option<f64>,
+    /// How sure you are, from 0 to 1.
+    #[arg(long)]
+    confidence: Option<f64>,
+}
+
+#[derive(Args)]
+struct AnswersArgs {
+    #[command(flatten)]
+    agent: AgentArgs,
+    /// Wait until every addressee has answered or the deadline has passed.
+    #[arg(long)]
+    wait: bool,
 }
 
 #[derive(Args)]
@@ -906,12 +977,39 @@ fn real_main() -> Result<()> {
         Command::Agent(command) => {
             let args = match &command {
                 AgentCommand::Next(args) => &args.agent,
-                AgentCommand::Peers(args) | AgentCommand::Brief(args) => args,
+                AgentCommand::Peers(args)
+                | AgentCommand::Brief(args)
+                | AgentCommand::Board(args) => args,
                 AgentCommand::Decide(args) => &args.agent,
                 AgentCommand::Evaluate(args) => &args.agent,
+                AgentCommand::Ask(args) => &args.agent,
+                AgentCommand::Inbox(args) => &args.agent,
+                AgentCommand::Answer(args) => &args.agent,
+                AgentCommand::Answers(args) => &args.agent,
             };
             let runs = resolve(&args.experiment)?;
             let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            // Every agent of the experiment: the panel that shares a board.
+            let panel: Vec<agent_log::Identity> = runs
+                .iter()
+                .filter_map(|r| r.config.strategies.first())
+                .map(agent_log::identity)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            let duration = |flag: &str, text: &str| {
+                run_cmd::parse_duration(text)
+                    .filter(|s| *s > 0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--{flag} {text}: give a duration such as 10m or 6h")
+                    })
+            };
+            let poll = std::time::Duration::from_secs(5);
+            if let AgentCommand::Board(_) = &command {
+                print!("{}", agent_board::summary(&panel)?);
+                return Ok(());
+            }
             if let AgentCommand::Evaluate(e) = &command {
                 let horizons = agent_eval::parse_horizons(&e.horizons)?;
                 let jobs = e.jobs.unwrap_or_else(|| {
@@ -955,12 +1053,83 @@ fn real_main() -> Result<()> {
                 AgentCommand::Peers(_) => agent_cmd::peers(run),
                 AgentCommand::Brief(_) => {
                     let who = agent_cmd::identity_of(run)?;
+                    let others: Vec<String> = panel
+                        .iter()
+                        .filter(|p| {
+                            p.name != who.name
+                                && agent_board::board_path(&p.decisions)
+                                    == agent_board::board_path(&who.decisions)
+                        })
+                        .map(|p| p.name.clone())
+                        .collect();
                     print!(
                         "{}",
-                        agent_brief::brief(&args.experiment.experiment, run, &who)?
+                        agent_brief::brief(&args.experiment.experiment, run, &who, &others)?
                     );
                     Ok(())
                 }
+                AgentCommand::Ask(a) => {
+                    let wait = duration("wait", &a.wait)?;
+                    let ask = agent_board::ask_at(
+                        run,
+                        &panel,
+                        &a.to,
+                        &a.question,
+                        wait,
+                        agent_log::now_unix(),
+                    )?;
+                    let to: Vec<&str> = ask["to"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|t| t.as_str())
+                        .collect();
+                    println!(
+                        "Asked {} (question {}). Answers are due by {}. `lpbot agent answers                          <experiment> --agent {} --wait` returns once all have answered or the                          deadline has passed; then decide, with or without them.",
+                        to.join(", "),
+                        ask["id"].as_str().unwrap_or_default(),
+                        agent_cmd::clock(ask["deadline"].as_u64().unwrap_or_default()),
+                        ask["agent"].as_str().unwrap_or_default()
+                    );
+                    Ok(())
+                }
+                AgentCommand::Inbox(i) => {
+                    let wait = match &i.wait {
+                        None => 0,
+                        Some(text) => duration("wait", text)?,
+                    };
+                    agent_board::inbox(run, wait, poll).map(|_| ())
+                }
+                AgentCommand::Answer(a) => {
+                    let would = a.would.as_ref().map(|action| agent_board::Would {
+                        action: action.clone(),
+                        lower_pct: a.lower,
+                        upper_pct: a.upper,
+                    });
+                    if would.is_none() && (a.lower.is_some() || a.upper.is_some()) {
+                        bail!("--lower and --upper go with --would enter");
+                    }
+                    let answer = agent_board::answer_at(
+                        run,
+                        &a.ask,
+                        &a.answer,
+                        would.as_ref(),
+                        a.confidence,
+                        agent_log::now_unix(),
+                    )?;
+                    println!(
+                        "Answered {}{}.",
+                        a.ask,
+                        if answer["late"] == true {
+                            ", after its deadline: it is kept and marked late"
+                        } else {
+                            ", in time"
+                        }
+                    );
+                    Ok(())
+                }
+                AgentCommand::Answers(a) => agent_board::answers(run, a.wait, poll),
+                AgentCommand::Board(_) => unreachable!("handled above"),
                 AgentCommand::Decide(d) => agent_cmd::decide(
                     run,
                     &root,

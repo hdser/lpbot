@@ -32,6 +32,7 @@ use lpbot_data::store::{DayState, EventStore};
 use lpbot_sim::agent::Observation;
 use lpbot_sim::engine;
 
+use crate::agent_board;
 use crate::agent_log::{self, now_unix as now, Expectation, Identity, Source, Stance};
 use crate::agent_peers;
 use crate::chain_cmd::{connect_to, safe_head, HEAD_MARGIN};
@@ -184,7 +185,17 @@ pub fn identity_of(run: &ResolvedRun) -> Result<Identity> {
     agent_log::identity(strategy)?.ok_or_else(|| anyhow!("the run has no agent.decisions file"))
 }
 
-fn read_pending(decisions: &Path) -> Result<Pending> {
+/// Writes the look waiting for a decision.
+pub(crate) fn write_pending(decisions: &Path, waiting: &Pending) -> Result<()> {
+    let pending = pending_path(decisions);
+    if let Some(parent) = pending.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&pending, format!("{}\n", waiting.to_json()))
+        .with_context(|| format!("writing {}", pending.display()))
+}
+
+pub(crate) fn read_pending(decisions: &Path) -> Result<Pending> {
     let pending = pending_path(decisions);
     match std::fs::read_to_string(&pending) {
         Ok(text) => Pending::parse(&text).ok_or_else(|| {
@@ -605,10 +616,6 @@ fn show(
     let decisions = &who.decisions;
     note_unused(out, decisions);
     let strategy = &run.config.strategies[0];
-    let pending = pending_path(decisions);
-    if let Some(parent) = pending.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let seen = describe(observation, &prepared.pool_name, &strategy.value_token);
     // What the look knows: the market up to the block it is shown at.
     let as_of = observation.time;
@@ -621,7 +628,9 @@ fn show(
         pool: &prepared.pool_name,
         value_token: &strategy.value_token,
     };
-    let record = agent_log::look_record(&source, observation, as_of, &seen, &handover.shown);
+    let mut record = agent_log::look_record(&source, observation, as_of, &seen, &handover.shown);
+    // Answers to its earlier questions that came after their deadline.
+    let late = agent_board::late_section(who, &own, &mut record)?;
     let waiting = Pending {
         look: observation.look,
         at: Some(observation.time),
@@ -630,8 +639,7 @@ fn show(
         seen: Some(seen.clone()),
         record: Some(record),
     };
-    std::fs::write(&pending, format!("{}\n", waiting.to_json()))
-        .with_context(|| format!("writing {}", pending.display()))?;
+    write_pending(decisions, &waiting)?;
     if prepared.open {
         println!(
             "At the head: block {}, made {} ago.",
@@ -643,6 +651,10 @@ fn show(
     if !who.peers.is_empty() {
         println!();
         print!("{}", handover.text);
+    }
+    if !late.is_empty() {
+        println!();
+        print!("{late}");
     }
     println!();
     println!(
@@ -764,7 +776,15 @@ pub fn decide(
     let look = waiting.look;
     // Everything is checked before anything is written.
     let decided = now();
-    let line = decision_line(look, waiting.at, decided, decision)?;
+    // The questions this look asked and the answers it read. A decision
+    // acts no earlier than the newest market any of them is as of.
+    let board = agent_board::read_board(&agent_board::board_path(&decisions))?;
+    let advice = agent_board::advice_at_decide(&board, &who.name, look, waiting.record.as_ref());
+    let at = match (waiting.at, advice.newest_read) {
+        (Some(at), Some(read)) if read > at => Some(read),
+        (at, _) => at,
+    };
+    let line = decision_line(look, at, decided, decision)?;
     decision.expect.check()?;
     let shown_from = waiting
         .record
@@ -785,7 +805,11 @@ pub fn decide(
         .with_context(|| format!("writing {}", decisions.display()))?;
     std::fs::remove_file(&pending).ok();
     let log = log_path(&decisions);
-    append_log(&log, &who, &log_entry(&waiting, decision, stance.as_ref())).with_context(|| {
+    let mut entry = log_entry(&waiting, decision, stance.as_ref());
+    if !advice.is_empty() {
+        entry.push_str(&agent_board::advice_markdown(&advice.json));
+    }
+    append_log(&log, &who, &entry).with_context(|| {
         format!(
             "the decision is written to {}, but not to the reasoning log",
             decisions.display()
@@ -806,6 +830,13 @@ pub fn decide(
             },
             decided,
         );
+        if !advice.is_empty() {
+            record["advice"] = advice.json.clone();
+        }
+        if at != waiting.at {
+            record["as_of"] = serde_json::json!(at);
+            record["at"] = serde_json::json!(at);
+        }
         let records = agent_log::records_path(&decisions);
         agent_log::append_records(&records, &[record]).with_context(|| {
             format!(
@@ -816,6 +847,15 @@ pub fn decide(
         })?;
     }
     println!("{}: {}", waiting.label(), decision.action);
+    if let (Some(acted), Some(shown)) = (at, waiting.at) {
+        if acted > shown {
+            println!(
+                "It acts from the block at {}, the newest market the board's answers you read                  are as of, not where the look was shown ({} earlier).",
+                clock(acted),
+                span(acted - shown)
+            );
+        }
+    }
     println!();
     let forward = Forward {
         wait: 0,

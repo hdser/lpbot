@@ -63,7 +63,43 @@ pub fn look_row(r: &Value, who: &Identity) -> AgentLookRow {
         change_7d_pct: scale(seen, "7d", "change_pct"),
         vol_1d_pct: scale(seen, "1d", "vol_pct_per_day"),
         gas_gwei: seen["gas_gwei"].as_f64(),
+        questions: advice_lines(&r["advice"]["asked"], |a| {
+            format!(
+                "to {} ({}): {}",
+                list(&a["to"]),
+                text(&a["id"]),
+                text(&a["question"])
+            )
+        }),
+        answers: advice_lines(&r["advice"]["answers"], |a| {
+            format!(
+                "{} ({}, {}): {}",
+                text(&a["agent"]),
+                if a["late"] == true { "late" } else { "on time" },
+                if a["read"] == true {
+                    "read"
+                } else {
+                    "not read"
+                },
+                text(&a["answer"])
+            )
+        }),
+        unanswered: advice_lines(&r["advice"]["unanswered"], |u| {
+            format!("{} ({})", text(&u["agent"]), text(&u["ask"]))
+        }),
     }
+}
+
+fn list(v: &Value) -> String {
+    v.as_array()
+        .map(|a| a.iter().map(text).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default()
+}
+
+/// One line an item of an advice list, or nothing for an empty one.
+fn advice_lines(items: &Value, line: impl Fn(&Value) -> String) -> Option<String> {
+    let lines: Vec<String> = items.as_array()?.iter().map(line).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// A score's row, from its record in the scores file.
@@ -163,6 +199,26 @@ mod tests {
         assert_eq!(row.position.as_deref(), Some("-2.00% to -1.00%, resting"));
         assert_eq!((row.change_1h_pct, row.change_7d_pct), (Some(-0.4), None));
         assert_eq!(row.vol_1d_pct, Some(3.1));
+        assert_eq!(row.questions, None, "no advice at this look");
+
+        let advised = look_row(
+            &json!({"kind": "look", "decision": {"action": "hold", "next": "1d"},
+                    "seen": {}, "advice": {
+                        "asked": [{"id": "b-3-1", "to": ["a", "c"], "question": "floor?"}],
+                        "answers": [{"ask": "b-3-1", "agent": "a", "late": false, "read": true,
+                                     "answer": "holding"}],
+                        "unanswered": [{"ask": "b-3-1", "agent": "c"}]}}),
+            &who(),
+        );
+        assert_eq!(
+            advised.questions.as_deref(),
+            Some("to a, c (b-3-1): floor?")
+        );
+        assert_eq!(
+            advised.answers.as_deref(),
+            Some("a (on time, read): holding")
+        );
+        assert_eq!(advised.unanswered.as_deref(), Some("c (b-3-1)"));
 
         let bare = look_row(
             &json!({"kind": "look", "decision": {"action": "hold", "next": "1d"},

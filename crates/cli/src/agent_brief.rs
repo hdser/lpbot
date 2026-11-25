@@ -11,8 +11,14 @@ use lpbot_core::experiment::ResolvedRun;
 use crate::agent_log::Identity;
 use crate::run_cmd::run_window;
 
-/// The brief for agent `who` of the experiment at `experiment`.
-pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<String> {
+/// The brief for agent `who` of the experiment at `experiment`; `others`
+/// are the panel's other agents, who share its board.
+pub fn brief(
+    experiment: &Path,
+    run: &ResolvedRun,
+    who: &Identity,
+    others: &[String],
+) -> Result<String> {
     let (from, end) = run_window(&run.config)?;
     let strategy = &run.config.strategies[0];
     let exp = experiment.display();
@@ -84,6 +90,31 @@ pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<Str
             names.join(", ")
         );
     }
+    if end.is_none() && !others.is_empty() {
+        let _ = writeln!(
+            text,
+            "## Asking the others\n\nThe panel's other agents are {others}. At a look you may \
+             ask them before you decide, and they may ask you. Questions and answers go through \
+             the panel's board, and only the board counts.\n\n\
+             - `{lpbot} agent ask {exp} --agent {name} --to <names|all> --question \"...\" \
+             [--wait 10m]` asks at the waiting look; the answers are due that long after the \
+             look was shown.\n\
+             - `{lpbot} agent answers {exp} --agent {name} --wait` returns once all have \
+             answered or the deadline has passed. Then decide, with or without them: no answer \
+             in time means you decide alone, and a late one is shown at your next look.\n\
+             - `{lpbot} agent inbox {exp} --agent {name}` lists the questions to you. Between \
+             your looks, run `{lpbot} agent inbox {exp} --agent {name} --wait <duration>` in \
+             the background: it returns as soon as a question arrives, so you can answer in \
+             time, and otherwise when the time is up. Look at it at each of your looks too.\n\
+             - `{lpbot} agent answer {exp} --agent {name} --ask <id> --answer \"...\" [--would \
+             stay_out|hold|exit|enter [--lower <pct> --upper <pct>]] [--confidence <0-1>]` \
+             answers. Your answers are counted, on time or late, and read by the asker and \
+             later by tools.\n\
+             - A decision acts no earlier than the newest answer or question you read, so ask \
+             for what you need, not for what happened since.\n",
+            others = others.join(", ")
+        );
+    }
     let _ = writeln!(
         text,
         "## What a decision means\n\n\
@@ -111,7 +142,7 @@ pub fn brief(experiment: &Path, run: &ResolvedRun, who: &Identity) -> Result<Str
     let _ = writeln!(
         text,
         "## Rules, so the test stays honest\n\n\
-         - Read only what `lpbot agent next`, `decide` and `peers` print.\n\
+         - Read only what the `lpbot agent` commands print for your run.\n\
          - Do not open the experiment file, `config/`, `docs/RESEARCH.md`, anything under \
          `runs/` or `data/`, the decision, log or score files of any agent, or the result \
          tables.\n\
@@ -151,12 +182,30 @@ mod tests {
         let who = crate::agent_log::identity(&runs[0].config.strategies[0])
             .unwrap()
             .unwrap();
-        let text = brief(Path::new("experiments/forward.yml"), &runs[0], &who).unwrap();
+        let text = brief(
+            Path::new("experiments/forward.yml"),
+            &runs[0],
+            &who,
+            &["b".to_string()],
+        )
+        .unwrap();
         assert!(text.contains("forward, at the head of the chain"), "{text}");
         assert!(text.contains("`next --wait <duration>`"), "{text}");
         assert!(text.contains("Do not pass `--no-sync`"), "{text}");
         assert!(!text.contains("days of stored pool history"), "{text}");
         assert!(!text.contains("2026"), "no dates: {text}");
+        assert!(text.contains("## Asking the others"), "{text}");
+        assert!(text.contains("The panel's other agents are b."), "{text}");
+        assert!(
+            text.contains("agent inbox experiments/forward.yml --agent"),
+            "{text}"
+        );
+        assert!(
+            text.contains("--wait <duration>` in the background"),
+            "{text}"
+        );
+        let alone = brief(Path::new("experiments/forward.yml"), &runs[0], &who, &[]).unwrap();
+        assert!(!alone.contains("Asking the others"), "{alone}");
     }
 
     #[test]
@@ -189,7 +238,13 @@ mod tests {
                 stem: "data/agent/p/a".into(),
             }],
         };
-        let text = brief(Path::new("experiments/panel.yml"), &runs[0], &who).unwrap();
+        let text = brief(
+            Path::new("experiments/panel.yml"),
+            &runs[0],
+            &who,
+            &["a".to_string()],
+        )
+        .unwrap();
         assert!(
             text.starts_with("# Brief for agent b (claude-sonnet-5-5)"),
             "{text}"
@@ -205,6 +260,10 @@ mod tests {
         assert!(text.contains("$10000 in USDC"), "{text}");
         assert!(text.contains("Do not open the experiment file"), "{text}");
         assert!(
+            !text.contains("Asking the others"),
+            "no asking in a backtest: {text}"
+        );
+        assert!(
             text.contains("A range wholly below the price holds only USDC"),
             "{text}"
         );
@@ -213,7 +272,7 @@ mod tests {
             peers: Vec::new(),
             ..who
         };
-        let text = brief(Path::new("experiments/panel.yml"), &runs[0], &alone).unwrap();
+        let text = brief(Path::new("experiments/panel.yml"), &runs[0], &alone, &[]).unwrap();
         assert!(
             !text.contains("Your peers") && !text.contains("agent peers"),
             "{text}"
