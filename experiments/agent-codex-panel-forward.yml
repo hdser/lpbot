@@ -1,0 +1,28 @@
+# Independent Codex sessions at the chain head, using virtual positions.
+# solo decides alone; reader receives solo's records up to each look.
+# model records an inherited Codex session whose exact model id the client
+# does not expose. This is not a comparison of named models.
+# Keep this experiment and its decisions paths fixed once decisions exist.
+#
+#   target/release/lpbot agent brief experiments/agent-codex-panel-forward.yml --agent solo
+#   target/release/lpbot agent brief experiments/agent-codex-panel-forward.yml --agent reader
+#
+# The coordinator transports only permitted tool output to fresh deciders.
+# Board advice is excluded from this comparison; reader uses filtered peer
+# records only. See docs/AGENT_WORKFLOW.md for isolation and wake-ups.
+experiment: agent-codex-panel-forward
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-11-25, to: open }
+run: { capital_usd: 10000, loss_limit_pct: 20, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"]
+  value_token: [USDC]
+  capital_share: [1.0]
+  signal_step: [5m]
+  agent:
+    - { name: solo, model: codex-inherited, decisions: data/agent/codex-panel-forward/solo.jsonl }
+    - { name: reader, model: codex-inherited, decisions: data/agent/codex-panel-forward/reader.jsonl, peers: [solo] }

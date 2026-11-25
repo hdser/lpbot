@@ -145,4 +145,6 @@ docs/         the design
 
 - Everything is Rust. Experiments are YAML files. There are no notebooks.
 - Data, results and secrets never go in Git.
-- Contributor and agent conventions are in [CLAUDE.md](CLAUDE.md).
+- Contributor conventions are in [CLAUDE.md](CLAUDE.md). Codex starts from
+  [AGENTS.md](AGENTS.md); [the agent workflow](docs/AGENT_WORKFLOW.md) covers
+  development, code review, LP strategy research, deciders and strategy reviews.

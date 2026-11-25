@@ -247,6 +247,37 @@ fn a_decision_acts_no_earlier_than_the_newest_answer_it_read() {
 }
 
 #[test]
+fn answering_an_older_question_carries_the_newer_market_seen_in_its_inbox() {
+    let p = forward_panel("answer-inbox-knowledge");
+    let run_b = &p.runs[1];
+    let panel = identities(&p.runs);
+    let who_b = &panel[1];
+    assert!(agent_cmd::next(run_b, &p.lake, "ethereum", &stored())
+        .unwrap()
+        .is_some());
+    let at = read_pending(&who_b.decisions).unwrap().at.unwrap();
+    let now = crate::agent_log::now_unix();
+    // Newer information comes first, so the last question read cannot be
+    // used as a shortcut for the newest market the inbox disclosed.
+    for (id, as_of) in [("a-2-1", at + 120), ("a-1-1", at - 120)] {
+        append(&board_path(&who_b.decisions), |_| {
+            Ok(
+                json!({"kind": "ask", "id": id, "agent": "a", "model": "test-model-a",
+                      "to": ["b"], "question": "What do you see?", "look": as_of,
+                      "as_of": as_of, "deadline": now + 600, "asked_unix": now}),
+            )
+        })
+        .unwrap();
+    }
+    assert_eq!(inbox(run_b, 0, Duration::from_millis(10)).unwrap(), 2);
+    let read = read_pending(&who_b.decisions).unwrap().record.unwrap()["board_read"].clone();
+    assert_eq!(read[0]["as_of"].as_u64(), Some(at + 120));
+    assert_eq!(read[1]["as_of"].as_u64(), Some(at - 120));
+    let answer = answer_at(run_b, "a-1-1", "My view includes both.", None, None, now).unwrap();
+    assert_eq!(answer["as_of"].as_u64(), Some(at + 120));
+}
+
+#[test]
 fn asking_is_refused_in_a_backtest() {
     let p = forward_panel("backtest");
     let mut run_a = p.runs[0].clone();
