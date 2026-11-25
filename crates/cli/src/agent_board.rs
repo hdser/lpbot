@@ -39,18 +39,21 @@ pub fn board_path(decisions: &Path) -> PathBuf {
 }
 
 /// The records of a board's text. A last line cut short (a writer that
-/// died mid-line) is left out; any other line that is not JSON is an error.
+/// died mid-line) is left out, even if its JSON is complete but its newline
+/// is missing; any other line that is not JSON is an error.
 fn parse_board(content: &str, path: &Path) -> Result<Vec<Value>> {
     let complete = content.ends_with('\n');
     let lines: Vec<&str> = content.lines().collect();
     let mut records = Vec::new();
     for (i, line) in lines.iter().enumerate() {
+        if i + 1 == lines.len() && !complete {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str(line) {
             Ok(record) => records.push(record),
-            Err(_) if i + 1 == lines.len() && !complete => {}
             Err(e) => bail!("{} line {} is not JSON: {e}", path.display(), i + 1),
         }
     }
@@ -197,17 +200,21 @@ pub fn addressees(who: &Identity, panel: &[Identity], to: &str) -> Result<Vec<St
 }
 
 /// The latest market an agent has seen through the tools: its waiting
-/// look, or else its last decided look.
+/// look and board records read there, or any earlier decided look.
 fn knowledge(who: &Identity) -> Result<Option<u64>> {
-    if let Ok(waiting) = read_pending(&who.decisions) {
-        if let Some(at) = waiting.at {
-            return Ok(Some(at));
-        }
-    }
-    Ok(read_records(&records_path(&who.decisions))?
+    let mut latest = read_records(&records_path(&who.decisions))?
         .iter()
         .filter_map(|r| r["as_of"].as_u64())
-        .max())
+        .max();
+    if let Ok(waiting) = read_pending(&who.decisions) {
+        latest = latest.max(waiting.at);
+        if let Some(record) = waiting.record {
+            for read in record["board_read"].as_array().into_iter().flatten() {
+                latest = latest.max(read["as_of"].as_u64());
+            }
+        }
+    }
+    Ok(latest)
 }
 
 /// Notes board records an agent was shown while a look waits for it, with
@@ -951,6 +958,65 @@ mod tests {
             std::fs::read_to_string(dir.join("other.jsonl")).unwrap(),
             ""
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_json_without_its_final_newline_is_not_read_or_passed_to_an_append() {
+        let dir = temp("missing-newline");
+        let path = dir.join("board.jsonl");
+        for prefix in ["", "{\"kind\":\"ask\",\"id\":1}\n"] {
+            let committed = usize::from(!prefix.is_empty());
+            std::fs::write(&path, format!("{prefix}{{\"kind\":\"ask\",\"id\":2}}")).unwrap();
+            assert_eq!(read_board(&path).unwrap().len(), committed);
+            let added = append(&path, |board| {
+                assert_eq!(board.len(), committed, "the callback sees only whole lines");
+                Ok(json!({"kind": "ask", "id": board.len() + 1}))
+            })
+            .unwrap();
+            let board = read_board(&path).unwrap();
+            assert_eq!(board.len(), committed + 1);
+            assert_eq!(board.last(), Some(&added));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{prefix}{added}\n")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn knowledge_uses_every_pending_board_read_and_never_precedes_its_own_log() {
+        let dir = temp("knowledge");
+        let who = Identity {
+            name: "b".into(),
+            model: "m".into(),
+            decisions: dir.join("b.jsonl"),
+            peers: Vec::new(),
+        };
+        assert_eq!(knowledge(&who).unwrap(), None);
+        let mut waiting = crate::agent_cmd::Pending {
+            look: 100,
+            at: Some(100),
+            number: Some(1),
+            day: Some(1.0),
+            seen: None,
+            record: Some(json!({"board_read": [
+                {"key": "ask:a-2-1", "as_of": 300},
+                {"key": "ask:a-1-1", "as_of": 200}
+            ]})),
+        };
+        write_pending(&who.decisions, &waiting).unwrap();
+        assert_eq!(knowledge(&who).unwrap(), Some(300));
+        crate::agent_log::append_records(
+            &records_path(&who.decisions),
+            &[json!({"as_of": 400}), json!({"as_of": 350})],
+        )
+        .unwrap();
+        assert_eq!(knowledge(&who).unwrap(), Some(400));
+        waiting.at = Some(500);
+        write_pending(&who.decisions, &waiting).unwrap();
+        assert_eq!(knowledge(&who).unwrap(), Some(500));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
