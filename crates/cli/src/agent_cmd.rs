@@ -830,12 +830,12 @@ pub fn decide(
         std::fs::create_dir_all(parent)?;
     }
     let mut content = crate::agent_lock::read_optional(&decisions)?;
+    if !content.is_empty() && !content.ends_with('\n') {
+        bail!("decisions have an unterminated final record; inspect it before deciding again");
+    }
     let previous = crate::run_cmd::parse_decisions(&content)?;
     if previous.iter().any(|d| d.look == look) {
         bail!("this look already has a committed decision; run `lpbot agent next` to reconcile instead of deciding twice");
-    }
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
     }
     content.push_str(&line);
     content.push('\n');
@@ -1398,6 +1398,13 @@ mod tests {
             stance: None,
             toward: None,
         };
+        let uncommitted = r#"{"look":100,"action":"stay_out","next":"1h"}"#;
+        std::fs::write(&decisions, uncommitted).unwrap();
+        let error = decide(&run, &lake, "ethereum", &enter, &forward).unwrap_err();
+        assert!(error.to_string().contains("unterminated"));
+        assert_eq!(std::fs::read_to_string(&decisions).unwrap(), uncommitted);
+        assert!(pending_path(&decisions).exists());
+        std::fs::remove_file(&decisions).unwrap();
         decide(&run, &lake, "ethereum", &enter, &forward).unwrap();
         let written = std::fs::read_to_string(&decisions).unwrap();
         let back = crate::run_cmd::parse_decisions(&written).unwrap();

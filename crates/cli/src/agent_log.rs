@@ -455,7 +455,7 @@ pub fn read_records(path: &Path) -> Result<Vec<Value>> {
 pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     let mut content = crate::agent_lock::read_optional(path)?;
     if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+        anyhow::bail!("shared log has an unterminated final record; inspect it before appending");
     }
     for record in records {
         content.push_str(&record.to_string());
@@ -718,6 +718,10 @@ mod tests {
         let back = read_records(&path).unwrap();
         assert_eq!(back.len(), 2);
         assert_eq!(back[0], record);
+        let uncommitted = r#"{"kind":"look","as_of":2000}"#;
+        std::fs::write(&path, uncommitted).unwrap();
+        assert!(append_records(&path, &[json!({"kind":"look","as_of":3000})]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), uncommitted);
         std::fs::write(&path, "{\"ok\": 1}\nnot json\n").unwrap();
         let err = read_records(&path).unwrap_err().to_string();
         assert!(err.contains("line 2"), "{err}");
