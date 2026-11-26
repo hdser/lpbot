@@ -1,0 +1,38 @@
+# The agent list: what `lpbot supervisor status` cannot tell from an
+# agent's files. Copy it to data/agents/agents.yml on the machine the agents
+# run on (data/ is not committed) and keep it in step with the panels.
+#
+# Without the list the status still shows every forward agent it finds
+# (experiments with `to: open` and a decisions file). The list adds agents
+# that have not decided yet, what runs each one and where, whether a session
+# here keeps a waiter, and agents set aside on purpose.
+
+# How long a due look may wait for its decision before it counts as late.
+grace: 10m
+
+panels:
+  - experiment: experiments/agent-panel-forward.yml
+    # Whether the panel's agents ask each other on the board. Unset, it is
+    # on when agents share a folder.
+    board: true
+    agents:
+      # runner: session (Claude Code, Codex or a person running the agent
+      # commands) or runner (lpbot agent-runner).
+      # waits_here: a session on this machine that keeps
+      # `agent next --wait` running between looks. Without one it will
+      # not wake, and the status says so.
+      - { name: a, runner: session, place: "tmux agent:a on the node", waits_here: true }
+      - { name: b, runner: session, place: "tmux agent:b on the node", waits_here: true }
+
+  - experiment: experiments/agent-codex-panel-forward.yml
+    board: false
+    # The runner's state file, when lpbot agent-runner holds the panel.
+    # runner_state: data/codex/runner/state.json
+    agents:
+      - { name: solo, runner: session, place: "Codex app on the laptop" }
+      # state: active (the default), paused or ended, with a reason.
+      - name: reader
+        runner: session
+        place: "Codex app on the laptop"
+        state: paused
+        reason: "held until the full-horizon peer-score fix is validated"

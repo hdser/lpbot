@@ -200,6 +200,27 @@ crontab -e     # then add these two lines
 | `asking and answering are for forward and live panels` | The experiment's window has a last day: a backtest, where agents read each other's logs but do not ask |
 | `It acts from the block at ..., the newest market the board's answers you read are as of` | An answer you read was as of a later market than your look, so the decision acts there, not where the look was shown |
 
+### Is every agent working?
+
+`make agents` prints every forward agent on the machine, whatever runs it: its state, when its next look is due (counted from its last decision, never from when a look was last shown), what waits for it and, in a column of its own, what schedules it. `make status` ends with the same in one line an agent, and the `lpbot: agents` dashboard has it in its Now row, written every minute by `refresh.sh --looks`. A change of state is a line in `logs/agent-refresh.log`, such as `agents: b (agent-panel-forward): waiting -> late (...)`.
+
+The agent list `data/agents/agents.yml` (copy `deploy/agents/agents.example.yml`) says what the files cannot: agents that have not decided yet, what runs each one and where, whether a session here keeps `agent next --wait` (`waits_here: true`), and agents set aside on purpose (`state: paused` or `ended`, with a `reason`). Keep it in step when a panel starts or stops.
+
+| State | It means | What to do |
+| --- | --- | --- |
+| `waiting` | Its next look is ahead, and something here will wake it: a session's `agent next --wait` lasting past the due time, or the runner | Nothing |
+| `unverified` | Its next look is ahead, and it runs from elsewhere (the laptop, another machine): nothing here can show what will wake it | Nothing, unless it turns `late` |
+| `deciding` | Its look is due and shown, or it is waiting for answers to its questions | Nothing, unless it turns `late` |
+| `due` | Its look is due within the grace (10 minutes by default) and not shown yet | Nothing: the catch-up takes a minute or two |
+| `late` | Its look was due more than the grace ago and is not decided | Look at the session (`tmux list-panes -a -F '#{session_name}:#{window_name} #{pane_current_command}'`, never attaching to the `agent` session unasked) or the runner; a session that ended prints how to start it again |
+| `no waiter` | A session that waits here has no `agent next --wait` lasting until its look: it will not wake by itself | Its session has stopped or forgot to wait: start it again with `deploy/agents/start-agent.sh <experiment> <agent>` in its window, with the owner's yes |
+| `stopped` | The runner stopped it for inspection (the phase says why) | Inspect as `docs/CODEX_RUNNER.md` says before releasing it |
+| `failing` | Its decisions cannot be read, or the runner recorded an error, or the list names an agent its experiment does not have | Read the detail |
+| `scheduler down` | A runner's fence holds it, and no runner process is running | Start the runner again, or release it (`docs/CODEX_RUNNER.md`) |
+| `paused`, `ended` | Set aside in the agent list | Nothing |
+
+"Not listening for questions" in the detail means a panel agent here has no `agent inbox --wait` running: a question to it waits until its own next look.
+
 ## After the machine was off
 
 1. Log in and look:
@@ -276,3 +297,4 @@ sudo poweroff
 | Temperatures | `sensors` (package `lm-sensors`); `sudo nvme smart-log /dev/nvme0` (package `nvme-cli`) |
 | Dashboards | From the laptop: `make tunnel HOST=<user>@<node machine>`, then http://127.0.0.1:3001 |
 | The live tables | The `lpbot: live` dashboard: "Block age", "Blocks behind the head" and "Written"; `make watch-logs` |
+| The agents | `make agents`; the Now row of the `lpbot: agents` dashboard; changes of state in `logs/agent-refresh.log` |

@@ -102,8 +102,9 @@ pub fn schema_sql(table: &Table) -> Result<Vec<String>, LoadError> {
     Ok(statements)
 }
 
-/// The six result tables, the two agent tables, the two pool tables and
-/// the five live tables as SQL, for a database that has no runs yet.
+/// The six result tables, the two agent tables, the two pool tables, the
+/// five live tables and the supervisor table as SQL, for a database that
+/// has no runs yet.
 ///
 /// The viewer's dashboards query these tables. Creating them empty lets a
 /// fresh database show "no data" instead of an error. The same text is
@@ -114,10 +115,11 @@ pub fn full_schema_sql() -> String {
     tables.extend(agent_tables("", &[], &[]));
     tables.extend(pool_tables(&PoolInfo::default(), &[], &[]));
     let mut sql = String::from(
-        "-- The six result tables, the two agent tables, the two pool tables and the\n\
-         -- five live tables, empty. Generated from the table definitions in\n\
-         -- crates/sim/src/tables.rs, crates/sim/src/agent_tables.rs and\n\
-         -- crates/sim/src/live_tables.rs; do not edit by hand. To regenerate:\n\
+        "-- The six result tables, the two agent tables, the two pool tables, the\n\
+         -- five live tables and the supervisor table, empty. Generated from the\n\
+         -- table definitions in crates/sim/src/tables.rs, agent_tables.rs,\n\
+         -- live_tables.rs and supervisor_tables.rs; do not edit by hand. To\n\
+         -- regenerate:\n\
          --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file\n",
     );
     for table in &tables {
@@ -128,6 +130,7 @@ pub fn full_schema_sql() -> String {
         }
     }
     sql.push_str(&crate::live_db::live_schema());
+    sql.push_str(&crate::supervisor_tables::supervisor_schema());
     sql
 }
 
@@ -407,6 +410,15 @@ mod tests {
                 "CREATE TABLE IF NOT EXISTS {table} (pool text NOT NULL)"
             )));
             assert!(current.contains(&format!("CREATE UNIQUE INDEX IF NOT EXISTS {table}_key")));
+        }
+        // And the supervisor table, keyed by run, one row a run.
+        for table in crate::SUPERVISOR_TABLES {
+            assert!(current.contains(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (run_id text NOT NULL)"
+            )));
+            assert!(current.contains(&format!(
+                "CREATE UNIQUE INDEX IF NOT EXISTS {table}_key ON {table} (run_id)"
+            )));
         }
     }
 

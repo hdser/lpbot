@@ -106,3 +106,13 @@ if [[ -f "$DEPLOY/.env" ]]; then
 else
   echo "  not set up yet"
 fi
+
+echo
+echo "Agents"
+if [[ -x "$ROOT/target/release/lpbot" ]] &&
+  "$ROOT/target/release/lpbot" supervisor status --help >/dev/null 2>&1; then
+  (cd "$ROOT" && target/release/lpbot supervisor status --brief 2>/dev/null) | sed 's/^/  /' ||
+    echo "  could not read the agents' state"
+else
+  echo "  target/release/lpbot is not built with \`lpbot supervisor status\` yet"
+fi
