@@ -117,6 +117,14 @@ make watch                     # or: make watch ARGS="--once" to catch up, write
 
 ## A forward run in the agent mode
 
+For the separately owned Codex panel, the server scheduler, dedicated login,
+single-writer cutover and recovery procedure are in
+[CODEX_RUNNER.md](../docs/CODEX_RUNNER.md). Do not reuse Claude's session or
+decisions paths. A deployed CLI serializes finite lake jobs and releases
+its locks while waiting for a future look or board answer; older jobs already
+running at deployment must finish naturally before the new shared locking
+can protect a Codex cycle.
+
 A Claude Code session decides a run look by look at the head of the chain, on blocks no model has seen: `experiments/agent-usdc-weth-forward.yml`, USDC/WETH 0.05%, $10,000 in USDC, loss limit 20%. Before every look `lpbot agent next` brings the pool's events and the gas prices up to the node's head, and it shows a look only while the node is at the head. What it does and why is in `docs/DESIGN.md`, "Forward runs in the agent mode". The brief for the deciding session is `data/agent/BRIEF-forward.md` on the machine it runs on; like everything under `data/`, it is not committed.
 
 **Before it starts.**

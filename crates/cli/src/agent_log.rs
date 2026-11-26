@@ -199,7 +199,7 @@ impl Expectation {
             "low_pct": self.low_pct,
             "high_pct": self.high_pct,
             "confidence": self.confidence,
-            "text": self.text.trim(),
+            "text": self.text,
         })
     }
 
@@ -411,8 +411,8 @@ pub fn complete(record: &mut Value, decided: &Decided, written_unix: u64) {
         decision["upper_pct"] = json!(decided.upper_pct);
     }
     record["decision"] = decision;
-    record["note"] = json!(decided.note.trim());
-    record["reasoning"] = json!(decided.reasoning.trim());
+    record["note"] = json!(decided.note);
+    record["reasoning"] = json!(decided.reasoning);
     record["expect"] = decided.expect.to_json();
     record["stance"] = decided.stance.map_or(Value::Null, Stance::to_json);
     record["written_unix"] = json!(written_unix);
@@ -453,7 +453,7 @@ pub fn read_records(path: &Path) -> Result<Vec<Value>> {
 
 /// Appends records to a shared log file, one JSON object a line.
 pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
-    let mut content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut content = crate::agent_lock::read_optional(path)?;
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
@@ -464,7 +464,7 @@ pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
+    crate::agent_lock::atomic(path, content.as_bytes())
 }
 
 /// Seconds since 1970 on the wall clock: when a record was written, as
@@ -705,7 +705,7 @@ mod tests {
             42,
         );
         assert_eq!(record["decision"]["lower_pct"], -3.0);
-        assert_eq!(record["note"], "after a fall");
+        assert_eq!(record["note"], " after a fall ");
         assert_eq!(record["stance"]["toward"], "a");
         assert_eq!(record["expect"]["confidence"], 0.6);
 

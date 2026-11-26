@@ -368,6 +368,31 @@ All of these are the fixed starting point the calibrator has to beat, not tuned 
 
 In the agent mode one person or session decides a run. A panel puts several deciders on the same run, each in a run of its own: Claude Code sessions of different models, or people. Each publishes its reasoning for every look in a form the others and the tools can read. Every decision is scored afterwards against what happened and against the actions not taken. An agent can read the others' reasoning and decide its own way, and in forward and live runs it can ask them before it decides. One rule about time keeps this a test and not a leak, and the tools enforce it.
 
+**Server Codex coordinator.** `lpbot agent-runner <local-config.yml>` schedules an
+authorized virtual forward panel without a laptop wake-up. It pins both the
+experiment bytes and the resolved inputs, preserves the existing identities
+and decisions paths, and records the runtime/context transition. Each model
+call is a fresh, tools-disabled Codex CLI session outside the repository with
+only its generated brief and exact permitted look output. This panel uses
+passive peer records, without board advice. A persistent ownership fence
+excludes another writer; individual CLI mutations and finite history jobs use
+shared process locks, released before waiting for a future look. Old CLI jobs
+must drain naturally before those locks can protect a deployment.
+
+The coordinator records unchanged structured fields through `agent decide`,
+checking the exact pending look, its information boundary and freshness under
+the mutation lock. Decisions and pending/log replacements are durable atomic
+writes. An interrupted recording is reconciled against canonical decisions and
+the matching reasoning record; a committed action without its audit stops
+the identity for inspection instead of being submitted again. Long operations
+run in uniquely named owned tmux jobs with exact output and exit status.
+Blind-first review follows the manual two-stage workflow after submission so
+review latency does not age the action. Its independent assessment is sealed
+before disclosure of the author; no outcome or review enters an active
+decider. A failed review remains queued before that identity decides again.
+Daily reporting stays separate from inference and does not turn incomplete
+horizons into completed observations. See [CODEX_RUNNER.md](CODEX_RUNNER.md).
+
 **Roles.**
 
 | Role | Who | Does | Reads |
@@ -414,6 +439,16 @@ Other kinds share the schema and the rule below: `eval`, from the scorer; `ask` 
 
 - `agent next` prints, after the look, the peers' records as of *t* or earlier that its earlier looks were not handed, among them the scores of the peers' earlier decisions whose horizon has passed, and records a peer that was behind has written since;
 - `agent peers` prints all of them again, up to the look waiting for a decision.
+
+Scores must also be complete before handover: a fixed horizon covers its full
+requested duration, and `next` has a committed successor decision at the exact
+scored endpoint. A pending successor, truncated terminal window, malformed
+maturity metadata or unterminated record is not evidence of completion.
+Re-evaluation records actual elapsed seconds and an explicit completion flag;
+the handover independently verifies these against its time boundary and the
+peer's committed log. Legacy provisional handover references cannot suppress
+a later mature replacement. Partial rows may remain in reporting files and
+unfiltered dashboard aggregates, where they must be labelled separately.
 
 Records are shown by look number, day in the run and how long before the current look, never by time or block. Their prices stay in percent from the price at their own look. A handover therefore tells no more about the date than the agent's own look does. A peer that is behind (a backtest run at the same time, or a run not yet finished) shows fewer records, never later ones. A run can read an agent of an earlier panel by the same rule: it is handed that agent's records as of before each look, which is all of them once the earlier window ended before the new one began.
 

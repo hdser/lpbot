@@ -223,6 +223,7 @@ fn note_read(who: &Identity, records: &[&Value]) -> Result<()> {
     if records.is_empty() {
         return Ok(());
     }
+    let _command = crate::agent_lock::command(&who.decisions)?;
     let Ok(mut waiting) = read_pending(&who.decisions) else {
         return Ok(());
     };
