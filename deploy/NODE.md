@@ -13,7 +13,7 @@ What follows was checked against the machine on 25 November 2026. Figures dated 
 1. **sudo is the owner's.** It asks for the owner's password (`sudo -n true` answers `interactive authentication is required`). Give the owner the command to type, with what it does. Setting turbo off after a restart is the usual one (see "How to check health").
 2. **Secrets stay unprinted.** `deploy/.env` holds `POSTGRES_PASSWORD` and `GRAFANA_PASSWORD`, and `deploy/jwt/jwt.hex` is the engine secret shared by Reth and Lighthouse. Read them only inside the command that uses them, as `$(sed -n 's/^POSTGRES_PASSWORD=//p' deploy/.env)`, and never `cat`, `grep`, `echo` or print them. `make grafana-password` prints one: it is for the owner, not for a session.
 3. **Never type the Grafana password into a browser**, the app's own or Chrome. If a dashboard has to be looked at, ask the owner to log in, or read the same tables with SQL (below). `/api/health` needs no login.
-4. **New Postgres tables need the owner's yes.** The viewer knows the fifteen tables listed below and no others.
+4. **New Postgres tables need the owner's yes.** The viewer knows the sixteen tables listed below and no others.
 5. **Long jobs go in `tmux`**, one session per job, named after it. Never `tmux kill-server`, and never type into, kill or attach to a session you did not start. The `agent` session belongs to a run in progress.
 6. **Containers only through the compose file in `~/lpbot`.** Never `up` the compose file of another checkout: it recreates Reth with an empty engine-secret folder (it happened on 20 November 2026). To try a branch's service, build its image and start that container on its own (`docker run`, or `--no-deps` with `--project-directory ~/lpbot/deploy`). Ask the owner before anything that stops or recreates Reth, Lighthouse or Postgres (`make down`, `make up` after a change to `deploy/.env`, an `up` without `--no-deps`).
 7. **The CPU runs hot.** Build with `CARGO_BUILD_JOBS=2`; the variable is not set in any shell there, so put it on the command each time. Keep turbo off, and do not start a heavy job while another runs.
@@ -152,6 +152,8 @@ On `main`, at the commit the owner last pulled. It fetches from GitHub over SSH 
 | `logs/` | `gates-<time>.log`, the whole output of each `make gates` (UTC time in the name). Beside them, logs kept by hand: `make-gates-<time>.log`, `history-<time>.log`, `build-lpbot.log` |
 | `runs/` | Result tables as Parquet, one folder per table (`runs/runs`, `runs/campaigns`, `runs/decisions`, `runs/series`, `runs/pool_rank`, `runs/zone_map`), one file per run, `<experiment>-<nnn>-<hash>.parquet`; `runs/calibration/` holds the YAML reports of `make calibrate`. Other runs write to `--results-dir runs/<name>` |
 | `data/agent/` | Agent runs, one set of files per agent beside its decisions file `<name>.jsonl`: `<name>.jsonl.pending` (the look waiting for a decision), `<name>.log.md` (the reasoning log), `<name>.log.jsonl` (the shared record of each look), `<name>.eval.jsonl` (the scores from `agent evaluate`). A panel has its own folder, `data/agent/<panel>/`, with the panel's `board.jsonl` (questions and answers). On 25 November 2026 only `data/agent/panel-forward/` is there, for a run in progress |
+| `data/agents/agents.yml` | The agent list for `lpbot supervisor status`: every forward panel and agent, what runs each one and where, whether a session here keeps `agent next --wait`, and agents paused or ended with why. The example is `deploy/agents/agents.example.yml`. Without it the status still shows every open panel with decisions |
+| `logs/.agent-status-state.json` | The status's memory between passes: when each look was first seen shown, and the states last logged |
 
 `lpbot` itself takes its inputs from flags or the environment: `LPBOT_DATA_DIR` for the stored history (else `data/lake`), `LPBOT_RPC` for the node (else the config's `http://127.0.0.1:8545`), `LPBOT_DB_URL` for Postgres. The make targets set `LPBOT_DATA_DIR` and `LPBOT_DB_URL` from `deploy/.env`; for `target/release/lpbot` run by hand, `export LPBOT_DATA_DIR=/data/lpbot/lake`.
 
@@ -181,7 +183,7 @@ The lake, `/data/lpbot/lake`:
 
 ### Postgres
 
-Database and user `lpbot`. Fifteen tables, created empty by the start-up script from `deploy/postgres/schema.sql` (generated from `lpbot_sim::tables` and kept in step by a test):
+Database and user `lpbot`. Sixteen tables, created empty by the start-up script from `deploy/postgres/schema.sql` (generated from `lpbot_sim::tables` and kept in step by a test):
 
 | Tables | Written by |
 | --- | --- |
@@ -189,6 +191,7 @@ Database and user `lpbot`. Fifteen tables, created empty by the start-up script 
 | The two pool tables: `pool_series`, `pool_liquidity` | `make pool-stats`, then `make load` |
 | The five live tables: `live_pools`, `live_pool_series`, `live_liquidity`, `live_swaps`, `live_positions` | The watcher, continuously |
 | The two agent tables: `agent_looks`, `agent_scores` | `lpbot run` on an agent experiment, then `make load RESULTS=runs/<name>`. For the forward panels, cron does it (`crontab -l`): `deploy/agents/refresh.sh --looks` every minute (the looks, from the logs) and `deploy/agents/refresh.sh` hourly (scores and results); its log is `logs/agent-refresh.log` |
+| The supervisor table: `agent_status` | `lpbot supervisor status --load`, at the end of every per-minute `deploy/agents/refresh.sh --looks`: every forward agent's state now, all rows replaced each time |
 
 ### Grafana
 
@@ -219,6 +222,7 @@ What it looked like on 25 November 2026 is the yardstick.
 | Reth's log | `$C logs --no-color --tail 50 reth` | `Block added to canonical chain` and `Canonical chain committed` every 12 s. While catching up, batches of `Headers`, `Bodies`, `Execution`, `MerkleExecute`, `Finish` instead |
 | Lighthouse's log | `$C logs --no-color --tail 50 lighthouse` | `Synced` with a peer count, `New block received`. `Low peer count` or `Stalled` means the internet is down |
 | The watcher's log | `$C logs --no-color --tail 20 watcher` | `block N (0 behind the head, M past the finalized), ...` |
+| Every agent waiting, deciding or paused | `make agents` (or the Agents section of `make status`, or the Now row of the `lpbot: agents` dashboard). The same in SQL: `select agent, state, detail, extract(epoch from now())::bigint - checked as checked_s from agent_status order by agent;` | No agent in red (late, no waiter, stopped, failing, scheduler down); checked within the last minute or two. [RUNBOOK.md](RUNBOOK.md), "Is every agent working?", says what to do for each state |
 | Metrics | `curl -s http://127.0.0.1:9090/api/v1/targets` | Both targets `"health":"up"` |
 | Heat | `sensors` | The `coretemp` package at about 50 °C idle, 90 to 100 °C under load. It prints `ALARM (CRIT)` beside every core even at 50 °C: read the temperatures, not the flag. NVMe `Composite` about 40 °C |
 | Turbo | `cat /sys/devices/system/cpu/intel_pstate/no_turbo` | `1`. A restart sets it back to `0`; the owner turns it off again with `echo 1 \| sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo` |

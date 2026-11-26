@@ -8,6 +8,9 @@
 #   deploy/agents/refresh.sh --looks [experiment.yml ...]
 #       loads only the looks decided since the last load, with their
 #       reasoning (`lpbot load-looks`), without replays: every minute.
+#       With no experiment named, it then writes every agent's state now
+#       (`lpbot supervisor status --load`) for the dashboard's Now row, and
+#       logs a line for each agent whose state changed.
 #
 # With no experiment named, every experiment under experiments/ whose window
 # is open at the end (`to: open`) and one of whose decisions files exists.
@@ -60,6 +63,7 @@ if [ -z "${LPBOT_DB_URL:-}" ]; then
 fi
 
 # The forward panels with decisions on disk.
+named=$#
 if [ $# -eq 0 ]; then
   for exp in experiments/*.yml; do
     # A server runner owns this panel's daily evaluation/replay policy.
@@ -90,6 +94,15 @@ if [ "$mode" = looks ]; then
     printf '%s\n' "$out" | grep -v 'already loaded' | grep . |
       while IFS= read -r line; do echo "$(stamp) $stem: $line"; done
   done
+  # Every agent's state now, whatever runs it. A binary built before the
+  # command existed is skipped quietly.
+  if [ "$named" -eq 0 ] && "$lpbot" supervisor status --help >/dev/null 2>&1; then
+    if ! out=$("$lpbot" supervisor status --load --changes 2>&1); then
+      status=1
+    fi
+    printf '%s\n' "$out" | grep . |
+      while IFS= read -r line; do echo "$(stamp) $line"; done
+  fi
   exit $status
 fi
 

@@ -1,7 +1,8 @@
--- The six result tables, the two agent tables, the two pool tables and the
--- five live tables, empty. Generated from the table definitions in
--- crates/sim/src/tables.rs, crates/sim/src/agent_tables.rs and
--- crates/sim/src/live_tables.rs; do not edit by hand. To regenerate:
+-- The six result tables, the two agent tables, the two pool tables, the
+-- five live tables and the supervisor table, empty. Generated from the
+-- table definitions in crates/sim/src/tables.rs, agent_tables.rs,
+-- live_tables.rs and supervisor_tables.rs; do not edit by hand. To
+-- regenerate:
 --   LPBOT_WRITE_SCHEMA=1 cargo test -p lpbot-sim schema_file
 
 CREATE TABLE IF NOT EXISTS runs (run_id text NOT NULL);
@@ -384,3 +385,36 @@ ALTER TABLE live_positions ADD COLUMN IF NOT EXISTS updated bigint;
 CREATE INDEX IF NOT EXISTS live_positions_pool ON live_positions (pool);
 CREATE UNIQUE INDEX IF NOT EXISTS live_positions_key ON live_positions (pool, position_id);
 ALTER TABLE live_positions SET (fillfactor = 70);
+
+CREATE TABLE IF NOT EXISTS agent_status (run_id text NOT NULL);
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS run_id text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS experiment text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS agent text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS model text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS runner text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS place text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS state text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS detail text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS listed boolean;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS looks bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_number bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_time bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_action text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_range text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS due bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS first_shown bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS waiter_kind text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS waiter_pid bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS waiter_until bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS listening boolean;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS owner text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS owner_since bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS scheduler text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS scheduler_seen bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS runner_phase text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS stopped boolean;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_error text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS expected bigint;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS checked bigint;
+CREATE INDEX IF NOT EXISTS agent_status_run_id ON agent_status (run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_status_key ON agent_status (run_id);

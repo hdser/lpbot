@@ -12,6 +12,8 @@ pub mod engine;
 pub mod live_db;
 pub mod live_tables;
 pub mod loader;
+pub mod supervisor_db;
+pub mod supervisor_tables;
 pub mod tables;
 
 pub use live_tables::LIVE_TABLES;
@@ -37,3 +39,8 @@ pub const POOL_TABLES: [&str; 2] = ["pool_series", "pool_liquidity"];
 /// run's looks showed, decided and expected, and how its decisions scored
 /// (`agent_tables`). Only agent runs write them.
 pub const AGENT_TABLES: [&str; 2] = ["agent_looks", "agent_scores"];
+
+/// The supervisor tables: what every forward agent is doing now, written
+/// by `lpbot supervisor status --load` (`supervisor_tables`). Keyed by run,
+/// with every row replaced at each pass.
+pub const SUPERVISOR_TABLES: [&str; 1] = ["agent_status"];

@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next load pool-stats watch watch-build watch-start watch-stop watch-logs
+.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next agents load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -134,6 +134,11 @@ calibrate:
 AGENT ?= experiments/agent-usdc-weth-forward.yml
 agent-next:
 	cargo run --release -p lpbot -- agent next $(AGENT) $(ARGS)
+
+## Every forward agent: its state, its next look and what schedules it.
+agents:
+	@test -x target/release/lpbot || { echo "build it first: CARGO_BUILD_JOBS=2 cargo build --release -p lpbot"; exit 1; }
+	target/release/lpbot supervisor status $(ARGS)
 
 ## Load the result tables under RESULTS into Postgres, for the dashboards.
 ## Safe to run again: a run that is loaded twice replaces itself.

@@ -32,6 +32,9 @@ mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
+mod supervisor_list;
+mod supervisor_procs;
+mod supervisor_status;
 mod watch_cmd;
 mod zones_cmd;
 
@@ -118,6 +121,18 @@ enum Command {
     /// the live tables in Postgres current: price, liquidity, swaps, minute
     /// rows and every position. Runs until stopped.
     WatchPools(WatchPoolsArgs),
+    /// Watch the agents: what every forward agent is doing now and whether
+    /// anything will wake it for its next look.
+    #[command(subcommand)]
+    Supervisor(SupervisorCommand),
+}
+
+#[derive(Subcommand)]
+enum SupervisorCommand {
+    /// Every forward agent on this machine: its state, its next look,
+    /// what waits for it and what schedules it. `--load` writes the
+    /// agent_status table for the agents dashboard.
+    Status(supervisor_status::Args),
 }
 
 #[derive(Args)]
@@ -1292,6 +1307,7 @@ fn real_main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Supervisor(SupervisorCommand::Status(args)) => supervisor_status::run(&args),
         Command::WatchPools(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
             let chain =

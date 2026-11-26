@@ -124,9 +124,366 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above, then **click an agent's name** in the first table to set the time range to its window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`."
+        "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above, then **click an agent's name** in the first table to set the time range to its window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`. The **Now** row shows every forward agent's state at this minute, from `lpbot supervisor status --load`, which `deploy/agents/refresh.sh --looks` runs every minute."
       },
       "id": 1
+    },
+    {
+      "type": "row",
+      "title": "Now",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 11
+    },
+    {
+      "type": "table",
+      "title": "Every agent now",
+      "description": "Every forward agent on the node, from `lpbot supervisor status`, checked every minute. Lateness counts from the look's due time. Next look: seconds until it is due, negative when it is overdue. Scheduler is kept apart from the agent: a waiting process or a runner's files show activity, not health. Red states need someone; deploy/RUNBOOK.md, \"Is every agent working?\", says what to do. Click an agent to see its runs below.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select agent, model, experiment, runner, state,\n  due - extract(epoch from now())::bigint as \"next look\",\n  to_timestamp(last_time) as \"last look\",\n  coalesce(last_action || coalesce(' ' || last_range, ''), 'none') as \"last decision\",\n  listening, detail, scheduler, run_id\nfrom agent_status\norder by case when state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, experiment, agent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show this agent's runs",
+                    "url": "/d/lpbot-agents?var-experiment=${__data.fields.experiment}&var-run=${__data.fields.run_id}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "waiting": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "unverified": {
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "deciding": {
+                        "color": "blue",
+                        "index": 2
+                      },
+                      "due": {
+                        "color": "orange",
+                        "index": 3
+                      },
+                      "late": {
+                        "color": "red",
+                        "index": 4
+                      },
+                      "no waiter": {
+                        "color": "red",
+                        "index": 5
+                      },
+                      "stopped": {
+                        "color": "red",
+                        "index": 6
+                      },
+                      "failing": {
+                        "color": "red",
+                        "index": 7
+                      },
+                      "scheduler down": {
+                        "color": "red",
+                        "index": 8
+                      },
+                      "paused": {
+                        "color": "text",
+                        "index": 9
+                      },
+                      "ended": {
+                        "color": "text",
+                        "index": 10
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "next look"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "detail"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm"
+      },
+      "id": 12
+    },
+    {
+      "type": "stat",
+      "title": "Late, stopped or failing",
+      "description": "Agents in a red state: late, no waiter, stopped, failing or scheduler down.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) as value from agent_status where state in ('late','no waiter','stopped','failing','scheduler down')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "text": {
+          "valueSize": 26
+        }
+      },
+      "id": 13
+    },
+    {
+      "type": "stat",
+      "title": "Status checked",
+      "description": "How long ago the status was last written. Orange past 3 minutes, red past 10 minutes or when there is no status at all: then nothing here is current, and the cron line or the binary needs a look.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 12,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(checked), 999999) as value from agent_status"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 180
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "text": {
+          "valueSize": 26
+        }
+      },
+      "id": 14
+    },
+    {
+      "type": "table",
+      "title": "Schedulers",
+      "description": "What schedules the agents' looks, and when it last showed it was working: a session's process, or lpbot agent-runner's process and saved state. Activity, not proof of health.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 12,
+        "w": 14,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select scheduler, string_agg(agent, ', ' order by agent) as agents,\n  to_timestamp(max(scheduler_seen)) as \"last seen\"\nfrom agent_status group by scheduler order by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm"
+      },
+      "id": 15
     },
     {
       "type": "row",
@@ -134,7 +491,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 3,
+        "y": 16,
         "w": 24,
         "h": 1
       },
@@ -151,7 +508,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 4,
+        "y": 17,
         "w": 24,
         "h": 6
       },
@@ -338,7 +695,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 10,
+        "y": 23,
         "w": 24,
         "h": 7
       },
@@ -467,7 +824,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 17,
+        "y": 30,
         "w": 12,
         "h": 9
       },
@@ -519,7 +876,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 17,
+        "y": 30,
         "w": 12,
         "h": 9
       },
@@ -609,7 +966,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 39,
         "w": 12,
         "h": 8
       },
@@ -661,7 +1018,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 26,
+        "y": 39,
         "w": 12,
         "h": 8
       },
@@ -693,7 +1050,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 47,
         "w": 24,
         "h": 1
       },
@@ -710,7 +1067,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 48,
         "w": 24,
         "h": 22
       },

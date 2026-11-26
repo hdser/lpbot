@@ -493,6 +493,19 @@ Advice in a backtest would leak, because an answerer at a later look knows what 
 - Clean or not: a backtest before a model's training cutoff counts as practice and is labelled so in any comparison. Forward runs are the test.
 - Where it goes: the panel's files under `data/agent/<panel>/` (local, never committed). `lpbot run` on the experiment writes each agent's run as the six tables, plus two agent tables keyed by run, built from those files: `agent_looks`, one row a look (what it saw, decided, expected and why, its stance and the peers' records it was handed), and `agent_scores`, one row a decision and horizon (the decision, cash and holding, the best, the regret, what price did, whether the band held). Score with `agent evaluate` before `lpbot run`, then `lpbot load-results` (`make load`). Grafana reads only Postgres, so a forward panel is loaded on a schedule: `lpbot load-looks <experiment>` puts each agent's decided looks, with their reasoning, from its log into `agent_looks` without any replay, and only when they differ from what is loaded, so it runs every minute; the results and scores, which need the replays, follow hourly (`deploy/agents/refresh.sh`, `deploy/RUNBOOK.md`). The log files stay the record: the database is a copy for the viewer, and no agent session writes to it or reads it. The `lpbot: agents` dashboard shows the agents of an experiment side by side: their results and drawdowns, their scores by horizon, their equity and ranges over the price, each decision against cash, their stances toward their peers, and every look with its reasoning, scored over the agent's next look. Entries and exits are marked on the charts.
 
+### Watching the agents
+
+Agents run in different ways: an interactive session in tmux that keeps its own `agent next --wait` between looks, a session on another machine, `lpbot agent-runner`. `lpbot supervisor status` shows every forward agent on the machine in one table, whatever runs it, from what is on disk and what runs: the decisions (the canonical due time of the next look, `at` or the look plus `next`, or the window's start before the first decision), the pending look, the ownership fence, the runner's state file, the agent processes in `/proc` (`agent next --wait`, `agent inbox --wait`, `agent answers --wait`, any other agent command), and the agent list.
+
+- **Activity is not health.** A waiting process, a fence or a saved runner state shows that something ran, not that a scheduler works; fences outlive a crash on purpose. So the scheduler has its own column (a session's process, or the runner's process and when it last saved its state), and an agent held by a fence whose runner is not running is `scheduler down`. An agent run from elsewhere with nothing here to show its waker is `unverified`.
+- **Lateness counts from the due time.** Showing a look again rewrites its pending file and its `at`; neither resets how late it is. The status remembers when it first saw each look shown (`logs/.agent-status-state.json`) and reports it beside.
+- **States:** `waiting`, `unverified`, `deciding` (shown, or waiting for answers until the questions' deadline, which the board holds), `due` (within the grace, 10 minutes by default), `late`, `no waiter` (a session here with no `agent next --wait` lasting until its look), `stopped` (the runner's `stopped`, with its phase), `failing`, `scheduler down`, `paused`, `ended`. `waiting`, `unverified`, `deciding`, `due`, `paused` and `ended` need no one; the others need someone, and the dashboard shows them in red.
+- **The agent list,** `data/agents/agents.yml` (local; example `deploy/agents/agents.example.yml`), adds what the files cannot tell: agents that have not decided yet (so a panel that never starts still shows), what runs each one and where, `waits_here` for a session on this machine, the board on or off, the runner's state file, and agents `paused` or `ended` with a reason. Keys it does not use are kept for the supervisor.
+- **Where it goes:** `--load` replaces every row of `agent_status` in one transaction under an advisory lock; `deploy/agents/refresh.sh --looks` does it every minute and logs each change of state. The fence's token is never read into any output.
+- It sits outside `lpbot agent`, like `load-looks`, so a decider allowed only the agent commands cannot see every agent's state now, outside the rule about time.
+
+The supervisor that comes next runs every agent the same way, one fresh tool-less model call a look with every job recorded, generalising `lpbot agent-runner`; until it exists, the status watches the agents however they run.
+
 ## Strategy framework
 
 A strategy only declares the positions it wants; sizing limits, transaction building and safety live outside it. That separation is what makes strategies small, testable and swappable from config.
@@ -820,6 +833,7 @@ risk:
 | `lpbot calibrate <experiment.yml>` | Fits the adaptive decision's settings on one window and scores them on the next against the three fixed rules, fold after fold. Says which ships and writes it to `<results>/calibration/` |
 | `lpbot load-results` | Loads the result tables into Postgres for the viewer. Tables are created from the files, and a run loaded twice replaces itself |
 | `lpbot load-looks <experiment.yml>` | Loads each agent's decided looks from its log into `agent_looks`, without replays, when they differ from what is loaded: the agents dashboard every minute |
+| `lpbot supervisor status [--load] [--brief] [--json]` | Every forward agent on the machine: its state, its next look's due time, what waits for it and what schedules it; `--load` replaces `agent_status`, `--changes` prints only the agents whose state changed ("Watching the agents") |
 | `lpbot watch-pools` | Follows the stored pools from the node block by block and keeps the live tables current; the watcher service runs it. `--from <date>` follows positions from a later snapshot, `--rebuild` replays the stored history again, `--once` stops at the head |
 | `lpbot run <experiment.yml>` | Runs one experiment file, or every run of its sweep, on the stored history and writes the result tables. Backtests run today, with the adaptive decision or a fixed rule |
 | `lpbot paper` --loss-limit \<pct> --autonomy \<mode> | Runs on live data with virtual positions |
@@ -913,6 +927,12 @@ The value held by positions leaves out fees earned but not collected, which a po
 
 A position NFT is `nft-<token>`. A pool position is its owner, range and the block its liquidity came in, so the many positions some owners open and close in a single block each keep a row. A position is written when an event touches it, and every minute when swaps went through its range since the last minute, even if the price has left it again: its fees and holdings moved. What it could collect is therefore at most a minute behind the chain; checked on 20 November 2026 against the position manager's own `collect` called as the owner, NFTs out of range agreed to the last unit.
 
+**What the status writes.** One supervisor table, keyed by run, every row replaced at each pass, so it holds the present only:
+
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `agent_status` | Forward agent run | Experiment, agent, model, what runs it and where, its state and a sentence about it, whether the agent list names it, looks decided and the last one (number, time, action, range), the next look's due time, when the look waiting was first seen shown, the process waiting for it (kind, id, until when), whether it listens for questions, the fence's holder and since when (never its token), the scheduler and when it was last seen working, the runner's phase, stop and last error, how many agents the pass found, and when it was checked |
+
 **The viewer.** It is generic because it knows only these tables, never a particular experiment. A new strategy or sweep needs no new charts. My choice is Grafana, since it is already in the stack for monitoring; a small web page served by the bot itself is the alternative if you prefer no extra tool.
 
 | View | Shows |
@@ -924,6 +944,7 @@ A position NFT is `nft-<token>`. A pool position is its owner, range and the blo
 | Pools and zones | The ranking table through time; the zone map as a heat map |
 | Pool | One pool over its history: price, value held by positions, volume, fees, volume over value held, active liquidity; the liquidity around the price now as stacked bars by token held, and over time as a heat map. The run detail shows the same heat map for the run's pool under the price and range |
 | Live | Every followed pool now, then one pool: price, value held, volume and fees over the last hour and day, active liquidity, positions open and in range, the share of liquidity attributed, how far behind the head the watcher is and when it last wrote; price, volume, liquidity, fees and events minute by minute; the liquidity near and around the price now; every open position with its NFT (linked to the Uniswap app), owner, range, value, what it could collect and fees earned; recent swaps and recently closed positions. Refreshes every ten seconds. The running bot's own views and safety status come with paper mode |
+| Agents | Every forward agent now: its state in colour, its next look, its last decision, what waits for it and what schedules it, with the count of agents needing someone and how long ago the status was checked; then the agents of an experiment side by side, their scores, ranges and reasoning |
 
 Backtest, simulation and live runs appear in the same views, so a live run can be laid directly over the simulation it came from.
 
