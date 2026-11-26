@@ -40,6 +40,8 @@ pub struct Config {
     pub agents: Vec<Agent>,
     pub state_dir: PathBuf,
     pub codex: PathBuf,
+    pub codex_exec: PathBuf,
+    pub codex_exec_sha256: String,
     pub codex_home: PathBuf,
     #[serde(default = "results_default")]
     pub results_dir: PathBuf,
@@ -353,6 +355,13 @@ fn validate(config: &Config) -> Result<Vec<lpbot_core::ResolvedRun>> {
 }
 
 fn prerequisites(config: &Config) -> Result<()> {
+    codex_worker::verify_host_digest(&config.codex_exec, &config.codex_exec_sha256)?;
+    let ceiling = Command::new(&config.codex_exec)
+        .arg("--lpbot-tools-off")
+        .output()?;
+    if !ceiling.status.success() || ceiling.stdout != b"lpbot-codex-tools-off/1\n" {
+        bail!("the configured exec is not the reviewed empty-tools host; build the pinned host before activation");
+    }
     if !config.codex.is_absolute() {
         bail!("codex must be an absolute, reviewed executable path");
     }
@@ -728,7 +737,8 @@ fn agent_args(config: &Config, agent: &Agent, command: &str) -> Vec<String> {
 
 #[derive(Serialize, Deserialize)]
 struct ModelJob {
-    codex: PathBuf,
+    codex_exec: PathBuf,
+    codex_exec_sha256: String,
     home: PathBuf,
     artifacts: PathBuf,
     prompt: String,
@@ -741,7 +751,8 @@ pub fn model_job(path: &Path) -> Result<()> {
     let timeout = Duration::from_secs(spec.timeout);
     let value = if let Some(schema) = &spec.schema {
         codex_worker::run_json(
-            &spec.codex,
+            &spec.codex_exec,
+            &spec.codex_exec_sha256,
             &spec.home,
             &spec.artifacts,
             &spec.prompt,
@@ -750,7 +761,8 @@ pub fn model_job(path: &Path) -> Result<()> {
         )?
     } else {
         response_json(&codex_worker::run(
-            &spec.codex,
+            &spec.codex_exec,
+            &spec.codex_exec_sha256,
             &spec.home,
             &spec.artifacts,
             &spec.prompt,
@@ -769,7 +781,8 @@ fn infer(config: &Config, prompt: &str, artifacts: &Path, schema: Option<Value>)
     agent_lock::atomic(
         &path,
         &serde_json::to_vec(&ModelJob {
-            codex: config.codex.clone(),
+            codex_exec: config.codex_exec.clone(),
+            codex_exec_sha256: config.codex_exec_sha256.clone(),
             home: config.codex_home.clone(),
             artifacts: artifacts.into(),
             prompt: prompt.into(),

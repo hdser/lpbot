@@ -372,8 +372,11 @@ In the agent mode one person or session decides a run. A panel puts several deci
 authorized virtual forward panel without a laptop wake-up. It pins both the
 experiment bytes and the resolved inputs, preserves the existing identities
 and decisions paths, and records the runtime/context transition. Each model
-call is a fresh, tools-disabled Codex CLI session outside the repository with
-only its generated brief and exact permitted look output. This panel uses
+call is a fresh Codex exec session outside the repository with only its
+generated brief and exact permitted look output. A separately pinned host
+inserts an unconditional empty startup tool policy; stock CLI feature flags
+alone do not establish that boundary. The coordinator verifies the host's
+binary checksum and build marker before inference. This panel uses
 passive peer records, without board advice. A persistent ownership fence
 excludes another writer; individual CLI mutations and finite history jobs use
 shared process locks, released before waiting for a future look. Old CLI jobs

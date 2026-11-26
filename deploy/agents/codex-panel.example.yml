@@ -18,6 +18,10 @@ results_dir: runs/your-codex-panel-forward
 # Use the actual installed executable; the service does not load a login shell.
 # Pin a CLI build whose clean-worker options have been verified before cutover.
 codex: /home/<user>/.local/bin/codex
+# Dedicated pinned codex-exec with the reviewed startup empty-tool policy.
+# Stock codex exec is refused. See deploy/codex-host and docs/CODEX_RUNNER.md.
+codex_exec: /home/<user>/lpbot/data/codex/runtime/tools-off/lpbot-codex-exec
+codex_exec_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
 # A dedicated home, authenticated by the owner. Do not copy personal credentials.
 codex_home: /home/<user>/.local/share/lpbot-codex
 poll_seconds: 30

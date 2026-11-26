@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const MIN_CADENCE: u64 = 15 * 60;
 static JOB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -99,6 +100,7 @@ fn decision_schema() -> Value {
 /// Runs one clean decider and validates its structured decision.
 pub fn run(
     codex: &Path,
+    expected_sha256: &str,
     codex_home: &Path,
     work_dir: &Path,
     prompt: &str,
@@ -106,6 +108,7 @@ pub fn run(
 ) -> Result<Response> {
     let value = run_json(
         codex,
+        expected_sha256,
         codex_home,
         work_dir,
         prompt,
@@ -127,6 +130,7 @@ pub fn run(
 /// directory, removed after the invocation. No home contents are copied.
 pub fn run_json(
     codex: &Path,
+    expected_sha256: &str,
     codex_home: &Path,
     work_dir: &Path,
     prompt: &str,
@@ -140,12 +144,19 @@ pub fn run_json(
     if !codex.is_absolute() {
         bail!("Codex executable must be an absolute path; resolve it before starting a worker");
     }
+    verify_host_digest(codex, expected_sha256)?;
     let codex_home = fs::canonicalize(codex_home).context("open isolated Codex home")?;
     let auth = codex_home.join("auth.json");
     if !fs::metadata(&auth).is_ok_and(|m| m.is_file() && m.len() > 0) {
         bail!("isolated Codex home has no authentication; sign in to its CODEX_HOME first");
     }
     let job = fresh_job(work_dir)?;
+    fs::write(
+        job.join("host.json"),
+        serde_json::to_vec_pretty(&json!({
+            "exec_path":codex,"sha256":expected_sha256,"required_policy":"startup allowed_tools=[]",
+        }))?,
+    )?;
     let session = SessionDir::new()?;
     let result = run_job(
         codex,
@@ -165,6 +176,19 @@ pub fn run_json(
         )?;
     }
     result.with_context(|| format!("Codex worker artifacts: {}", job.display()))
+}
+
+pub fn verify_host_digest(host: &Path, expected_sha256: &str) -> Result<()> {
+    if !host.is_absolute() || expected_sha256.len() != 64 {
+        bail!("configure the absolute tools-off host path and its verified SHA-256");
+    }
+    let actual = hex::encode(Sha256::digest(
+        fs::read(host).context("read pinned tools-off host")?,
+    ));
+    if actual != expected_sha256 {
+        bail!("tools-off host checksum mismatch; inference refused");
+    }
+    Ok(())
 }
 
 fn fresh_job(parent: &Path) -> Result<PathBuf> {
@@ -235,6 +259,19 @@ fn run_job(
     fs::write(job.join("schema.json"), serde_json::to_vec_pretty(schema)?)?;
     // Keep even a missing/partial final response as an artifact.
     File::create(job.join("response.json"))?;
+    let mut capabilities = command(codex, codex_home, session);
+    capabilities.arg("--lpbot-tools-off").stdin(Stdio::null());
+    let status = capture(
+        &mut capabilities,
+        job,
+        "capabilities",
+        timeout.min(Duration::from_secs(10)),
+    )?;
+    if !status.success()
+        || fs::read_to_string(job.join("capabilities.stdout"))? != "lpbot-codex-tools-off/1\n"
+    {
+        bail!("the pinned executable is not the reviewed tools-off host; inference refused");
+    }
     let mut version = command(codex, codex_home, session);
     version.arg("--version").stdin(Stdio::null());
     let version_status = capture(
@@ -251,7 +288,6 @@ fn run_job(
         .context("Codex worker timed out")?;
     let mut exec = command(codex, codex_home, session);
     exec.args([
-        "exec",
         "--ignore-user-config",
         "--ignore-rules",
         "--ephemeral",
@@ -287,9 +323,9 @@ fn run_job(
         "skill_mcp_dependency_install",
         "in_app_browser",
     ] {
-        exec.args(["--disable", feature]);
+        exec.args(["-c", &format!("features.{feature}=false")]);
     }
-    exec.args(["--enable", "skip_host_skill_discovery"]);
+    exec.args(["-c", "features.skip_host_skill_discovery=true"]);
     for setting in [
         "web_search=\"disabled\"",
         "agents.enabled=false",
@@ -298,6 +334,7 @@ fn run_job(
         "project_doc_fallback_filenames=[]",
         "approval_policy=\"never\"",
         "cli_auth_credentials_store=\"file\"",
+        "suppress_unstable_features_warning=true",
     ] {
         exec.args(["-c", setting]);
     }
@@ -453,6 +490,8 @@ fn write_provenance(job: &Path, session: &Path) -> Result<()> {
         job.join("provenance.json"),
         serde_json::to_vec_pretty(&json!({
             "cli_version_output": version, "models_reported_by_cli": models,
+            "tools_off_host_marker": fs::read_to_string(job.join("capabilities.stdout"))?,
+            "tool_policy_allowed_tools": [],
             "model_override": null, "fresh_session": true, "stateless_context": true,
             "context_source": "supplied prompt only", "resumed_session": false,
             "temporary_cwd": session, "temporary_home": session.join("home"),
@@ -463,22 +502,34 @@ fn write_provenance(job: &Path, session: &Path) -> Result<()> {
 }
 
 fn audit_events(job: &Path) -> Result<()> {
+    let mut completed = false;
     for line in BufReader::new(File::open(job.join("stdout.jsonl"))?).lines() {
         let value: Value =
             serde_json::from_str(&line?).context("Codex stdout contains a malformed JSON event")?;
-        if value
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t.starts_with("item."))
-        {
-            let kind = value
-                .get("item")
-                .and_then(|i| i.get("type"))
-                .and_then(Value::as_str);
-            if !matches!(kind, Some("agent_message" | "reasoning")) {
-                bail!("Codex worker emitted a forbidden tool or unknown item; decision rejected");
+        match value.get("type").and_then(Value::as_str) {
+            Some("turn.completed") => completed = true,
+            Some("thread.started" | "turn.started") => {}
+            Some("error" | "turn.failed") => {
+                bail!("Codex reported a failed turn; decision rejected")
             }
+            Some("item.started" | "item.updated" | "item.completed") => {
+                let kind = value
+                    .get("item")
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str);
+                // Native exec uses ErrorItem for configuration warnings,
+                // deprecations and rerouting; actual failures are top-level errors.
+                if !matches!(kind, Some("agent_message" | "reasoning" | "error")) {
+                    bail!(
+                        "Codex worker emitted a forbidden tool or unknown item; decision rejected"
+                    );
+                }
+            }
+            _ => bail!("Codex emitted an unknown event; decision rejected"),
         }
+    }
+    if !completed {
+        bail!("Codex did not acknowledge a completed turn; decision rejected");
     }
     Ok(())
 }

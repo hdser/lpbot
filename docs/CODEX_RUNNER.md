@@ -25,6 +25,16 @@ coordinator and runner may inspect operational state; they must not pass their
 own development, research, review or outcome context to a decider. Continuity
 comes from the run state and permitted CLI output, not a persistent model chat.
 
+Stock `codex exec` is insufficient for this boundary: model metadata can expose
+native tools even when shell and Code Mode feature flags are disabled. Inference
+therefore uses a separate pinned `codex-exec` build with an unconditional empty
+startup tool allowlist. The official Codex CLI remains unchanged for login and
+version/capability checks. See [the host build](../deploy/codex-host/README.md).
+Both its SHA-256 and a build marker must match before inference; missing or
+ordinary executables fail closed. The marker identifies the reviewed build;
+the actual protection is the startup `ToolPolicy`, tested inside upstream
+session and tool-registry code.
+
 This comparison is passive-peer only. Do not enable `ask`, `inbox`, `answer`,
 `answers` or board advice, even when a generic brief mentions them. Do not give
 an active decider raw decision, reasoning or evaluation files, result tables,
@@ -82,6 +92,11 @@ The following are required before cutover:
   verifies executable availability and login status; it does not run a worker
   or establish option compatibility. Verify the pinned worker in an isolated
   compatibility check before activating a real due cycle.
+- The dedicated tools-off `codex_exec` has been built from the pinned upstream
+  revision and reviewed patch, its upstream regressions passed, and its exact
+  SHA-256 is set in `codex_exec_sha256`. `make check` validates lpbot, not that
+  separate native host build. Never substitute stock `codex exec` to bypass a
+  missing host or a failed native integration check.
 - The unchanged experiment and each configured decisions path match the
   existing run. `experiment_sha256` pins the exact experiment bytes. Never
   change the experiment to fit the runner after a decision exists. Activation
@@ -112,6 +127,9 @@ The runner fields are operational settings:
   `runs/codex-panel-forward`. Use a separate directory for another panel.
 - `poll_seconds` defaults to `30` between scheduler checks.
 - `timeout_seconds` defaults to `300` per inference.
+- `codex_exec` is the absolute path of the separately built tools-off host;
+  `codex_exec_sha256` pins its exact binary. `codex` continues to select the
+  official login CLI. The host checksum is rechecked for each model invocation.
 - `min_disk_gb` defaults to `150` free before a due cycle.
 - `max_load` defaults to `4` for host load.
 - `max_cpu_c` defaults to `80`; missing CPU measurements also defer the job.

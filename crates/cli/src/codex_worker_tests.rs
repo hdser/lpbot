@@ -3,6 +3,39 @@ use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+fn host_hash(host: &Path) -> String {
+    hex::encode(Sha256::digest(fs::read(host).unwrap_or_default()))
+}
+
+fn run(
+    codex: &Path,
+    home: &Path,
+    work: &Path,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<Response> {
+    super::run(codex, &host_hash(codex), home, work, prompt, timeout)
+}
+
+fn run_json(
+    codex: &Path,
+    home: &Path,
+    work: &Path,
+    prompt: &str,
+    timeout: Duration,
+    schema: &Value,
+) -> Result<Value> {
+    super::run_json(
+        codex,
+        &host_hash(codex),
+        home,
+        work,
+        prompt,
+        timeout,
+        schema,
+    )
+}
+
 struct TestDir(PathBuf);
 
 impl TestDir {
@@ -43,6 +76,10 @@ if [ "$1" = "--version" ]; then
   printf 'codex-cli fake-1.0\n'
   exit 0
 fi
+if [ "$1" = "--lpbot-tools-off" ]; then
+  printf 'lpbot-codex-tools-off/1\n'
+  exit 0
+fi
 previous=''
 for argument do
   if [ "$previous" = "-o" ]; then output="$argument"; fi
@@ -61,6 +98,7 @@ cat > "$output" <<'LPBOT_FAKE_JSON'
 LPBOT_FAKE_JSON
 printf '%s\n' '{{"type":"thread.started","model":"fake-default"}}'
 printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+printf '%s\n' '{{"type":"turn.completed"}}'
 "#
         );
         fs::write(&path, script).unwrap();
@@ -82,6 +120,71 @@ fn response() -> Value {
         "expect_high": 3.0, "expect_confidence": 0.75, "expect_text": "  expect\n  ",
         "lower_pct": -1.0, "upper_pct": 1.0, "stance": "adapt", "toward": "peer"
     })
+}
+
+#[test]
+#[cfg(unix)]
+fn unpinned_or_unmarked_exec_is_refused_before_inference() {
+    let dir = TestDir::new();
+    let fake = dir.fake(&response().to_string(), "");
+    let error = super::run(
+        &fake,
+        &"0".repeat(64),
+        &dir.home(),
+        &dir.work(),
+        "brief",
+        Duration::from_secs(3),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("checksum mismatch"));
+    assert!(!dir.work().exists());
+    let script = fs::read_to_string(&fake)
+        .unwrap()
+        .replace("lpbot-codex-tools-off/1", "ordinary-unrestricted-exec");
+    fs::write(&fake, script).unwrap();
+    let error = run(
+        &fake,
+        &dir.home(),
+        &dir.work(),
+        "brief",
+        Duration::from_secs(3),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("not the reviewed tools-off host"));
+    assert!(!dir.job().join("argv.txt").exists());
+}
+
+#[test]
+fn diagnostic_items_need_a_successful_turn_and_never_allow_tool_or_failure_events() {
+    let dir = TestDir::new();
+    let job = dir.0.join("audit");
+    fs::create_dir(&job).unwrap();
+    let warning =
+        json!({"type":"item.completed","item":{"type":"error","message":"feature warning"}});
+    let completed = json!({"type":"turn.completed"});
+    fs::write(
+        job.join("stdout.jsonl"),
+        format!("{warning}\n{completed}\n"),
+    )
+    .unwrap();
+    audit_events(&job).unwrap();
+    fs::write(job.join("stdout.jsonl"), format!("{warning}\n")).unwrap();
+    assert!(audit_events(&job).is_err());
+    for failure in [
+        json!({"type":"error","message":"actual failure"}),
+        json!({"type":"turn.failed"}),
+        json!({"type":"item.completed","item":{"type":"command_execution"}}),
+        json!({"type":"item.completed","item":{"type":"file_change"}}),
+        json!({"type":"item.completed","item":{"type":"mcp_tool_call"}}),
+        json!({"type":"item.completed","item":{"type":"unknown"}}),
+    ] {
+        fs::write(
+            job.join("stdout.jsonl"),
+            format!("{failure}\n{completed}\n"),
+        )
+        .unwrap();
+        assert!(audit_events(&job).is_err(), "{failure}");
+    }
 }
 
 #[test]
@@ -138,9 +241,12 @@ fn preserves_exact_fields_prompt_and_process_artifacts_without_inherited_context
     );
     assert_eq!(provenance["resumed_session"], false);
     let args = fs::read_to_string(job.join("argv.txt")).unwrap();
-    assert!(args.starts_with("exec\n--ignore-user-config\n--ignore-rules\n--ephemeral\n"));
+    assert!(args.starts_with("--ignore-user-config\n--ignore-rules\n--ephemeral\n"));
     assert!(args.contains("--sandbox\nread-only\n--json\n"));
-    assert!(args.contains("--disable\nshell_tool\n"));
+    assert!(args.contains("-c\nfeatures.shell_tool=false\n"));
+    assert!(args.contains("-c\nfeatures.skip_host_skill_discovery=true\n"));
+    assert!(!args.contains("--disable\n"));
+    assert!(!args.contains("--enable\n"));
     assert!(args.contains("agents.enabled=false"));
     assert!(args.contains("skills.bundled.enabled=false"));
     assert!(args.contains("project_doc_max_bytes=0"));

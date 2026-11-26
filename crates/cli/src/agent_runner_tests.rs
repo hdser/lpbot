@@ -27,6 +27,8 @@ fn config(root: &Path) -> Config {
         }],
         state_dir: root.join("state"),
         codex: PathBuf::from("/usr/bin/false"),
+        codex_exec: PathBuf::from("/usr/bin/false"),
+        codex_exec_sha256: "0".repeat(64),
         codex_home: root.join("auth"),
         results_dir: root.join("results"),
         poll_seconds: 30,
