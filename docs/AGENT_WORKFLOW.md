@@ -98,6 +98,19 @@ horizon is complete once the next decision exists. Keep outcomes later than a
 decider's current `as_of` away from it; mature peer scores delivered by
 `agent next` are permitted.
 
+The peer handover now enforces full fixed horizons and a committed successor
+at the exact endpoint for `next`; it also ignores unterminated peer records.
+The evaluator retains incomplete reporting rows with explicit completion and
+actual-span metadata. A peer handover never promotes them merely because
+their truncated end is before the receiving look.
+
+For unattended server operation use the [Codex runner](CODEX_RUNNER.md), with
+dedicated authentication, immutable input fingerprints and one fenced writer.
+Its automatic review jobs implement the manual blind-first procedure below;
+they do not implement the proposed native `agent review` command. Fresh
+stateless CLI contexts are a recorded runtime transition from a laptop child,
+not a claim that the original model session was transferred unchanged.
+
 ## Strategy and decision reviews
 
 Research review can inspect a proposed experiment and completed findings. A

@@ -62,6 +62,11 @@ fi
 # The forward panels with decisions on disk.
 if [ $# -eq 0 ]; then
   for exp in experiments/*.yml; do
+    # A server runner owns this panel's daily evaluation/replay policy.
+    # Keep its inexpensive decided-look loading on the normal minute schedule.
+    # Explicit experiment arguments remain available for authorized recovery.
+    stem=$(basename "$exp" .yml)
+    [ "$mode" = full ] && [ -f "data/codex/runner-managed/$stem" ] && continue
     grep -qE '\bto:[[:space:]]*open\b' "$exp" || continue
     # `decisions: <path>` in a panel, `agent.decisions: [<path>, ...]` in a
     # single-agent run.

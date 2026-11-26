@@ -199,7 +199,7 @@ impl Expectation {
             "low_pct": self.low_pct,
             "high_pct": self.high_pct,
             "confidence": self.confidence,
-            "text": self.text.trim(),
+            "text": self.text,
         })
     }
 
@@ -411,8 +411,8 @@ pub fn complete(record: &mut Value, decided: &Decided, written_unix: u64) {
         decision["upper_pct"] = json!(decided.upper_pct);
     }
     record["decision"] = decision;
-    record["note"] = json!(decided.note.trim());
-    record["reasoning"] = json!(decided.reasoning.trim());
+    record["note"] = json!(decided.note);
+    record["reasoning"] = json!(decided.reasoning);
     record["expect"] = decided.expect.to_json();
     record["stance"] = decided.stance.map_or(Value::Null, Stance::to_json);
     record["written_unix"] = json!(written_unix);
@@ -453,9 +453,9 @@ pub fn read_records(path: &Path) -> Result<Vec<Value>> {
 
 /// Appends records to a shared log file, one JSON object a line.
 pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
-    let mut content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut content = crate::agent_lock::read_optional(path)?;
     if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+        anyhow::bail!("shared log has an unterminated final record; inspect it before appending");
     }
     for record in records {
         content.push_str(&record.to_string());
@@ -464,7 +464,7 @@ pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
+    crate::agent_lock::atomic(path, content.as_bytes())
 }
 
 /// Seconds since 1970 on the wall clock: when a record was written, as
@@ -705,7 +705,7 @@ mod tests {
             42,
         );
         assert_eq!(record["decision"]["lower_pct"], -3.0);
-        assert_eq!(record["note"], "after a fall");
+        assert_eq!(record["note"], " after a fall ");
         assert_eq!(record["stance"]["toward"], "a");
         assert_eq!(record["expect"]["confidence"], 0.6);
 
@@ -718,6 +718,10 @@ mod tests {
         let back = read_records(&path).unwrap();
         assert_eq!(back.len(), 2);
         assert_eq!(back[0], record);
+        let uncommitted = r#"{"kind":"look","as_of":2000}"#;
+        std::fs::write(&path, uncommitted).unwrap();
+        assert!(append_records(&path, &[json!({"kind":"look","as_of":3000})]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), uncommitted);
         std::fs::write(&path, "{\"ok\": 1}\nnot json\n").unwrap();
         let err = read_records(&path).unwrap_err().to_string();
         assert!(err.contains("line 2"), "{err}");

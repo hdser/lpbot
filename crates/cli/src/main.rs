@@ -14,11 +14,14 @@ mod agent_board;
 mod agent_brief;
 mod agent_cmd;
 mod agent_eval;
+mod agent_lock;
 mod agent_log;
 mod agent_peers;
 mod agent_rows;
+mod agent_runner;
 mod backfill_cmd;
 mod chain_cmd;
+mod codex_worker;
 mod demo_cmd;
 mod fees_cmd;
 mod gas_history_cmd;
@@ -53,6 +56,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the isolated Codex forward-panel coordinator on this host.
+    AgentRunner(agent_runner::Args),
+    #[command(hide = true)]
+    RunnerJob { spec: PathBuf },
+    #[command(hide = true)]
+    RunnerModelJob { spec: PathBuf },
     /// Resolve an experiment file and list the runs it expands into.
     Plan(ExperimentArgs),
     /// Run an experiment file (backtest, paper or live, as the file says).
@@ -565,6 +574,12 @@ struct DecideArgs {
     /// The peer a stance of copy, adapt or depart is toward.
     #[arg(long)]
     toward: Option<String>,
+    /// Refuse if the pending look changed while the external decider worked.
+    #[arg(long, requires = "expected_as_of")]
+    expected_look: Option<u64>,
+    /// The exact pending information boundary paired with --expected-look.
+    #[arg(long, requires = "expected_look")]
+    expected_as_of: Option<u64>,
 }
 
 #[derive(Args)]
@@ -727,7 +742,11 @@ fn real_main() -> Result<()> {
             print_runs(&runs, args.show_config);
             Ok(())
         }
+        Command::AgentRunner(args) => agent_runner::run(&args),
+        Command::RunnerJob { spec } => agent_runner::job(&spec),
+        Command::RunnerModelJob { spec } => agent_runner::model_job(&spec),
         Command::Run(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let runs = resolve(&args.experiment)?;
             print_runs(&runs, args.experiment.show_config);
             println!();
@@ -739,6 +758,8 @@ fn real_main() -> Result<()> {
             )
         }
         Command::Calibrate(args) => {
+            let _operations =
+                agent_lock::lake(&backfill_cmd::data_dir(args.run.data_dir.as_deref()))?;
             let runs = resolve(&args.run.experiment)?;
             run_cmd::calibrate(
                 &runs,
@@ -751,6 +772,7 @@ fn real_main() -> Result<()> {
             .map(|_| ())
         }
         Command::Gates(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let runs = resolve(&args.experiment)?;
             print_runs(&runs, args.experiment.show_config);
             println!();
@@ -866,6 +888,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::VerifyFees(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let chain = chain_cmd::connect(
                 &args.chain.config,
                 &args.chain.chain,
@@ -890,6 +913,7 @@ fn real_main() -> Result<()> {
             demo_cmd::run(&args.data_dir, &args.chain, &tokens, args.days, args.seed)
         }
         Command::Backfill(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let chain = chain_cmd::connect(
                 &args.chain.config,
                 &args.chain.chain,
@@ -963,6 +987,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::GasHistory(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let chain = chain_cmd::connect(
                 &args.chain.config,
                 &args.chain.chain,
@@ -1050,6 +1075,7 @@ fn real_main() -> Result<()> {
                 return Ok(());
             }
             if let AgentCommand::Evaluate(e) = &command {
+                let _operations = agent_lock::lake(&root)?;
                 let horizons = agent_eval::parse_horizons(&e.horizons)?;
                 let jobs = e.jobs.unwrap_or_else(|| {
                     std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
@@ -1079,6 +1105,32 @@ fn real_main() -> Result<()> {
                 return Ok(());
             }
             let run = pick_run(&runs, args.run, args.agent.as_deref())?;
+            let _command = if matches!(&command, AgentCommand::Brief(_) | AgentCommand::Next(_)) {
+                None
+            } else if matches!(&command, AgentCommand::Inbox(_) | AgentCommand::Answers(_)) {
+                // Waiting for the board must not exclude the same agent's
+                // concurrent next/answer process for up to two days.
+                drop(agent_lock::command(
+                    &agent_cmd::identity_of(run)?.decisions,
+                )?);
+                None
+            } else {
+                Some(agent_lock::command(
+                    &agent_cmd::identity_of(run)?.decisions,
+                )?)
+            };
+            if let AgentCommand::Decide(d) = &command {
+                if let (Some(look), Some(at)) = (d.expected_look, d.expected_as_of) {
+                    let pending = agent_cmd::read_pending(&agent_cmd::identity_of(run)?.decisions)?;
+                    agent_cmd::verify_pending_context(
+                        &pending,
+                        look,
+                        at,
+                        agent_log::now_unix(),
+                        args.forward(0)?.max_lag,
+                    )?;
+                }
+            }
             match &command {
                 AgentCommand::Next(n) => {
                     let wait = match &n.wait {
@@ -1197,6 +1249,7 @@ fn real_main() -> Result<()> {
             }
         }
         Command::PoolStats(args) => {
+            let _operations = agent_lock::lake(&backfill_cmd::data_dir(args.data_dir.as_deref()))?;
             let config = chain_cmd::load_base_config(&args.chain.config)?;
             let pools = args
                 .pools

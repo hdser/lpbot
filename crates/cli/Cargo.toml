@@ -23,6 +23,10 @@ anyhow.workspace = true
 clap.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
+libc = "0.2"
 postgres.workspace = true
 
 [dev-dependencies]

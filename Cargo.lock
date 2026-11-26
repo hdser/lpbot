@@ -1737,6 +1737,8 @@ dependencies = [
  "alloy-primitives",
  "anyhow",
  "clap",
+ "hex",
+ "libc",
  "lpbot-chain",
  "lpbot-core",
  "lpbot-data",
@@ -1745,8 +1747,10 @@ dependencies = [
  "lpbot-strategy",
  "lpbot-venues",
  "postgres",
+ "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
 ]
 
 [[package]]

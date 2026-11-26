@@ -1,0 +1,24 @@
+[Unit]
+Description=lpbot Codex forward-panel runner
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lpbot
+Environment=LPBOT_DATA_DIR=/data/lpbot/lake
+Environment=RAYON_NUM_THREADS=2
+# Optional private coordinator environment, including LPBOT_DB_URL for loading.
+EnvironmentFile=-%h/lpbot/data/codex/coordinator.env
+ExecStart=%h/lpbot/target/release/lpbot agent-runner %h/lpbot/data/codex/panel-runner.yml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=330
+KillMode=control-group
+UMask=0077
+Nice=10
+CPUWeight=20
+IOWeight=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

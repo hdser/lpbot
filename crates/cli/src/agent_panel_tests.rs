@@ -213,8 +213,21 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
     for r in &scores {
         assert_eq!(r["kind"], "eval");
         assert!(r["as_of"].as_u64() > r["decided_as_of"].as_u64(), "{r}");
+        assert_eq!(
+            r["scored_seconds"].as_u64(),
+            Some(r["as_of"].as_u64().unwrap() - r["decided_as_of"].as_u64().unwrap())
+        );
         assert!(r["regret_pct"].as_f64().unwrap() >= 0.0, "{r}");
     }
+    assert!(scores[..6].iter().all(|r| r["complete"] == true));
+    assert_eq!(
+        scores[6]["complete"], false,
+        "the last next look is undecided"
+    );
+    assert_eq!(
+        scores[7]["complete"], true,
+        "the full fixed horizon is stored"
+    );
     // Flat, cash is no change at all.
     assert_eq!(change(&scores[0], "cash"), Some(0.0));
     assert_eq!(scores[0]["position_open"], false);
@@ -287,4 +300,65 @@ fn two_agents_one_reading_the_other_up_to_its_own_look_and_both_scored() {
             "{table}"
         );
     }
+}
+
+#[test]
+fn a_forward_evaluation_retains_partial_scores_without_handing_them_to_peers() {
+    let (root, mut runs, _) = crate::run_cmd::tests::demo("panel-maturity", 12);
+    let mut run = runs.swap_remove(0);
+    run.config.window.as_mut().unwrap().to = lpbot_core::config::OPEN_END.into();
+    let strategy = &mut run.config.strategies[0];
+    let decisions = root.join("agent/a.jsonl");
+    strategy.extra.insert(
+        "agent".into(),
+        serde_yaml::from_str(&format!("{{decisions: \"{}\"}}", decisions.display())).unwrap(),
+    );
+    strategy.extra.insert(
+        "pool".into(),
+        serde_yaml::Value::String(crate::demo_cmd::DEMO_POOL.to_checksum(None)),
+    );
+    let lake = root.join("lake");
+    let prepared = crate::run_cmd::prepare_one(&run, &lake, "ethereum").unwrap();
+    let (_, newest) = prepared.newest.unwrap();
+    let first_look = "2026-01-08"
+        .parse::<lpbot_data::day::Day>()
+        .unwrap()
+        .start();
+    let events = prepared.events();
+    let at = events[events.partition_point(|event| event.time < newest - 3_600)].time;
+    std::fs::create_dir_all(decisions.parent().unwrap()).unwrap();
+    std::fs::write(
+        &decisions,
+        format!("{{\"look\":{first_look},\"at\":{at},\"action\":\"stay_out\",\"next\":\"1h\"}}\n"),
+    )
+    .unwrap();
+    let who = agent_cmd::identity_of(&run).unwrap();
+    let horizons = parse_horizons("next,30m,2h").unwrap();
+    evaluate(&run, &who, &lake, "ethereum", &horizons, 1).unwrap();
+    let scores = agent_log::read_records(&agent_log::scores_path(&decisions)).unwrap();
+    assert_eq!(scores.len(), 3);
+    assert_eq!(
+        scores[0]["complete"], false,
+        "no next decision is committed"
+    );
+    assert_eq!(scores[1]["complete"], true);
+    assert_eq!(scores[2]["complete"], false);
+    assert_eq!(scores[2]["horizon_seconds"], 7_200);
+    assert_eq!(scores[2]["as_of"], newest);
+    assert!(scores[2]["scored_seconds"]
+        .as_u64()
+        .is_some_and(|seconds| seconds > 0 && seconds < 7_200));
+    let reader = agent_log::Identity {
+        name: "b".into(),
+        model: "test".into(),
+        decisions: root.join("agent/b.jsonl"),
+        peers: vec![agent_log::Peer {
+            name: "a".into(),
+            stem: root.join("agent/a"),
+        }],
+    };
+    let handed = agent_peers::handover(&reader, newest, &Default::default()).unwrap();
+    assert_eq!(handed.shown.len(), 1, "{}", handed.text);
+    assert_eq!(handed.shown[0]["horizon"], "30m");
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -148,7 +148,7 @@ pub fn log_entry(pending: &Pending, decision: &Decision, stance: Option<&Stance>
 /// Appends an entry to the log, starting the file with a header naming the
 /// agent and its model when it is new.
 pub fn append_log(log: &Path, who: &Identity, entry: &str) -> Result<()> {
-    let mut content = std::fs::read_to_string(log).unwrap_or_default();
+    let mut content = crate::agent_lock::read_optional(log)?;
     if content.is_empty() {
         let _ = writeln!(
             content,
@@ -166,7 +166,7 @@ pub fn append_log(log: &Path, who: &Identity, entry: &str) -> Result<()> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(log, content).with_context(|| format!("writing {}", log.display()))
+    crate::agent_lock::atomic(log, content.as_bytes())
 }
 
 /// Who decides the run: its agent entry, with its decisions file.
@@ -191,7 +191,7 @@ pub(crate) fn write_pending(decisions: &Path, waiting: &Pending) -> Result<()> {
     if let Some(parent) = pending.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&pending, format!("{}\n", waiting.to_json()))
+    crate::agent_lock::atomic(&pending, format!("{}\n", waiting.to_json()).as_bytes())
         .with_context(|| format!("writing {}", pending.display()))
 }
 
@@ -208,6 +208,22 @@ pub(crate) fn read_pending(decisions: &Path) -> Result<Pending> {
             "no look is waiting for a decision; run `lpbot agent next <experiment>` first to see it"
         ),
     }
+}
+
+pub fn verify_pending_context(
+    waiting: &Pending,
+    look: u64,
+    as_of: u64,
+    clock: u64,
+    max_lag: u64,
+) -> Result<()> {
+    if waiting.look != look || waiting.at != Some(as_of) {
+        bail!("the pending look or information boundary changed; discard this response and run agent next again");
+    }
+    if as_of > clock || clock.saturating_sub(as_of) > max_lag {
+        bail!("the decider response is stale; discard it and run agent next at the head again");
+    }
+    Ok(())
 }
 
 /// How `next` and `decide` treat a forward run, whose window is open at
@@ -315,7 +331,7 @@ pub fn due_message(number: usize, due: u64, newest: Option<(u64, u64)>, now: u64
 }
 
 /// A time as `2026-11-24T18:05:00`, in UTC.
-fn iso(time: u64) -> String {
+pub(crate) fn iso(time: u64) -> String {
     format!(
         "{}T{:02}:{:02}:{:02}",
         Day::of_time(time),
@@ -473,11 +489,27 @@ pub fn next(
     chain: &str,
     forward: &Forward,
 ) -> Result<Option<Observation>> {
+    next_locked(run, root, chain, forward, true)
+}
+
+fn next_locked(
+    run: &ResolvedRun,
+    root: &Path,
+    chain: &str,
+    forward: &Forward,
+    lock_command: bool,
+) -> Result<Option<Observation>> {
     let who = identity_of(run)?;
     let pending = pending_path(&who.decisions);
     let started = now();
     let mut said_waiting = false;
     loop {
+        let command = if lock_command {
+            Some(crate::agent_lock::command(&who.decisions)?)
+        } else {
+            None
+        };
+        let operations = crate::agent_lock::lake(root)?;
         let open = run_window(&run.config)?.1.is_none();
         let synced = if open && forward.sync {
             // A node that is busy committing blocks can answer out of step
@@ -568,6 +600,8 @@ pub fn next(
                 } else {
                     clock_now + SLOT
                 };
+                drop(operations);
+                drop(command);
                 sleep_until(until.min(deadline));
             }
         }
@@ -795,13 +829,17 @@ pub fn decide(
     if let Some(parent) = decisions.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut content = std::fs::read_to_string(&decisions).unwrap_or_default();
+    let mut content = crate::agent_lock::read_optional(&decisions)?;
     if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+        bail!("decisions have an unterminated final record; inspect it before deciding again");
+    }
+    let previous = crate::run_cmd::parse_decisions(&content)?;
+    if previous.iter().any(|d| d.look == look) {
+        bail!("this look already has a committed decision; run `lpbot agent next` to reconcile instead of deciding twice");
     }
     content.push_str(&line);
     content.push('\n');
-    std::fs::write(&decisions, content)
+    crate::agent_lock::atomic(&decisions, content.as_bytes())
         .with_context(|| format!("writing {}", decisions.display()))?;
     std::fs::remove_file(&pending).ok();
     let log = log_path(&decisions);
@@ -861,7 +899,7 @@ pub fn decide(
         wait: 0,
         ..forward.clone()
     };
-    next(run, root, chain, &forward).map(|_| ())
+    next_locked(run, root, chain, &forward, false).map(|_| ())
 }
 
 /// Shows again every record of the run's peers up to the look waiting for
@@ -1360,6 +1398,13 @@ mod tests {
             stance: None,
             toward: None,
         };
+        let uncommitted = r#"{"look":100,"action":"stay_out","next":"1h"}"#;
+        std::fs::write(&decisions, uncommitted).unwrap();
+        let error = decide(&run, &lake, "ethereum", &enter, &forward).unwrap_err();
+        assert!(error.to_string().contains("unterminated"));
+        assert_eq!(std::fs::read_to_string(&decisions).unwrap(), uncommitted);
+        assert!(pending_path(&decisions).exists());
+        std::fs::remove_file(&decisions).unwrap();
         decide(&run, &lake, "ethereum", &enter, &forward).unwrap();
         let written = std::fs::read_to_string(&decisions).unwrap();
         let back = crate::run_cmd::parse_decisions(&written).unwrap();

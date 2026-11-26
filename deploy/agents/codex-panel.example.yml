@@ -1,0 +1,31 @@
+# Copy to data/codex/panel-runner.yml and replace these placeholders.
+# Paths below are resolved from the repository root. Preserve the existing
+# experiment and decision paths when moving a run that already has decisions.
+experiment: experiments/agent-your-panel-forward.yml
+# Run sha256sum on the exact immutable experiment. The all-zero value refuses
+# to match any real experiment and must be replaced before --check succeeds.
+experiment_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+agents:
+  - name: solo
+    decisions: data/agent/your-panel-forward/solo.jsonl
+  # Add an existing passive reader only after the full-horizon peer-score fix
+  # is deployed and validated. Never invent a replacement path for a live run.
+  # - name: reader
+  #   decisions: data/agent/your-panel-forward/reader.jsonl
+state_dir: data/codex/runner
+# Daily reporting writes here; keep this separate from other panels' results.
+results_dir: runs/your-codex-panel-forward
+# Use the actual installed executable; the service does not load a login shell.
+# Pin a CLI build whose clean-worker options have been verified before cutover.
+codex: /home/<user>/.local/bin/codex
+# Dedicated pinned codex-exec with the reviewed startup empty-tool policy.
+# Stock codex exec is refused. See deploy/codex-host and docs/CODEX_RUNNER.md.
+codex_exec: /home/<user>/lpbot/data/codex/runtime/tools-off/lpbot-codex-exec
+codex_exec_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+# A dedicated home, authenticated by the owner. Do not copy personal credentials.
+codex_home: /home/<user>/.local/share/lpbot-codex
+poll_seconds: 30
+timeout_seconds: 300
+min_disk_gb: 150
+max_load: 4
+max_cpu_c: 80

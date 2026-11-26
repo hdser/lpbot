@@ -479,6 +479,18 @@ fn duration_label(seconds: u64) -> String {
     }
 }
 
+/// Truncated scores remain useful to the evaluator and dashboard, but must
+/// not be described as completed outcomes to another decider.
+fn horizon_complete(horizon: &Horizon, start: u64, end: End, next_as_of: Option<u64>) -> bool {
+    let Some(seconds) = end.as_of.checked_sub(start).filter(|seconds| *seconds > 0) else {
+        return false;
+    };
+    match horizon.seconds {
+        Some(requested) => seconds >= requested,
+        None => end.at_look && next_as_of == Some(end.as_of),
+    }
+}
+
 /// Scores every decision of one agent run and writes `<name>.eval.jsonl`.
 pub fn evaluate(
     run: &ResolvedRun,
@@ -636,6 +648,11 @@ pub fn evaluate(
             }
             let (best, _) = score.best();
             let seconds = decision_end.as_of.saturating_sub(*start_as_of);
+            let next = if horizon.seconds.is_none() {
+                at.get(k + 1)
+            } else {
+                None
+            };
             records.push(json!({
                 "schema": SCHEMA,
                 "kind": "eval",
@@ -650,6 +667,10 @@ pub fn evaluate(
                 "as_of": decision_end.as_of,
                 "horizon": horizon.label,
                 "horizon_seconds": horizon.seconds.unwrap_or(seconds),
+                "scored_seconds": seconds,
+                "complete": horizon_complete(horizon, *start_as_of, decision_end, next.map(|(_, as_of)| *as_of)),
+                "next_look": next.map(|(observation, _)| observation.look),
+                "next_as_of": next.map(|(_, as_of)| as_of),
                 "ended": if decision_end.at_look { "look" } else { "window_end" },
                 "decision": action_json(&decisions[k].action, &next_label),
                 "position_open": open,
@@ -719,6 +740,31 @@ mod tests {
         assert_eq!(duration_label(4 * 3_600), "4h");
         assert_eq!(duration_label(2 * 86_400), "2d");
         assert_eq!(duration_label(90), "90s");
+    }
+
+    #[test]
+    fn completion_uses_the_actual_interval_and_a_committed_next_decision() {
+        let horizons = parse_horizons("next,1h").unwrap();
+        let end = End {
+            result_pct: 0.0,
+            as_of: 3_700,
+            at_look: true,
+        };
+        assert!(horizon_complete(&horizons[1], 100, end, None));
+        assert!(!horizon_complete(&horizons[1], 101, end, None));
+        assert!(!horizon_complete(&horizons[1], 3_701, end, None));
+        assert!(horizon_complete(&horizons[0], 100, end, Some(3_700)));
+        assert!(!horizon_complete(&horizons[0], 100, end, None));
+        assert!(!horizon_complete(&horizons[0], 100, end, Some(3_800)));
+        assert!(!horizon_complete(
+            &horizons[0],
+            100,
+            End {
+                at_look: false,
+                ..end
+            },
+            Some(3_700)
+        ));
     }
 
     #[test]

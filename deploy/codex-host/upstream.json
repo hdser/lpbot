@@ -1,0 +1,17 @@
+{
+  "schema": "lpbot.codex-host-source/1",
+  "upstream_repository": "https://github.com/openai/codex",
+  "upstream_tag": "rust-v0.172.0",
+  "upstream_tag_object": "fc3036dba44468096953f0e832f3fecd3adc0228",
+  "upstream_commit": "3d86e43b075adeba2193ec5c22ac92f55afd82e6",
+  "source_archive_url": "https://api.github.com/repos/openai/codex/tarball/rust-v0.172.0",
+  "source_archive_sha256": "a9896d98b55372a8567441de7f07b77fcf6a2f92e547a20952e32af12c4ca0aa",
+  "patch_sha256": "40c79b7b6ecfc3d8d21decdfbbafb7cd526b22fabe4fa6766295821935868c43",
+  "rust_toolchain": "1.99.1",
+  "cargo_package": "codex-exec",
+  "cargo_binary": "codex-exec",
+  "installed_binary": "lpbot-codex-exec",
+  "startup_policy": {
+    "allowed_tools": []
+  }
+}

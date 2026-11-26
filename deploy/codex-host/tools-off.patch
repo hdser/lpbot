@@ -1,0 +1,77 @@
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1068,6 +1068,13 @@
+         // Publish the already resolved model before extensions make startup decisions.
+         // Turn construction refreshes this attachment when the selected model changes.
+         thread_extension_init.insert(Arc::unwrap_or_clone(model_info.model));
++        // This dedicated lpbot build has no model-callable capabilities. Capture
++        // the empty startup ceiling before native, hosted or extension tools are
++        // constructed; later feature/config/model changes cannot relax it.
++        thread_extension_init.insert(codex_extension_api::ToolPolicy {
++            allowed_tools: Some(Vec::new()),
++            ..Default::default()
++        });
+         let tool_policy = thread_extension_init
+             .get::<codex_extension_api::ToolPolicy>()
+             .unwrap_or_else(|| {
+--- a/codex-rs/exec/src/main.rs
++++ b/codex-rs/exec/src/main.rs
+@@ -30,6 +30,23 @@
+ }
+ 
+ fn main() -> anyhow::Result<()> {
++    // These first-argument probes run before config, auth or runtime startup.
++    let probe = match std::env::args_os().nth(1).as_deref() {
++        Some(argument) if argument == std::ffi::OsStr::new("--lpbot-tools-off") => {
++            Some(b"lpbot-codex-tools-off/1\n".as_slice())
++        }
++        Some(argument) if argument == std::ffi::OsStr::new("--version")
++            || argument == std::ffi::OsStr::new("-V") =>
++        {
++            Some(b"lpbot-codex-exec 0.172.0 (upstream 3d86e43b075adeba2193ec5c22ac92f55afd82e6; tools-off/1)\n".as_slice())
++        }
++        _ => None,
++    };
++    if let Some(output) = probe {
++        use std::io::Write;
++        std::io::stdout().lock().write_all(output)?;
++        return Ok(());
++    }
+     arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
+         let top_cli = TopCli::parse();
+         // Merge root-level overrides into inner CLI struct so downstream logic remains unchanged.
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -13765,3 +13765,22 @@
+         "rejection must not permit same-name ordinary-auth replacement in this session"
+     );
+ }
++
++#[tokio::test]
++async fn lpbot_tools_off_policy_is_captured_at_real_session_startup() -> anyhow::Result<()> {
++    let session = make_session_with_config(|config| {
++        config.ephemeral = true;
++        config.features.enable(Feature::ShellTool).unwrap();
++        config.features.enable(Feature::CodeMode).unwrap();
++    })
++    .await?;
++    assert_eq!(session.tool_policy.allowed_tools, Some(Vec::new()));
++    for name in ["apply_patch", "exec_command", "exec", "wait", "update_plan"] {
++        assert!(
++            !session
++                .tool_policy
++                .allows(&codex_tools::ToolName::plain(name))
++        );
++    }
++    Ok(())
++}
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -528,6 +528,7 @@
+             ..Default::default()
+         }));
+         registry.add(crate::tools::handlers::PlanHandler);
++        registry.add(crate::tools::handlers::ApplyPatchHandler::new(false));
+         let hosted = append_source_tools(
+             &turn,
+             turn.model_info(),
