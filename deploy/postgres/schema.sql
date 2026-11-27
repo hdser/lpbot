@@ -395,6 +395,7 @@ ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS runner text;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS place text;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS state text;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS detail text;
+ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS what_to_do text;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS listed boolean;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS looks bigint;
 ALTER TABLE agent_status ADD COLUMN IF NOT EXISTS last_number bigint;

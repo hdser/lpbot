@@ -31,6 +31,9 @@ pub struct AgentStatusRow {
     pub state: String,
     /// One plain sentence about the state.
     pub detail: String,
+    /// What to do about it, with the commands; empty when nothing needs
+    /// doing. It holds no times, so it stays the same while the state does.
+    pub what_to_do: String,
     /// Whether the agent list names the agent.
     pub listed: bool,
     /// Looks decided.
@@ -92,6 +95,7 @@ pub fn agent_status_table(rows: &[AgentStatusRow]) -> Table {
         ("place", texts(rows, |r| r.place.clone())),
         ("state", texts(rows, |r| Some(r.state.clone()))),
         ("detail", texts(rows, |r| Some(r.detail.clone()))),
+        ("what_to_do", texts(rows, |r| Some(r.what_to_do.clone()))),
         ("listed", flags(rows, |r| Some(r.listed))),
         ("looks", ints(rows, |r| Some(r.looks))),
         ("last_number", ints(rows, |r| r.last_number)),
@@ -186,7 +190,11 @@ mod tests {
         let table = agent_status_table(std::slice::from_ref(&row));
         assert_eq!(table.name, "agent_status");
         assert_eq!(table.rows(), 1);
-        assert_eq!(table.columns.len(), 29);
+        assert_eq!(table.columns.len(), 30);
+        assert_eq!(
+            table.column("what_to_do"),
+            Some(&Column::Text(vec![Some(String::new())]))
+        );
         assert_eq!(
             table.column("state"),
             Some(&Column::Text(vec![Some("waiting".into())]))

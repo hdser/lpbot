@@ -375,6 +375,8 @@ fn problem(experiment: &str, agent: &str, detail: String, listed: bool) -> Agent
         runner: "unknown".into(),
         state: State::Failing.name().into(),
         detail,
+        what_to_do: "Read the detail: the experiment or data/agents/agents.yml needs fixing."
+            .into(),
         listed,
         scheduler: "unknown".into(),
         ..AgentStatusRow::default()
@@ -725,7 +727,80 @@ fn row(
     }
     row.state = state.name().to_string();
     row.detail = detail;
+    let experiment = found.path.strip_prefix(root).unwrap_or(&found.path);
+    row.what_to_do = what_to_do(
+        state,
+        &facts.scheduler,
+        row.place.as_deref(),
+        &experiment.display().to_string(),
+        &who.name,
+    );
     row
+}
+
+/// The runner's config on the node machine, as `docs/CODEX_RUNNER.md` sets
+/// it up.
+const RUNNER_CONFIG: &str = "data/codex/panel-runner.yml";
+
+/// What to do about an agent in `state`, with the commands to type on the
+/// node machine, in `~/lpbot`; empty when nothing needs doing. It holds no
+/// times, so it stays the same while the state does: an alert keyed by it
+/// stays one alert.
+pub fn what_to_do(
+    state: State,
+    scheduler: &Scheduler,
+    place: Option<&str>,
+    experiment: &str,
+    agent: &str,
+) -> String {
+    let elsewhere = || {
+        format!(
+            "It runs from elsewhere ({}): resume it there, or mark it paused with a reason in \
+             data/agents/agents.yml.",
+            place.unwrap_or("not named in data/agents/agents.yml")
+        )
+    };
+    let session = |why: &str| {
+        format!(
+            "{why} Look at its window: tmux attach -t agent, window {agent}. If its session has ended, \
+             start it again, with the owner's yes: tmux new-window -d -t agent -n {agent} \
+             deploy/agents/start-agent.sh {experiment} {agent}"
+        )
+    };
+    match (state, scheduler) {
+        (State::Late, Scheduler::Session { here: true }) => {
+            session("Its session has not decided the due look.")
+        }
+        (State::Late, Scheduler::Session { here: false }) => elsewhere(),
+        (State::Late, Scheduler::Runner { .. }) => format!(
+            "Its runner has not decided the due look: read target/release/lpbot agent-runner \
+             {RUNNER_CONFIG} --status and journalctl --user -u codex-panel -n 50."
+        ),
+        (State::NoWaiter, _) => session("Nothing will wake its session."),
+        (State::Unverified, _) => format!(
+            "Nothing here can wake it: check it where it runs ({}).",
+            place.unwrap_or("not named in data/agents/agents.yml")
+        ),
+        (State::Stopped, _) => format!(
+            "The runner stopped it for inspection: read target/release/lpbot agent-runner \
+             {RUNNER_CONFIG} --status, and docs/CODEX_RUNNER.md before releasing it."
+        ),
+        (State::Failing, Scheduler::Runner { .. }) => format!(
+            "Read the error: target/release/lpbot agent-runner {RUNNER_CONFIG} --status and \
+             journalctl --user -u codex-panel -n 50."
+        ),
+        (State::Failing, _) => {
+            "Read the detail: the decisions file, the experiment or data/agents/agents.yml needs fixing."
+                .to_string()
+        }
+        (State::SchedulerDown, _) => format!(
+            "Its runner holds it but is not running: systemctl --user start codex-panel, or release \
+             it (target/release/lpbot agent-runner {RUNNER_CONFIG} --release) if it is meant to be off."
+        ),
+        (State::Waiting | State::Deciding | State::Due | State::Paused | State::Ended, _) => {
+            String::new()
+        }
+    }
 }
 
 /// Every agent's row, in a stable order: the ones that need someone first.
@@ -780,10 +855,15 @@ const STATES: [State; 11] = [
 
 /// The line for `--brief` and `make status`.
 pub fn brief_line(r: &AgentStatusRow) -> String {
-    format!(
+    let line = format!(
         "{} ({}, {}): {}: {}",
         r.agent, r.model, r.experiment, r.state, r.detail
-    )
+    );
+    if r.what_to_do.is_empty() {
+        line
+    } else {
+        format!("{line}\n  what to do: {}", r.what_to_do)
+    }
 }
 
 /// The rows as a table for the terminal.
@@ -847,6 +927,9 @@ pub fn table(rows: &[AgentStatusRow], now: u64) -> String {
         out.push_str(&line(row));
         out.push('\n');
         out.push_str(&format!("  {}\n", r.detail));
+        if !r.what_to_do.is_empty() {
+            out.push_str(&format!("  what to do: {}\n", r.what_to_do));
+        }
     }
     out
 }
@@ -856,6 +939,7 @@ pub fn row_json(r: &AgentStatusRow) -> Value {
     json!({
         "run_id": r.run_id, "experiment": r.experiment, "agent": r.agent, "model": r.model,
         "runner": r.runner, "place": r.place, "state": r.state, "detail": r.detail,
+        "what_to_do": r.what_to_do,
         "listed": r.listed, "looks": r.looks, "last_number": r.last_number,
         "last_time": r.last_time, "last_action": r.last_action, "last_range": r.last_range,
         "due": r.due, "first_shown": r.first_shown, "waiter_kind": r.waiter_kind,
