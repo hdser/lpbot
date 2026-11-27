@@ -224,7 +224,7 @@
     },
     {
       "id": 101,
-      "title": "Value in dollars, start = 100, against holding ETH, half and half, and dollars",
+      "title": "Value in dollars, start = 100",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -253,8 +253,10 @@
         "defaults": {
           "decimals": 1,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "start = 100"
+          },
+          "unit": "none"
         },
         "overrides": [
           {
@@ -350,7 +352,7 @@
           "sort": "desc"
         }
       },
-      "description": "Each chosen run's value marked at the pool price, the start set to 100. The dashed lines are the benchmarks over the first chosen run's window and pool."
+      "description": "Against holding ETH, holding half and half, and holding dollars. Each chosen run's value marked at the pool price, the start set to 100. The dashed lines are the benchmarks over the first chosen run's window and pool."
     },
     {
       "id": 102,
@@ -383,8 +385,10 @@
         "defaults": {
           "decimals": 1,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "start = 100"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -407,7 +411,7 @@
     },
     {
       "id": 103,
-      "title": "Side by side",
+      "title": "The chosen runs side by side",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -468,6 +472,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "result"
               }
             ]
           },
@@ -502,6 +510,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "result in $"
               }
             ]
           },
@@ -536,6 +548,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "APR"
               }
             ]
           },
@@ -548,6 +564,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "holding in $"
               }
             ]
           },
@@ -560,6 +580,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "half and half in $"
               }
             ]
           },
@@ -572,6 +596,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "fee APR"
               }
             ]
           },
@@ -584,6 +612,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "in range"
               }
             ]
           },
@@ -596,6 +628,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "out of range"
               }
             ]
           },
@@ -608,6 +644,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "max drawdown"
               }
             ]
           },
@@ -699,6 +739,90 @@
                 "value": true
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas_prices"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "gas prices"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas_gwei"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "average gwei"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "divergence"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "divergence, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "longest_out_days"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "longest out, days"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "round trips"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_from"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "from"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_to"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "to"
+              }
+            ]
           }
         ]
       },
@@ -720,7 +844,7 @@
     },
     {
       "id": 201,
-      "title": "Average value in dollars by group, start = 100",
+      "title": "Average value in $ by group",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -749,8 +873,10 @@
         "defaults": {
           "decimals": 1,
           "custom": {
-            "lineWidth": 2
-          }
+            "lineWidth": 2,
+            "axisLabel": "start = 100"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -769,7 +895,7 @@
           "sort": "desc"
         }
       },
-      "description": "Every run of the chosen experiments, averaged within each group of the chosen setting: the rule, the value token, the width, the pool or the full set of swept settings. Runs over different windows average only where they overlap in time."
+      "description": "Start = 100. Every run of the chosen experiments, averaged within each group of the chosen setting: the rule, the value token, the width, the pool or the full set of swept settings. Runs over different windows average only where they overlap in time."
     },
     {
       "id": 202,
@@ -834,6 +960,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "result"
               }
             ]
           },
@@ -868,6 +998,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "result in $"
               }
             ]
           },
@@ -902,6 +1036,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "worst in $"
               }
             ]
           },
@@ -936,6 +1074,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "best in $"
               }
             ]
           },
@@ -948,6 +1090,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "holding in $"
               }
             ]
           },
@@ -960,6 +1106,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "half and half in $"
               }
             ]
           },
@@ -972,6 +1122,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "fee APR"
               }
             ]
           },
@@ -984,6 +1138,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "in range"
               }
             ]
           },
@@ -996,6 +1154,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "out of range"
               }
             ]
           },
@@ -1008,6 +1170,10 @@
               {
                 "id": "unit",
                 "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "max drawdown"
               }
             ]
           },
@@ -1037,7 +1203,8 @@
           }
         ]
       },
-      "options": {}
+      "options": {},
+      "description": "Every run of the chosen experiments, grouped as chosen above: the averages, and the worst and best result in dollars."
     },
     {
       "id": 203,
@@ -1084,7 +1251,8 @@
         },
         "groupWidth": 0.7,
         "barWidth": 0.9
-      }
+      },
+      "description": "Each group's average result, in percent of the starting capital: in the value token, and in dollars."
     }
   ]
 }

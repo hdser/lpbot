@@ -224,7 +224,7 @@
     },
     {
       "id": 101,
-      "title": "Result, in the value token",
+      "title": "Result, value token",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -233,7 +233,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -293,16 +293,16 @@
     },
     {
       "id": 102,
-      "title": "Result, in dollars",
+      "title": "Result in dollars",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 4,
+        "x": 6,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -362,16 +362,16 @@
     },
     {
       "id": 103,
-      "title": "Holding the value token, in dollars",
+      "title": "Holding, in dollars",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
+        "x": 12,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -438,9 +438,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 12,
+        "x": 18,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -507,9 +507,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 16,
-        "y": 1,
-        "w": 4,
+        "x": 0,
+        "y": 5,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -572,9 +572,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 20,
-        "y": 1,
-        "w": 4,
+        "x": 6,
+        "y": 5,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -630,16 +630,16 @@
     },
     {
       "id": 107,
-      "title": "Fees, in the value token",
+      "title": "Fees, value token",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 0,
+        "x": 12,
         "y": 5,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -694,16 +694,16 @@
     },
     {
       "id": 108,
-      "title": "Divergence, in the value token",
+      "title": "Divergence, token",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 4,
+        "x": 18,
         "y": 5,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -762,16 +762,16 @@
     },
     {
       "id": 109,
-      "title": "Gas, in the value token, and the average price paid",
+      "title": "Gas paid and price",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
-        "y": 5,
-        "w": 4,
+        "x": 0,
+        "y": 9,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -817,6 +817,22 @@
               {
                 "id": "decimals",
                 "value": 3
+              },
+              {
+                "id": "displayName",
+                "value": "average price, gwei"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Gas paid"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "paid, value token"
               }
             ]
           }
@@ -836,7 +852,8 @@
         "justifyMode": "center",
         "orientation": "auto",
         "text": {
-          "valueSize": 32
+          "valueSize": 32,
+          "titleSize": 13
         }
       },
       "description": "Gas for every open, close and swap, at the fixed price in the run's costs."
@@ -850,9 +867,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 12,
-        "y": 5,
-        "w": 4,
+        "x": 6,
+        "y": 9,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -915,9 +932,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 16,
-        "y": 5,
-        "w": 4,
+        "x": 12,
+        "y": 9,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -980,9 +997,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 20,
-        "y": 5,
-        "w": 4,
+        "x": 18,
+        "y": 9,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1033,7 +1050,8 @@
         "text": {
           "valueSize": 32
         }
-      }
+      },
+      "description": "What the run's capital was worth at the end, in dollars."
     },
     {
       "id": 200,
@@ -1042,7 +1060,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 13,
         "w": 24,
         "h": 1
       },
@@ -1058,8 +1076,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 10,
-        "w": 3,
+        "y": 14,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1122,9 +1140,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 3,
-        "y": 10,
-        "w": 3,
+        "x": 6,
+        "y": 14,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1187,9 +1205,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 6,
-        "y": 10,
-        "w": 3,
+        "x": 12,
+        "y": 14,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1252,9 +1270,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 9,
-        "y": 10,
-        "w": 3,
+        "x": 18,
+        "y": 14,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1310,16 +1328,16 @@
     },
     {
       "id": 205,
-      "title": "In range while in a position",
+      "title": "In range while held",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 12,
-        "y": 10,
-        "w": 3,
+        "x": 0,
+        "y": 18,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1382,9 +1400,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 15,
-        "y": 10,
-        "w": 3,
+        "x": 6,
+        "y": 18,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1440,16 +1458,16 @@
     },
     {
       "id": 207,
-      "title": "Average campaign, days",
+      "title": "Days per campaign",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 18,
-        "y": 10,
-        "w": 3,
+        "x": 12,
+        "y": 18,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1505,16 +1523,16 @@
     },
     {
       "id": 208,
-      "title": "Longest out of range, days",
+      "title": "Longest out, days",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 21,
-        "y": 10,
-        "w": 3,
+        "x": 18,
+        "y": 18,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1578,7 +1596,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 22,
         "w": 16,
         "h": 5
       },
@@ -1645,11 +1663,12 @@
           "displayMode": "list",
           "placement": "bottom"
         }
-      }
+      },
+      "description": "The position's state through the run: in range, resting, out of range or flat, the same states as the figures above."
     },
     {
       "id": 211,
-      "title": "Out of range: campaigns by time stranded",
+      "title": "Campaigns by time out of range",
       "type": "barchart",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1657,7 +1676,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 14,
+        "y": 22,
         "w": 8,
         "h": 5
       },
@@ -1680,6 +1699,10 @@
           "color": {
             "mode": "fixed",
             "fixedColor": "#e0752d"
+          },
+          "unit": "none",
+          "custom": {
+            "axisLabel": "campaigns"
           }
         },
         "overrides": []
@@ -1701,7 +1724,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -1709,7 +1732,7 @@
     },
     {
       "id": 301,
-      "title": "Price in dollars, with the range: green in range, blue resting, orange out of range",
+      "title": "Price and range",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1717,7 +1740,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 28,
         "w": 24,
         "h": 11
       },
@@ -1938,11 +1961,11 @@
           "mode": "multi"
         }
       },
-      "description": "The non-dollar token's price at the pool price, hourly, with the range the position holds shaded by its state. The grey regions behind are the campaigns, entry to exit; hover one for how it ended."
+      "description": "The price in dollars with the range the position held: green in range, blue resting, orange out of range. The non-dollar token's price at the pool price, hourly, with the range the position holds shaded by its state. The grey regions behind are the campaigns, entry to exit; hover one for how it ended."
     },
     {
       "id": 302,
-      "title": "The run's pool: liquidity around the price, in dollars",
+      "title": "Pool liquidity around the price",
       "type": "heatmap",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1950,7 +1973,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 39,
         "w": 24,
         "h": 10
       },
@@ -2001,7 +2024,7 @@
           "show": true
         }
       },
-      "description": "The liquidity of the pool the run traded, day by day, on the same time axis as the price above: whether the range stood where liquidity was thick or thin. Empty until `lpbot pool-stats` has been run for the pool."
+      "description": "The run's pool, in dollars. The liquidity of the pool the run traded, day by day, on the same time axis as the price above: whether the range stood where liquidity was thick or thin. Empty until `lpbot pool-stats` has been run for the pool."
     },
     {
       "id": 400,
@@ -2010,7 +2033,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 49,
         "w": 24,
         "h": 1
       },
@@ -2026,7 +2049,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -2047,16 +2070,19 @@
         "defaults": {
           "decimals": 4,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "value token"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "What the run's capital was worth, in the value token, against simply holding the value token."
     },
     {
       "id": 402,
-      "title": "Value in dollars, against holding the volatile token, half and half, and dollars",
+      "title": "Value in dollars against holding",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -2064,7 +2090,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 42,
+        "y": 50,
         "w": 12,
         "h": 8
       },
@@ -2092,11 +2118,11 @@
         "overrides": []
       },
       "options": {},
-      "description": "A range around the price starts holding both tokens: its benchmark is the half and half it could have held instead, a one-sided range's the token it went in with."
+      "description": "Against holding the volatile token, holding half and half, and holding dollars. A range around the price starts holding both tokens: its benchmark is the half and half it could have held instead, a one-sided range's the token it went in with."
     },
     {
       "id": 403,
-      "title": "Where the result comes from, in the value token",
+      "title": "Where the result comes from",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -2104,7 +2130,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 58,
         "w": 12,
         "h": 7
       },
@@ -2125,13 +2151,15 @@
         "defaults": {
           "decimals": 4,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "value token"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
       "options": {},
-      "description": "Fees earned so far, against what price moves and costs did: the value less what holding the capital would be worth, less the fees. The two add up to the result."
+      "description": "In the value token. Fees earned so far, against what price moves and costs did: the value less what holding the capital would be worth, less the fees. The two add up to the result."
     },
     {
       "id": 404,
@@ -2143,7 +2171,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 50,
+        "y": 58,
         "w": 12,
         "h": 7
       },
@@ -2162,7 +2190,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "decimals": 5
+          "decimals": 5,
+          "custom": {
+            "axisLabel": "value token"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -2173,7 +2205,8 @@
           "showLegend": false
         },
         "xTickLabelSpacing": 100
-      }
+      },
+      "description": "Fees earned each day, in the value token."
     },
     {
       "id": 500,
@@ -2182,7 +2215,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 65,
         "w": 24,
         "h": 1
       },
@@ -2190,7 +2223,7 @@
     },
     {
       "id": 501,
-      "title": "Campaigns: range in dollars, how long in and out of range, how each ended",
+      "title": "Campaigns",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -2198,7 +2231,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 66,
         "w": 24,
         "h": 10
       },
@@ -2245,6 +2278,10 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "displayName",
+                "value": "result, %"
               }
             ]
           },
@@ -2257,13 +2294,125 @@
               {
                 "id": "custom.width",
                 "value": 170
+              },
+              {
+                "id": "displayName",
+                "value": "how it ended"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hours_in_range"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "hours in range"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hours_out_of_range"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "hours out of range"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dollars_low"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "range low, $"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dollars_high"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "range high, $"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "round trips"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "amount_in"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "put in, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "result, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "fees, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "gas, token"
               }
             ]
           }
         ]
       },
       "options": {},
-      "description": "Hours in range are counted from the hourly series. Out of range is time wholly in the other token. The range is in dollars as entered."
+      "description": "Each campaign: its range in dollars, how long it was in and out of range, and how it ended. Hours in range are counted from the hourly series. Out of range is time wholly in the other token. The range is in dollars as entered."
     },
     {
       "id": 502,
@@ -2275,7 +2424,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 68,
+        "y": 76,
         "w": 24,
         "h": 8
       },
@@ -2294,9 +2443,83 @@
       ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hours_stranded"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "hours out of range"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target_lower"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "target low tick"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target_upper"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "target high tick"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expected_wait"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "expected if waiting"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expected_flip"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "expected if flipping"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expected_close"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "expected if closing"
+              }
+            ]
+          }
+        ]
       },
-      "options": {}
+      "options": {},
+      "description": "Each patience decision while a position was out of range: the expected outcome of waiting, flipping and closing, in the value token, and the action chosen."
     }
   ]
 }

@@ -100,8 +100,8 @@
     },
     {
       "type": "stat",
-      "title": "Chain head age",
-      "description": "How old the newest block the node follows is, from its consensus client (Lighthouse). A block comes every 12 seconds; over 5 minutes means the node is behind the chain.",
+      "title": "Node",
+      "description": "The node machine's Ethereum node. Head age: how old the newest block it follows is, from its consensus client (Lighthouse); a block comes every 12 seconds, so over 5 minutes means it is behind the chain. Peers: the fewer of its two clients' peers (Reth and Lighthouse); none means it cannot follow the chain.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -109,7 +109,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -124,86 +124,6 @@
           "instant": true,
           "range": false,
           "legendFormat": "head age"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 60
-              },
-              {
-                "color": "red",
-                "value": 300
-              }
-            ]
-          },
-          "links": [
-            {
-              "title": "System: Reth internals",
-              "url": "/d/lpbot-reth-node"
-            }
-          ],
-          "noValue": "no node"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center",
-        "text": {
-          "valueSize": 26,
-          "titleSize": 12
-        }
-      },
-      "id": 2
-    },
-    {
-      "type": "stat",
-      "title": "Node peers",
-      "description": "How many peers the node's two clients have: Reth (execution) and Lighthouse (consensus). Red at none: the node cannot follow the chain.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 4,
-        "y": 1,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "max(reth_network_connected_peers)",
-          "instant": true,
-          "range": false,
-          "legendFormat": "execution"
         },
         {
           "refId": "B",
@@ -212,10 +132,10 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(libp2p_peers)",
+          "expr": "min(reth_network_connected_peers or libp2p_peers)",
           "instant": true,
           "range": false,
-          "legendFormat": "consensus"
+          "legendFormat": "peers"
         }
       ],
       "fieldConfig": {
@@ -228,16 +148,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "green",
-                "value": 5
               }
             ]
           },
@@ -246,10 +158,74 @@
               "title": "System: Reth internals",
               "url": "/d/lpbot-reth-node"
             }
-          ],
-          "noValue": "no node"
+          ]
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "head age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 300
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "peers"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "green",
+                      "value": 5
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -262,26 +238,27 @@
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value_and_name",
+        "orientation": "vertical",
         "justifyMode": "center",
         "text": {
-          "valueSize": 26,
-          "titleSize": 12
+          "valueSize": 24,
+          "titleSize": 13
         }
       },
-      "id": 3
+      "id": 2
     },
     {
       "type": "stat",
-      "title": "Watcher last wrote",
-      "description": "How long ago the watcher last wrote the live tables. It writes every few seconds, with or without a new block; red past 2 minutes means the watcher or the database has stopped.",
+      "title": "Watcher",
+      "description": "The watcher (lpbot watch-pools), which follows the pools block by block. Last wrote: how long ago it wrote the live tables; it writes every few seconds with or without a new block, so over 2 minutes means the watcher or the database has stopped. Pools: how many it follows.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
+        "x": 6,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -294,81 +271,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(updated), 999999) as value from live_pools"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 120
-              }
-            ]
-          },
-          "links": [
-            {
-              "title": "Pools: live",
-              "url": "/d/lpbot-live"
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center",
-        "text": {
-          "valueSize": 26,
-          "titleSize": 12
-        }
-      },
-      "id": 4
-    },
-    {
-      "type": "stat",
-      "title": "Pools followed",
-      "description": "How many pools the watcher (lpbot watch-pools) follows block by block.",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 1,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select count(*) as value from live_pools"
+          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(updated), 999999) as \"last wrote\", count(*) as pools from live_pools"
         }
       ],
       "fieldConfig": {
@@ -393,83 +296,17 @@
             }
           ]
         },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center",
-        "text": {
-          "valueSize": 26,
-          "titleSize": 12
-        }
-      },
-      "id": 5
-    },
-    {
-      "type": "stat",
-      "title": "Agents",
-      "description": "Forward agents fine (waiting for their next look, deciding one, or paused or ended on purpose) and those needing someone (late, stopped, failing, without a waiter or with their scheduler down). Needs attention, below, says which and why.",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 1,
-        "w": 4,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select count(*) filter (where state not in ('late','no waiter','stopped','failing','scheduler down')) as \"fine\", count(*) filter (where state in ('late','no waiter','stopped','failing','scheduler down')) as \"need someone\" from agent_status"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "links": [
-            {
-              "title": "Agents",
-              "url": "/d/lpbot-agents"
-            }
-          ]
-        },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "need someone"
+              "options": "last wrote"
             },
             "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
               {
                 "id": "thresholds",
                 "value": {
@@ -481,7 +318,31 @@
                     },
                     {
                       "color": "red",
-                      "value": 1
+                      "value": 120
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pools"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
                     }
                   ]
                 }
@@ -501,26 +362,27 @@
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value_and_name",
+        "orientation": "vertical",
         "justifyMode": "center",
         "text": {
-          "valueSize": 26,
-          "titleSize": 12
+          "valueSize": 24,
+          "titleSize": 13
         }
       },
-      "id": 6
+      "id": 3
     },
     {
       "type": "stat",
-      "title": "Status checked",
-      "description": "How long ago the agent status was last written (every minute, by cron on the node). Red past 10 minutes or when there is none: then nothing about the agents here is current.",
+      "title": "Agents",
+      "description": "Forward agents. Fine: waiting for their next look, deciding one, or paused or ended on purpose. Need someone: late, stopped, failing, without a waiter or with their scheduler down; Needs attention, below, says which and why. Status age: how long ago their status was written, every minute by cron on the node; past 10 minutes nothing about them here is current.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 20,
+        "x": 12,
         "y": 1,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -533,12 +395,12 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(checked), 999999) as value from agent_status"
+          "rawSql": "select count(*) filter (where state not in ('late','no waiter','stopped','failing','scheduler down')) as \"fine\", count(*) filter (where state in ('late','no waiter','stopped','failing','scheduler down')) as \"need someone\", coalesce(extract(epoch from now())::bigint - max(checked), 999999) as \"status age\" from agent_status"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "none",
           "color": {
             "mode": "thresholds"
           },
@@ -546,16 +408,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 180
-              },
-              {
-                "color": "red",
-                "value": 600
               }
             ]
           },
@@ -566,7 +420,92 @@
             }
           ]
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fine"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "need someone"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 180
+                    },
+                    {
+                      "color": "red",
+                      "value": 600
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -578,14 +517,135 @@
         },
         "colorMode": "value",
         "graphMode": "none",
-        "textMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "vertical",
         "justifyMode": "center",
         "text": {
-          "valueSize": 26,
-          "titleSize": 12
+          "valueSize": 24,
+          "titleSize": 13
         }
       },
-      "id": 7
+      "id": 4
+    },
+    {
+      "type": "stat",
+      "title": "Runs stored",
+      "description": "Backtest and agent runs stored in the result tables, and the experiments they belong to.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) as runs, count(distinct experiment) as experiments from runs"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Runs: experiments",
+              "url": "/d/lpbot-runs"
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runs"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "experiments"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "vertical",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 24,
+          "titleSize": 13
+        }
+      },
+      "id": 5
     },
     {
       "type": "row",
@@ -598,7 +658,7 @@
       },
       "collapsed": false,
       "panels": [],
-      "id": 8
+      "id": 6
     },
     {
       "type": "table",
@@ -663,7 +723,7 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 220
+                "value": 200
               }
             ]
           },
@@ -796,7 +856,7 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 9
+      "id": 7
     },
     {
       "type": "row",
@@ -809,7 +869,7 @@
       },
       "collapsed": false,
       "panels": [],
-      "id": 10
+      "id": 8
     },
     {
       "type": "table",
@@ -982,7 +1042,43 @@
             "properties": [
               {
                 "id": "custom.width",
-                "value": 80
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "panel"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 220
               }
             ]
           },
@@ -1028,7 +1124,7 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 11
+      "id": 9
     },
     {
       "type": "row",
@@ -1041,7 +1137,7 @@
       },
       "collapsed": false,
       "panels": [],
-      "id": 12
+      "id": 10
     },
     {
       "type": "table",
@@ -1053,8 +1149,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 21,
-        "w": 16,
+        "y": 24,
+        "w": 24,
         "h": 8
       },
       "targets": [
@@ -1240,21 +1336,21 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 13
+      "id": 11
     },
     {
       "type": "stat",
-      "title": "All followed pools, last 24 hours",
+      "title": "All followed pools, 24h",
       "description": "Volume and fees over the last 24 hours, and the value positions hold now, summed over every followed pool.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 16,
+        "x": 0,
         "y": 21,
-        "w": 8,
-        "h": 8
+        "w": 24,
+        "h": 3
       },
       "targets": [
         {
@@ -1297,27 +1393,27 @@
         "colorMode": "none",
         "graphMode": "none",
         "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "justifyMode": "auto",
+        "orientation": "vertical",
+        "justifyMode": "center",
         "text": {
           "valueSize": 22,
           "titleSize": 13
         }
       },
-      "id": 14
+      "id": 12
     },
     {
       "type": "row",
       "title": "Runs",
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 32,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 15
+      "id": 13
     },
     {
       "type": "table",
@@ -1329,7 +1425,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 33,
         "w": 24,
         "h": 12
       },
@@ -1448,20 +1544,20 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 16
+      "id": 14
     },
     {
       "type": "row",
       "title": "Where things are",
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 45,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 17
+      "id": 15
     },
     {
       "type": "text",
@@ -1469,7 +1565,7 @@
       "description": "Every dashboard, the question it answers, and where the commands are.",
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 46,
         "w": 24,
         "h": 13
       },
@@ -1477,7 +1573,7 @@
         "mode": "markdown",
         "content": "| Subject | Dashboard | The question it answers |\n| --- | --- | --- |\n| Overview | [Overview](/d/lpbot-overview) | What is the whole system doing now, and does anything need me? |\n| Agents | [Agents](/d/lpbot-agents) | What is each agent doing, how is it doing, and why did it decide that? |\n| Pools | [Pools: live](/d/lpbot-live) | What are the followed pools doing right now? |\n| Pools | [Pools: history](/d/lpbot-pool) | How has one pool behaved over its stored history? |\n| Runs | [Runs: experiments](/d/lpbot-runs) | Which experiments are there, and how did the runs of one do? |\n| Runs | [Runs: one run](/d/lpbot-run) | What happened in one run, and where did its result come from? |\n| Runs | [Runs: compare](/d/lpbot-compare) | How do chosen runs, or groups of runs, compare? |\n| Runs | [Runs: pool and range choice](/d/lpbot-zones) | What did a run see when it chose its pool and its ranges? |\n| System | [System: Reth internals](/d/lpbot-reth-node) | Reth's own detailed metrics |\n\nThe same menu sits at the top of every dashboard: **Overview**, **Agents**, and the **Pools**, **Runs** and **System** lists.\n\nTo act, on the node machine, in `~/lpbot`: `make status` checks the whole machine, `make agents` shows every agent with what is wrong, and `deploy/RUNBOOK.md` says what to do."
       },
-      "id": 18
+      "id": 16
     }
   ]
 }

@@ -10,7 +10,11 @@
 //!   link passes is a variable of that dashboard;
 //! - every panel reads a provisioned data source, and every table a query
 //!   names is one of the tables the viewer knows;
-//! - Grafana opens on the Overview.
+//! - Grafana opens on the Overview;
+//! - on our own dashboards (not Reth's), every panel has a title that fits its
+//!   width and a description, every number has a unit, every table shows
+//!   plain words as headers, and a dashboard of more than six panels has
+//!   sections.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -473,4 +477,295 @@ fn the_table_reader_skips_functions_columns_literals_and_its_own_names() {
             .into_iter()
             .collect()
     );
+}
+
+/// Our own dashboards: the label rules do not apply to Reth's, which is
+/// kept as Reth publishes it.
+fn ours() -> Vec<Dashboard> {
+    dashboards()
+        .into_iter()
+        .filter(|d| {
+            !d.json["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "reth")
+        })
+        .collect()
+}
+
+/// How many characters of a title a panel `w` grid columns wide shows
+/// before it cuts it off, on a 1440-pixel screen with Grafana's menu open:
+/// a column is about 42 pixels, the header keeps about 95 for its icons and
+/// a character takes about 7.6. A variable counts as 14, the length of `USDC per WETH`.
+fn title_room(w: u64) -> usize {
+    ((w as f64 * 41.9 - 95.0) / 7.6).floor().max(0.0) as usize
+}
+
+fn title_length(title: &str) -> usize {
+    let mut n = 0;
+    let mut rest = title;
+    while let Some(at) = rest.find("${") {
+        n += rest[..at].chars().count() + 14;
+        rest = rest[at..].split_once('}').map_or("", |(_, r)| r);
+    }
+    n + rest.chars().count()
+}
+
+/// The names of the columns a SQL query returns: each item of its outermost
+/// `select` (after any `with`), named by its alias or its last identifier.
+/// An item that is an expression without an alias is returned whole.
+fn columns(sql: &str) -> Vec<String> {
+    // Split at the top level, outside quotes and parentheses.
+    let chars: Vec<char> = sql.chars().collect();
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    let mut top = String::new();
+    for &c in &chars {
+        match quote {
+            Some(q) => {
+                // Inside quotes only the closing quote is kept, so a comma
+                // or a keyword in a name or a literal splits nothing.
+                if c == q {
+                    quote = None;
+                    top.push(if depth == 0 { c } else { ' ' });
+                } else {
+                    top.push(' ');
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    top.push(if depth == 0 { c } else { ' ' });
+                }
+                '(' => {
+                    depth += 1;
+                    top.push(' ');
+                }
+                ')' => {
+                    depth -= 1;
+                    top.push(' ');
+                }
+                _ => top.push(if depth == 0 { c } else { ' ' }),
+            },
+        }
+    }
+    // `top` keeps only the outermost level, same length as `sql` in chars.
+    let lower = top.to_lowercase();
+    let word_at = |s: &str, w: &str| -> Option<usize> {
+        let mut from = 0;
+        while let Some(i) = s[from..].find(w) {
+            let at = from + i;
+            let before = s[..at]
+                .chars()
+                .last()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            let after = s[at + w.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            if before && after {
+                return Some(at);
+            }
+            from = at + w.len();
+        }
+        None
+    };
+    let Some(select) = word_at(&lower, "select") else {
+        return vec![];
+    };
+    let body_start = select + "select".len();
+    let body_end = word_at(&lower[body_start..], "from").map_or(lower.len(), |i| body_start + i);
+    // Cut the original text at the same places, splitting at top-level commas.
+    let original: String = chars.iter().collect();
+    let body = &original[body_start..body_end];
+    let mask = &top[body_start..body_end];
+    let mut items = Vec::new();
+    let mut start = 0;
+    for (i, c) in mask.char_indices() {
+        if c == ',' {
+            items.push(body[start..i].trim().to_string());
+            start = i + 1;
+        }
+    }
+    items.push(body[start..].trim().to_string());
+    items
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            let lower = item.to_lowercase();
+            // The last top-level ` as ` names the column.
+            if let Some(at) = lower.rfind(" as ") {
+                let alias = item[at + 4..].trim();
+                if !alias.contains('(') && !alias.contains(' ') || alias.starts_with('"') {
+                    return alias.trim_matches('"').to_string();
+                }
+            }
+            let bare = item.rsplit('.').next().unwrap_or(&item);
+            if bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                bare.to_string()
+            } else {
+                item.clone()
+            }
+        })
+        .collect()
+}
+
+fn renamed_or_hidden(panel: &Value) -> (BTreeSet<String>, Vec<String>) {
+    let mut names = BTreeSet::new();
+    let mut shown = Vec::new();
+    for o in panel["fieldConfig"]["overrides"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if o["matcher"]["id"] != "byName" {
+            continue;
+        }
+        let name = o["matcher"]["options"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        for p in o["properties"].as_array().into_iter().flatten() {
+            if p["id"] == "displayName" {
+                names.insert(name.clone());
+                shown.push(p["value"].as_str().unwrap_or_default().to_string());
+            }
+            if p["id"] == "custom.hidden" && p["value"] == true {
+                names.insert(name.clone());
+            }
+        }
+    }
+    (names, shown)
+}
+
+#[test]
+fn every_panel_has_a_title_that_fits_and_a_description() {
+    for d in ours() {
+        for p in d.panels() {
+            if p["type"] == "row" {
+                continue;
+            }
+            let title = p["title"].as_str().unwrap_or_default();
+            assert!(
+                !title.is_empty(),
+                "{}: panel {} has no title",
+                d.file,
+                p["id"]
+            );
+            let w = p["gridPos"]["w"].as_u64().unwrap_or(24);
+            let room = title_room(w).min(45);
+            assert!(
+                title_length(title) <= room,
+                "{}: {title:?} is too long for a panel {w} columns wide ({room} characters): shorten it and \
+                 move the rest into the description",
+                d.file
+            );
+            let description = p["description"].as_str().unwrap_or_default();
+            assert!(
+                description.len() > 10,
+                "{}: panel {title:?} needs a description of what it shows",
+                d.file
+            );
+        }
+    }
+}
+
+#[test]
+fn every_number_has_a_unit() {
+    for d in ours() {
+        for p in d.panels() {
+            let kind = p["type"].as_str().unwrap_or_default();
+            if !matches!(kind, "stat" | "timeseries" | "barchart") {
+                continue;
+            }
+            let defaults = &p["fieldConfig"]["defaults"];
+            let unit = defaults["unit"].as_str().unwrap_or_default();
+            assert!(
+                !unit.is_empty(),
+                "{}: {:?} has no unit; use \"none\" for a plain count",
+                d.file,
+                p["title"]
+            );
+            if kind != "stat" && unit == "none" {
+                assert!(
+                    defaults["custom"]["axisLabel"]
+                        .as_str()
+                        .is_some_and(|l| !l.is_empty()),
+                    "{}: {:?} has no unit, so its axis needs a label saying what it counts",
+                    d.file,
+                    p["title"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_table_shows_plain_words() {
+    for d in ours() {
+        for p in d.panels().into_iter().filter(|p| p["type"] == "table") {
+            let (fixed, shown) = renamed_or_hidden(p);
+            for name in &shown {
+                assert!(
+                    !name.contains('_'),
+                    "{}: {:?} shows the header {name:?}",
+                    d.file,
+                    p["title"]
+                );
+            }
+            for target in p["targets"].as_array().into_iter().flatten() {
+                let Some(sql) = target["rawSql"].as_str() else {
+                    continue;
+                };
+                for column in columns(sql) {
+                    let code = column.contains('_') || column.contains('(') || column.contains('?');
+                    assert!(
+                        !code || fixed.contains(&column),
+                        "{}: {:?} shows the column {column:?}: name it in plain words (a displayName \
+                         override) or hide it",
+                        d.file,
+                        p["title"]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_dashboard_of_more_than_six_panels_has_sections() {
+    for d in ours() {
+        let panels = d.panels();
+        let shown = panels.iter().filter(|p| p["type"] != "row").count();
+        let rows = panels.iter().filter(|p| p["type"] == "row").count();
+        assert!(
+            shown <= 6 || rows > 0,
+            "{}: {shown} panels and no sections",
+            d.file
+        );
+    }
+}
+
+#[test]
+fn the_column_reader_names_what_a_query_returns() {
+    let sql = "with problems as (select 1 as rank, x from t)\n\
+               select what, s.state, count(*) as runs, to_timestamp(s.due) as \"since, UTC\",\n\
+               coalesce(r.a, 'one, two') as shape, r.width_ticks, extract(epoch from now())::bigint - checked\n\
+               from problems";
+    assert_eq!(
+        columns(sql),
+        [
+            "what",
+            "state",
+            "runs",
+            "since, UTC",
+            "shape",
+            "width_ticks",
+            "extract(epoch from now())::bigint - checked"
+        ]
+    );
+    assert_eq!(title_room(4), 9);
+    assert_eq!(title_room(6), 20);
+    assert_eq!(title_length("Price, ${unit}"), 21);
 }

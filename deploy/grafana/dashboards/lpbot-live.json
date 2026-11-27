@@ -198,6 +198,19 @@
   ],
   "panels": [
     {
+      "type": "row",
+      "title": "Every pool",
+      "collapsed": false,
+      "panels": [],
+      "id": 27,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 1,
       "title": "Every pool now",
       "type": "table",
@@ -207,7 +220,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 1,
         "w": 24,
         "h": 8
       },
@@ -360,8 +373,21 @@
       "description": "Every followed pool at the last block applied. Value held is what all positions hold at the price. Liquidity attributed is the share of the active liquidity in positions the service knows: positions nobody touched since the start of the stored history stay unattributed. Behind is blocks behind the node's head; written is seconds since the row was written. Click a pool to show it below."
     },
     {
+      "type": "row",
+      "title": "This pool now",
+      "collapsed": false,
+      "panels": [],
+      "id": 28,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 2,
-      "title": "Price, ${unit}",
+      "title": "Price",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -369,7 +395,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 10,
         "w": 4,
         "h": 4
       },
@@ -414,11 +440,11 @@
           "valueSize": 26
         }
       },
-      "description": "At the last block applied: the dollar price of the pool's other token, or the quote token per base token without a dollar stable."
+      "description": "In ${unit}. At the last block applied: the dollar price of the pool's other token, or the quote token per base token without a dollar stable."
     },
     {
       "id": 3,
-      "title": "Value held by positions",
+      "title": "Value held",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -426,8 +452,8 @@
       },
       "gridPos": {
         "x": 4,
-        "y": 8,
-        "w": 4,
+        "y": 10,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -475,16 +501,16 @@
     },
     {
       "id": 4,
-      "title": "Volume, last hour",
+      "title": "Volume",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
-        "y": 8,
-        "w": 3,
+        "x": 10,
+        "y": 10,
+        "w": 7,
         "h": 4
       },
       "targets": [
@@ -497,7 +523,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select volume_usd_1h as value from live_pools where pool = '$pool'"
+          "rawSql": "select volume_usd_1h as \"last hour\", volume_usd_24h as \"last 24 hours\" from live_pools where pool = '$pool'"
         }
       ],
       "fieldConfig": {
@@ -519,134 +545,21 @@
           ],
           "fields": "/.*/"
         },
-        "textMode": "value",
+        "textMode": "value_and_name",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
         "text": {
-          "valueSize": 26
+          "valueSize": 26,
+          "titleSize": 13
         }
       },
-      "description": "Dollars swapped in the last hour, counted on the quote side."
+      "description": "Dollars swapped in the last hour and in the last 24 hours, counted on the quote side."
     },
     {
       "id": 5,
-      "title": "Fees, last hour",
-      "type": "stat",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 11,
-        "y": 8,
-        "w": 3,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select fees_usd_1h as value from live_pools where pool = '$pool'"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#3274d9"
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "/.*/"
-        },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "text": {
-          "valueSize": 26
-        }
-      },
-      "description": "Fees swappers paid in the last hour, in dollars."
-    },
-    {
-      "id": 6,
-      "title": "Volume, 24h",
-      "type": "stat",
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
-      },
-      "gridPos": {
-        "x": 14,
-        "y": 8,
-        "w": 3,
-        "h": 4
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
-          },
-          "rawQuery": true,
-          "editorMode": "code",
-          "format": "table",
-          "rawSql": "select volume_usd_24h as value from live_pools where pool = '$pool'"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#3274d9"
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "/.*/"
-        },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "text": {
-          "valueSize": 26
-        }
-      },
-      "description": "Dollars swapped in the last 24 hours."
-    },
-    {
-      "id": 7,
-      "title": "Fees, 24h",
+      "title": "Fees",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -654,8 +567,8 @@
       },
       "gridPos": {
         "x": 17,
-        "y": 8,
-        "w": 3,
+        "y": 10,
+        "w": 7,
         "h": 4
       },
       "targets": [
@@ -668,7 +581,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select fees_usd_24h as value from live_pools where pool = '$pool'"
+          "rawSql": "select fees_usd_1h as \"last hour\", fees_usd_24h as \"last 24 hours\" from live_pools where pool = '$pool'"
         }
       ],
       "fieldConfig": {
@@ -690,28 +603,29 @@
           ],
           "fields": "/.*/"
         },
-        "textMode": "value",
+        "textMode": "value_and_name",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
         "text": {
-          "valueSize": 26
+          "valueSize": 26,
+          "titleSize": 13
         }
       },
-      "description": "Fees swappers paid in the last 24 hours, in dollars."
+      "description": "Fees swappers paid in the last hour and in the last 24 hours, in dollars."
     },
     {
       "id": 8,
-      "title": "Swaps, last hour",
+      "title": "Swaps 1h",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 20,
-        "y": 8,
+        "x": 0,
+        "y": 14,
         "w": 4,
         "h": 4
       },
@@ -760,16 +674,16 @@
     },
     {
       "id": 9,
-      "title": "Active liquidity",
+      "title": "Liquidity",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 0,
-        "y": 12,
-        "w": 3,
+        "x": 4,
+        "y": 14,
+        "w": 4,
         "h": 4
       },
       "targets": [
@@ -824,9 +738,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 3,
-        "y": 12,
-        "w": 3,
+        "x": 8,
+        "y": 14,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -881,9 +795,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 6,
-        "y": 12,
-        "w": 3,
+        "x": 14,
+        "y": 14,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -931,16 +845,16 @@
     },
     {
       "id": 12,
-      "title": "Liquidity attributed",
+      "title": "Attributed",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 9,
-        "y": 12,
-        "w": 3,
+        "x": 19,
+        "y": 14,
+        "w": 5,
         "h": 4
       },
       "targets": [
@@ -987,17 +901,30 @@
       "description": "Share of the active liquidity in positions the service knows. The rest is in positions nobody touched since the stored history begins."
     },
     {
+      "type": "row",
+      "title": "Is it current?",
+      "collapsed": false,
+      "panels": [],
+      "id": 29,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 13,
-      "title": "Block",
+      "title": "Block applied",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 12,
-        "y": 12,
-        "w": 3,
+        "x": 0,
+        "y": 19,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1052,9 +979,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 15,
-        "y": 12,
-        "w": 3,
+        "x": 6,
+        "y": 19,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1117,16 +1044,16 @@
     },
     {
       "id": 14,
-      "title": "Blocks behind the head",
+      "title": "Blocks behind head",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 18,
-        "y": 12,
-        "w": 3,
+        "x": 12,
+        "y": 19,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1190,16 +1117,16 @@
     },
     {
       "id": 15,
-      "title": "Written",
+      "title": "Last written",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 21,
-        "y": 12,
-        "w": 3,
+        "x": 18,
+        "y": 19,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -1261,6 +1188,19 @@
       "description": "Seconds since the service last wrote this pool's row. Above a minute, it is not writing: see `make watch-logs` on the node machine."
     },
     {
+      "type": "row",
+      "title": "Minute by minute",
+      "collapsed": false,
+      "panels": [],
+      "id": 30,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 16,
       "title": "Price, ${unit}",
       "type": "timeseries",
@@ -1270,7 +1210,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -1294,7 +1234,8 @@
             "lineWidth": 1,
             "fillOpacity": 10,
             "spanNulls": true,
-            "showPoints": "never"
+            "showPoints": "never",
+            "axisLabel": "price"
           },
           "decimals": 2
         },
@@ -1365,7 +1306,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -1418,7 +1359,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 32,
         "w": 8,
         "h": 7
       },
@@ -1470,7 +1411,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 24,
+        "y": 32,
         "w": 8,
         "h": 7
       },
@@ -1515,7 +1456,7 @@
     },
     {
       "id": 20,
-      "title": "Swaps, mints and burns per minute",
+      "title": "Swaps, mints and burns",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -1523,7 +1464,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 24,
+        "y": 32,
         "w": 8,
         "h": 7
       },
@@ -1552,7 +1493,8 @@
             "stacking": {
               "mode": "normal",
               "group": "A"
-            }
+            },
+            "axisLabel": "per minute"
           },
           "decimals": 0
         },
@@ -1571,6 +1513,19 @@
       "description": "Events in each minute: swaps, and liquidity put in (mints) and taken out (burns)."
     },
     {
+      "type": "row",
+      "title": "Liquidity around the price",
+      "collapsed": false,
+      "panels": [],
+      "id": 31,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 21,
       "title": "Liquidity near the price now, in dollars",
       "type": "barchart",
@@ -1580,7 +1535,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 40,
         "w": 12,
         "h": 9
       },
@@ -1637,7 +1592,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 31,
+        "y": 40,
         "w": 12,
         "h": 9
       },
@@ -1685,6 +1640,19 @@
       "description": "The same, 20% either side of the price in 0.5% buckets (stablecoin pairs: 0.5% in 0.01% buckets)."
     },
     {
+      "type": "row",
+      "title": "Positions and swaps",
+      "collapsed": false,
+      "panels": [],
+      "id": 32,
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 23,
       "title": "Open positions",
       "type": "table",
@@ -1694,7 +1662,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 50,
         "w": 24,
         "h": 12
       },
@@ -1970,7 +1938,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 62,
         "w": 24,
         "h": 10
       },
@@ -2166,7 +2134,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 72,
         "w": 24,
         "h": 10
       },
