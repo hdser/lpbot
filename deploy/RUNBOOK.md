@@ -249,9 +249,15 @@ Grafana evaluates the rules in `deploy/grafana/alerting/rules.yml` every minute:
 Alerting is on only where `GRAFANA_ALERTING` names the alerting folder; elsewhere (the laptop's viewer) it is off. To turn it on, on the node machine:
 
 1. The owner creates a bot: in Telegram, talk to `@BotFather`, send `/newbot`, and keep the token it gives.
-2. The owner sends the bot any message, then reads the chat id from `https://api.telegram.org/bot<token>/getUpdates` (`"chat":{"id":...}`) in a browser.
-3. The owner adds to `deploy/.env`: `TELEGRAM_BOT_TOKEN=<token>`, `TELEGRAM_CHAT_ID=<id>`, `GRAFANA_ROOT_URL=http://127.0.0.1:3001/` and, last, `GRAFANA_ALERTING=./grafana/alerting`. With alerting on and a key blank, Grafana does not start, and every dashboard with it.
+2. The owner opens the bot's own chat (search for the `@username` BotFather gave it), presses Start or sends it any message, then reads the chat id from `https://api.telegram.org/bot<token>/getUpdates` (`"chat":{"id":...}`) in a browser.
+   - **The chat id is the owner's, not the bot's.** The number before the colon in the token is the bot's own id. With it, Telegram refuses every message: "Forbidden: the bot can't send messages to the bot".
+   - **`getUpdates` answering `"result":[]`** means nothing reached this bot. Either the message went to another chat, or it was more than a day ago, which is as long as Telegram keeps updates. `https://api.telegram.org/bot<token>/getMe` names the bot the token belongs to.
+3. The owner adds to the node machine's `deploy/.env` (`~/lpbot/deploy/.env`, not the laptop's): `TELEGRAM_BOT_TOKEN=<token>`, `TELEGRAM_CHAT_ID=<id>`, `GRAFANA_ROOT_URL=http://127.0.0.1:3001/` and, last, `GRAFANA_ALERTING=./grafana/alerting`.
+   - With alerting on and a key blank, Grafana does not start, and every dashboard with it.
+   - On the laptop, `GRAFANA_ALERTING` stays unset. Otherwise the next `make viewer` sends a second set of alerts, from the laptop's own data.
 4. `docker compose -f deploy/docker-compose.yml up -d --no-deps grafana`. The daily check-in arrives within a minute or two: that is the test.
+   - If it does not arrive, Grafana's Alerting, Contact points, `owner` shows the last delivery attempt and Telegram's answer.
+   - **Right after a key changes, one failed attempt with the old key is normal.** After the `up`, Grafana's sender starts with the contact point it had stored, a second before the files update it. It takes the new one within a minute and sends again what failed. Judge by the attempt after that.
 
 The token is a secret: never print `deploy/.env`, and note that `docker inspect` and `docker compose config` print the Grafana container's environment, token included.
 
