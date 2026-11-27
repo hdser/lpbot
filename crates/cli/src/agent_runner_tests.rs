@@ -63,7 +63,93 @@ fn attempt() -> Attempt {
         as_of: 200,
         response: response_json(&response()),
         review: None,
+        decide_job: None,
     }
+}
+
+fn running(_: &str) -> Result<bool> {
+    Ok(true)
+}
+
+fn ended(_: &str) -> Result<bool> {
+    Ok(false)
+}
+
+/// The decide job the attempt saved, in a folder of its own, with its
+/// exact recording arguments; it has not exited yet.
+fn decide_job(config: &Config, attempt: &Attempt) -> Job {
+    let waiting = agent_cmd::Pending {
+        look: attempt.look,
+        at: Some(attempt.as_of),
+        number: None,
+        day: None,
+        seen: None,
+        record: None,
+    };
+    let job = Job {
+        args: recording_args(config, &config.agents[0], &waiting, &response()).unwrap(),
+        token: "old-token".into(),
+        directory: config.state_dir.join("jobs").join("own-decide"),
+        session: "own-decide".into(),
+        data_root: config.state_dir.join("lake"),
+    };
+    std::fs::create_dir_all(&job.directory).unwrap();
+    agent_lock::atomic(
+        &job.directory.join("job.json"),
+        &serde_json::to_vec(&job).unwrap(),
+    )
+    .unwrap();
+    job
+}
+
+/// What a job leaves when it ends: its output, then its exit record.
+fn finish(job: &Job, success: bool, stdout: &str) {
+    std::fs::write(job.directory.join("stdout.txt"), stdout).unwrap();
+    agent_lock::atomic(
+        &job.directory.join("exit.json"),
+        json!({"success": success, "code": i32::from(!success)})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+}
+
+/// Another job of the same agent or panel that ended since, here a daily
+/// evaluation, with its record in a slot's `last/`.
+fn other_job(config: &Config, slot: Slot) -> Job {
+    let job = Job {
+        args: vec!["agent".into(), "evaluate".into(), "experiment.yml".into()],
+        token: String::new(),
+        directory: config.state_dir.join("jobs").join("daily-evaluate"),
+        session: "daily-evaluate".into(),
+        data_root: config.state_dir.join("lake"),
+    };
+    std::fs::create_dir_all(&job.directory).unwrap();
+    finish(&job, true, "Scored.\n");
+    agent_lock::atomic(
+        &slot.last(&config.state_dir),
+        &serde_json::to_vec(&job).unwrap(),
+    )
+    .unwrap();
+    job
+}
+
+/// The decision and its reasoning record, as `agent decide` commits them.
+fn commit(config: &Config, attempt: &Attempt) {
+    let path = &config.agents[0].decisions;
+    std::fs::write(path, format!("{}\n", canonical(attempt))).unwrap();
+    std::fs::write(
+        agent_log::records_path(path),
+        format!("{}\n", audit_record(attempt)),
+    )
+    .unwrap();
+}
+
+fn due_ack(attempt: &Attempt) -> String {
+    format!(
+        "Recorded.\nNext look due: {}Z\n",
+        agent_cmd::iso(attempt.as_of + 900)
+    )
 }
 
 fn canonical(attempt: &Attempt) -> Value {
@@ -194,57 +280,202 @@ fn entry_reviews_do_not_replace_the_daily_other_decision_review() {
 }
 
 #[test]
-fn recovered_commit_requires_its_matching_successful_job_and_due_acknowledgement() {
+fn recovered_commit_reads_its_own_decide_job_and_due_acknowledgement() {
     let dir = TestDir::new();
     let config = config(&dir.0);
     let agent = &config.agents[0];
-    let attempt = attempt();
+    let mut attempt = attempt();
     let due = attempt.as_of + 900;
-    assert!(recovered_recording(&config, agent, &attempt, due).is_err());
-    let waiting = agent_cmd::Pending {
-        look: attempt.look,
-        at: Some(attempt.as_of),
-        number: None,
-        day: None,
-        seen: None,
-        record: None,
-    };
-    let job = Job {
-        args: recording_args(&config, agent, &waiting, &response()).unwrap(),
-        token: "old-token".into(),
-        directory: dir.0.join("completed-decide"),
-        session: "own-decide".into(),
-        data_root: dir.0.join("lake"),
-    };
-    std::fs::create_dir_all(&job.directory).unwrap();
+    let job = decide_job(&config, &attempt);
+    finish(&job, true, &due_ack(&attempt));
+    // The old runner's pointer: a matching job in the agent's last/ record
+    // proves nothing when the attempt does not name its own.
     agent_lock::atomic(
-        &config.state_dir.join("last/solo.json"),
+        &Slot::Commands("solo").last(&config.state_dir),
         &serde_json::to_vec(&job).unwrap(),
     )
     .unwrap();
-    let stdout = job.directory.join("stdout.txt");
-    let exit = job.directory.join("exit.json");
-    std::fs::write(
-        &stdout,
-        format!("Next look due: {}Z\n", agent_cmd::iso(due)),
-    )
-    .unwrap();
-    std::fs::write(&exit, r#"{"success":false,"code":1}"#).unwrap();
-    assert!(recovered_recording(&config, agent, &attempt, due).is_err());
-    std::fs::write(&exit, r#"{"success":true,"code":0}"#).unwrap();
-    assert!(!recovered_recording(&config, agent, &attempt, due).unwrap());
-    std::fs::write(&stdout, "Recorded without a due acknowledgement.\n").unwrap();
-    assert!(recovered_recording(&config, agent, &attempt, due).is_err());
-    std::fs::write(&stdout, "The loss limit stopped the run\n").unwrap();
-    assert!(recovered_recording(&config, agent, &attempt, due).unwrap());
-    let mut mismatched = job;
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).is_err());
+    attempt.decide_job = Some(dir.0.join("no-such-job"));
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).is_err());
+    attempt.decide_job = Some(job.directory.clone());
+    assert!(!recovered_recording(&config, agent, &attempt, due, &ended).unwrap());
+    finish(&job, false, &due_ack(&attempt));
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).is_err());
+    finish(&job, true, "Recorded without a due acknowledgement.\n");
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).is_err());
+    finish(&job, true, "The loss limit stopped the run\n");
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).unwrap());
+    let mut mismatched = Job {
+        args: job.args.clone(),
+        ..job
+    };
     mismatched.args.push("different".into());
-    agent_lock::atomic(
-        &config.state_dir.join("last/solo.json"),
-        &serde_json::to_vec(&mismatched).unwrap(),
+    let record = mismatched.directory.join("job.json");
+    agent_lock::atomic(&record, &serde_json::to_vec(&mismatched).unwrap()).unwrap();
+    assert!(recovered_recording(&config, agent, &attempt, due, &ended).is_err());
+    mismatched.args.pop();
+    mismatched.directory = dir.0.join("another-folder");
+    agent_lock::atomic(&record, &serde_json::to_vec(&mismatched).unwrap()).unwrap();
+    assert!(
+        recovered_recording(&config, agent, &attempt, due, &ended).is_err(),
+        "a record naming another folder is not this job's"
+    );
+}
+
+#[test]
+fn slots_never_share_a_record_whatever_the_agents_are_named() {
+    let dir = TestDir::new();
+    let state = dir.0.join("state");
+    let names = ["model", "daily", "panel", "solo", "solo-model", "model_1"];
+    let mut slots = vec![Slot::Daily];
+    for name in names {
+        assert!(is_handle(name));
+        slots.push(Slot::Commands(name));
+        slots.push(Slot::Model(name));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for slot in &slots {
+        assert!(
+            seen.insert(slot.active(&state)),
+            "{slot:?} shares an active record"
+        );
+        assert!(
+            !slot.session("next").contains(['.', ':']),
+            "tmux names take no dots"
+        );
+        if !matches!(slot, Slot::Commands(_)) {
+            assert!(
+                !is_handle(&slot.key()),
+                "no agent can be named like the {slot:?} slot"
+            );
+        }
+    }
+    assert_ne!(
+        Slot::Model("solo").last(&state),
+        Slot::Commands("model").last(&state),
+        "a model call never lands in the record of an agent named model"
+    );
+    for name in ["", "a.model", "panel.daily", "a b", "a/b"] {
+        assert!(!is_handle(name), "{name:?} is not a handle");
+    }
+}
+
+#[test]
+fn a_daily_job_between_a_decide_and_its_reconciliation_changes_nothing() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let agent = &config.agents[0];
+    // Committed: the decide ran to the end, but the cycle failed before it
+    // reconciled; the daily job ran in between. Before, the daily job used
+    // the first agent's slot and left its own record in last/solo.json.
+    let mut attempt = attempt();
+    let job = decide_job(&config, &attempt);
+    attempt.decide_job = Some(job.directory.clone());
+    finish(&job, true, &due_ack(&attempt));
+    commit(&config, &attempt);
+    other_job(&config, Slot::Commands("solo"));
+    other_job(&config, Slot::Daily);
+    let mut state = AgentState {
+        attempt: Some(attempt.clone()),
+        phase: "recording".into(),
+        ..AgentState::default()
+    };
+    let canonical = reconcile(&config, agent, 0, &mut state, &ended).unwrap();
+    assert_eq!(canonical.count, 1);
+    assert!(state.attempt.is_none());
+    assert!(!state.stopped, "{}", state.phase);
+    assert_eq!(state.phase, "reconciled_committed_decision");
+    assert_eq!(state.next_due, attempt.as_of + 900);
+
+    // Not committed: the decide never wrote, and the daily job ran since.
+    // The response is discarded, never sent again, and nothing stops.
+    let dir = TestDir::new();
+    let config = self::config(&dir.0);
+    let mut attempt = self::attempt();
+    let job = decide_job(&config, &attempt);
+    attempt.decide_job = Some(job.directory.clone());
+    finish(&job, true, &due_ack(&attempt));
+    other_job(&config, Slot::Daily);
+    let mut state = AgentState {
+        attempt: Some(attempt),
+        ..AgentState::default()
+    };
+    reconcile(&config, &config.agents[0], 0, &mut state, &ended).unwrap();
+    assert!(state.attempt.is_none());
+    assert!(!state.stopped);
+    assert_eq!(state.phase, "refresh_after_uncommitted_attempt");
+}
+
+#[test]
+fn a_crash_with_the_decide_job_still_running_waits_for_it() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let agent = &config.agents[0];
+    let mut attempt = attempt();
+    let job = decide_job(&config, &attempt);
+    attempt.decide_job = Some(job.directory.clone());
+    let active = Slot::Commands("solo").active(&config.state_dir);
+    agent_lock::atomic(&active, &serde_json::to_vec(&job).unwrap()).unwrap();
+    // A later job of the same agent's slot is not the decide job.
+    other_job(&config, Slot::Commands("solo"));
+    let mut state = AgentState {
+        attempt: Some(attempt.clone()),
+        phase: "recording".into(),
+        ..AgentState::default()
+    };
+
+    // Its tmux session is gone and it left no exit: nothing is decided
+    // about the attempt, and its record stays for inspection.
+    assert!(reconcile(&config, agent, 0, &mut state, &ended).is_err());
+    assert!(state.attempt.is_some());
+    assert!(!state.stopped);
+    assert!(active.exists());
+
+    // Still running: the coordinator waits for it to commit and exit.
+    let (finished, commits) = (
+        Job {
+            args: job.args.clone(),
+            ..job
+        },
+        attempt.clone(),
+    );
+    let config_for_job = self::config(&dir.0);
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        commit(&config_for_job, &commits);
+        finish(&finished, true, &due_ack(&commits));
+    });
+    let canonical = reconcile(&config, agent, 0, &mut state, &running).unwrap();
+    worker.join().unwrap();
+    assert_eq!(canonical.count, 1);
+    assert!(state.attempt.is_none());
+    assert!(!state.stopped, "{}", state.phase);
+    assert_eq!(state.phase, "reconciled_committed_decision");
+    assert!(!active.exists());
+    let last: Job = serde_json::from_slice(
+        &std::fs::read(Slot::Commands("solo").last(&config.state_dir)).unwrap(),
     )
     .unwrap();
-    assert!(recovered_recording(&config, agent, &attempt, due).is_err());
+    assert_eq!(last.directory, attempt.decide_job.unwrap());
+}
+
+#[test]
+fn a_job_never_starts_in_a_slot_that_still_holds_one() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let attempt = attempt();
+    let held = decide_job(&config, &attempt);
+    let slot = Slot::Commands("solo");
+    agent_lock::atomic(
+        &slot.active(&config.state_dir),
+        &serde_json::to_vec(&held).unwrap(),
+    )
+    .unwrap();
+    let Err(error) = launch(&config, slot, &held) else {
+        panic!("a held slot started another job");
+    };
+    assert!(format!("{error:#}").contains("still holds a job"));
 }
 
 #[test]
