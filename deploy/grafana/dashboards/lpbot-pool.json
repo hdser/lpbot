@@ -128,8 +128,21 @@
   ],
   "panels": [
     {
+      "type": "row",
+      "title": "Now",
+      "collapsed": false,
+      "panels": [],
+      "id": 26,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 1,
-      "title": "Price, ${unit}",
+      "title": "Price",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -137,8 +150,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
-        "w": 4,
+        "y": 1,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -182,20 +195,20 @@
           "valueSize": 30
         }
       },
-      "description": "At the latest hourly sample: the dollar price of the pool's other token, or the quote token per base token without a dollar stable."
+      "description": "In ${unit}. At the latest hourly sample: the dollar price of the pool's other token, or the quote token per base token without a dollar stable."
     },
     {
       "id": 20,
-      "title": "Value held by positions",
+      "title": "Value held",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 4,
-        "y": 0,
-        "w": 4,
+        "x": 6,
+        "y": 1,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -250,9 +263,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 8,
-        "y": 0,
-        "w": 4,
+        "x": 12,
+        "y": 1,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -295,20 +308,21 @@
         "text": {
           "valueSize": 30
         }
-      }
+      },
+      "description": "Swap volume over the newest 24 hours stored, in dollars."
     },
     {
       "id": 22,
-      "title": "Fees swappers paid, 24h",
+      "title": "Fees paid, 24h",
       "type": "stat",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
       },
       "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 3,
+        "x": 18,
+        "y": 1,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -351,7 +365,8 @@
         "text": {
           "valueSize": 30
         }
-      }
+      },
+      "description": "Fees swappers paid over the newest 24 hours stored, in dollars."
     },
     {
       "id": 23,
@@ -362,9 +377,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 15,
-        "y": 0,
-        "w": 3,
+        "x": 0,
+        "y": 5,
+        "w": 8,
         "h": 4
       },
       "targets": [
@@ -407,7 +422,8 @@
         "text": {
           "valueSize": 30
         }
-      }
+      },
+      "description": "Swaps over the newest 24 hours stored."
     },
     {
       "id": 24,
@@ -418,9 +434,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 18,
-        "y": 0,
-        "w": 3,
+        "x": 8,
+        "y": 5,
+        "w": 8,
         "h": 4
       },
       "targets": [
@@ -475,9 +491,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 21,
-        "y": 0,
-        "w": 3,
+        "x": 16,
+        "y": 5,
+        "w": 8,
         "h": 4
       },
       "targets": [
@@ -524,6 +540,19 @@
       "description": "The last day's fees over the value held by positions, a year at that pace. Positions near the price earn more than this, those far from it nothing."
     },
     {
+      "type": "row",
+      "title": "History",
+      "collapsed": false,
+      "panels": [],
+      "id": 27,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
       "id": 2,
       "title": "Price",
       "type": "timeseries",
@@ -533,7 +562,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 4,
+        "y": 10,
         "w": 12,
         "h": 8
       },
@@ -554,8 +583,10 @@
         "defaults": {
           "decimals": 2,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "price"
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -572,7 +603,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 4,
+        "y": 10,
         "w": 12,
         "h": 8
       },
@@ -599,7 +630,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "What the pool's positions held, in dollars, through the stored history."
     },
     {
       "id": 4,
@@ -611,7 +643,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 12,
+        "y": 18,
         "w": 8,
         "h": 8
       },
@@ -640,7 +672,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Swap volume each day, in dollars."
     },
     {
       "id": 5,
@@ -652,7 +685,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 12,
+        "y": 18,
         "w": 8,
         "h": 8
       },
@@ -681,7 +714,8 @@
         },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Fees swappers paid each day, in dollars."
     },
     {
       "id": 6,
@@ -693,7 +727,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 12,
+        "y": 18,
         "w": 8,
         "h": 8
       },
@@ -720,10 +754,36 @@
             "lineWidth": 1
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_over_value_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "volume over value held"
+              }
+            ]
+          }
+        ]
       },
       "options": {},
       "description": "How many times over the liquidity traded in a day: the pool's own measure of how busy it is for its size."
+    },
+    {
+      "type": "row",
+      "title": "Liquidity",
+      "collapsed": false,
+      "panels": [],
+      "id": 28,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      }
     },
     {
       "id": 7,
@@ -735,7 +795,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 27,
         "w": 24,
         "h": 9
       },
@@ -784,7 +844,7 @@
     },
     {
       "id": 8,
-      "title": "Liquidity around the price over time, in dollars",
+      "title": "Liquidity around the price over time",
       "type": "heatmap",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -792,7 +852,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 36,
         "w": 24,
         "h": 12
       },
@@ -846,7 +906,7 @@
           "color": "rgba(255,0,255,0.7)"
         }
       },
-      "description": "What positions held in each bucket of prices, day by day, within the span around the price that day. Brighter is more. The price runs through the band where both sides meet."
+      "description": "In dollars. What positions held in each bucket of prices, day by day, within the span around the price that day. Brighter is more. The price runs through the band where both sides meet."
     },
     {
       "id": 9,
@@ -858,7 +918,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 48,
         "w": 24,
         "h": 6
       },
@@ -879,8 +939,10 @@
         "defaults": {
           "decimals": 0,
           "custom": {
-            "lineWidth": 1
-          }
+            "lineWidth": 1,
+            "axisLabel": "liquidity (L)"
+          },
+          "unit": "short"
         },
         "overrides": []
       },

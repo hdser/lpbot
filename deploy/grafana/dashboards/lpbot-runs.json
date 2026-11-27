@@ -162,7 +162,7 @@
               },
               {
                 "id": "custom.width",
-                "value": 280
+                "value": 240
               }
             ]
           },
@@ -181,6 +181,18 @@
                 "value": 90
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(from|to)$"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
           }
         ]
       },
@@ -192,7 +204,7 @@
     },
     {
       "id": 1,
-      "title": "Runs",
+      "title": "Runs of this experiment",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -238,6 +250,10 @@
               {
                 "id": "custom.width",
                 "value": 260
+              },
+              {
+                "id": "displayName",
+                "value": "run"
               }
             ]
           },
@@ -254,6 +270,10 @@
               {
                 "id": "decimals",
                 "value": 3
+              },
+              {
+                "id": "displayName",
+                "value": "result"
               }
             ]
           },
@@ -270,6 +290,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "max drawdown"
               }
             ]
           },
@@ -286,6 +310,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "result in $"
               }
             ]
           },
@@ -302,6 +330,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "holding in $"
               }
             ]
           },
@@ -318,6 +350,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "APR"
               }
             ]
           },
@@ -334,6 +370,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "fee APR"
               }
             ]
           },
@@ -350,6 +390,10 @@
               {
                 "id": "decimals",
                 "value": 1
+              },
+              {
+                "id": "displayName",
+                "value": "in range"
               }
             ]
           },
@@ -366,6 +410,182 @@
               {
                 "id": "decimals",
                 "value": 1
+              },
+              {
+                "id": "displayName",
+                "value": "out of range"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "patience"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "rule"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "width_ticks"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "width, ticks"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value_token"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "value token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "divergence"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "divergence, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "fees, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gas"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "gas, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "round trips"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "halted_by_loss_limit"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "loss limit hit"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_from"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "from"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_to"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "to"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "capital_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "capital, $"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "loss_limit_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "loss limit, %"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
               }
             ]
           }
@@ -376,7 +596,7 @@
     },
     {
       "id": 2,
-      "title": "Result by run, in percent of the starting capital: value token and dollars",
+      "title": "Result by run",
       "type": "barchart",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -418,11 +638,12 @@
         },
         "xField": "run",
         "barWidth": 0.8
-      }
+      },
+      "description": "Each run's result in percent of its starting capital: in the value token, and in dollars."
     },
     {
       "id": 3,
-      "title": "Result by pool, value token, width and rule",
+      "title": "By pool, value token, width and rule",
       "type": "table",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -466,6 +687,10 @@
               {
                 "id": "decimals",
                 "value": 0
+              },
+              {
+                "id": "displayName",
+                "value": "width, ticks"
               }
             ]
           },
@@ -482,6 +707,10 @@
               {
                 "id": "decimals",
                 "value": 4
+              },
+              {
+                "id": "displayName",
+                "value": "fees, token"
               }
             ]
           },
@@ -498,6 +727,94 @@
               {
                 "id": "decimals",
                 "value": 0
+              },
+              {
+                "id": "displayName",
+                "value": "round trips"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value_token"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "value token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "patience"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "rule"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "result"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result_pct_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "result in $"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "holding_pct_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "holding in $"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fee_apr_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "fee APR"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_drawdown_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "max drawdown"
               }
             ]
           }
@@ -535,9 +852,95 @@
       ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value_token"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "value token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "patience"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "rule"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "width_ticks"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "width, ticks"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exit_reason"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "how it ended"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "result, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "fees, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "round trips"
+              }
+            ]
+          }
+        ]
       },
-      "options": {}
+      "options": {},
+      "description": "Every campaign of this experiment's runs, grouped by pool, value token, rule, width and how it ended: how many there were, and their summed result, fees and round trips, in the value token."
     }
   ]
 }

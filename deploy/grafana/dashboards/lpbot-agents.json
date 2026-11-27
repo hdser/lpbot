@@ -165,7 +165,7 @@
   "panels": [
     {
       "type": "text",
-      "title": "",
+      "title": "How to read this page",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -176,7 +176,8 @@
         "mode": "markdown",
         "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above. **Click an agent's name**, in Every agent now or in Agents side by side, to show only that agent over its run's window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`. The **Now** row shows every forward agent's state at this minute, from `lpbot supervisor status --load`, which `deploy/agents/refresh.sh --looks` runs every minute."
       },
-      "id": 1
+      "id": 1,
+      "description": "What this dashboard shows and where its scores come from."
     },
     {
       "type": "row",
@@ -390,7 +391,7 @@
     },
     {
       "type": "stat",
-      "title": "Late, stopped or failing",
+      "title": "Need someone",
       "description": "Agents in a red state: late, no waiter, stopped, failing or scheduler down.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -399,7 +400,7 @@
       "gridPos": {
         "x": 0,
         "y": 12,
-        "w": 5,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -432,7 +433,8 @@
                 "value": 1
               }
             ]
-          }
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -462,9 +464,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 5,
+        "x": 6,
         "y": 12,
-        "w": 5,
+        "w": 6,
         "h": 4
       },
       "targets": [
@@ -532,9 +534,9 @@
         "uid": "results"
       },
       "gridPos": {
-        "x": 10,
+        "x": 12,
         "y": 12,
-        "w": 14,
+        "w": 12,
         "h": 4
       },
       "targets": [
@@ -637,6 +639,10 @@
               {
                 "id": "custom.width",
                 "value": 300
+              },
+              {
+                "id": "displayName",
+                "value": "run"
               }
             ]
           },
@@ -677,6 +683,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "result"
               }
             ]
           },
@@ -693,6 +703,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "result in $"
               }
             ]
           },
@@ -709,6 +723,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "holding in $"
               }
             ]
           },
@@ -737,6 +755,10 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "fees, token"
               }
             ]
           },
@@ -749,6 +771,46 @@
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "gas, token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value_token"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "value token"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_from"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "from"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "window_to"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "to"
               }
             ]
           }
@@ -890,8 +952,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Each agent's result, in percent of its capital",
-      "description": "The run's equity, marked at the pool price, in the value token, from the series table (one point every sim.series_every).",
+      "title": "Each agent's result",
+      "description": "In percent of its capital. The run's equity, marked at the pool price, in the value token, from the series table (one point every sim.series_every).",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -1133,8 +1195,8 @@
     },
     {
       "type": "table",
-      "title": "Every look: what the agent saw, decided, expected and why",
-      "description": "One row a look, oldest first. Ranges and bands are in percent from the price at the look. The score is over the agent's own next look. In a forward or live panel, the questions the look asked the other agents on the board, the answers it had (on time or late, read before deciding or not) and who did not answer. Hover or click a reasoning cell to read it whole; the run's Markdown log (data/agent/<panel>/<agent>.log.md) has the same with the full view the agent saw.",
+      "title": "Every look and its reasoning",
+      "description": "What the agent saw, decided, expected and why, at every look. One row a look, oldest first. Ranges and bands are in percent from the price at the look. The score is over the agent's own next look. In a forward or live panel, the questions the look asked the other agents on the board, the answers it had (on time or late, read before deciding or not) and who did not answer. Hover or click a reasoning cell to read it whole; the run's Markdown log (data/agent/<panel>/<agent>.log.md) has the same with the full view the agent saw.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"

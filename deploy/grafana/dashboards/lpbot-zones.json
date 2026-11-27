@@ -190,10 +190,83 @@
                 "value": 2
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fee_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "fee"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_24h_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "volume 24h"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume_per_day_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "volume a day"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "depth_1pct_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "depth within 1%"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "implied_vol_24h_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "implied volatility 24h"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "implied_vol_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "implied volatility"
+              }
+            ]
           }
         ]
       },
-      "options": {}
+      "options": {},
+      "description": "The pools the run ranked when it started, highest implied volatility first: fee, volume, depth within 1% of the price and implied volatility. Excluded pools fell below a floor."
     },
     {
       "id": 2,
@@ -223,14 +296,102 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tick_lower"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "low tick"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tick_upper"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "high tick"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lookback_days"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "lookback, days"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "passes_per_day"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "passes a day"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time_in_range_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "time in range, %"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "back_within_a_day_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "back within a day, %"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "observed_days"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "days observed"
+              }
+            ]
+          }
+        ]
       },
-      "options": {}
+      "options": {},
+      "description": "Every range the run's zone map looked at, busiest first: how often price crossed it each day, how long price stayed in it, and how often it came back within a day, averaged over the looks."
     },
     {
       "id": 3,
-      "title": "Passes per day of the ranges looked at, through the run",
+      "title": "Passes a day through the run",
       "type": "timeseries",
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -256,10 +417,16 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "axisLabel": "passes a day"
+          }
+        },
         "overrides": []
       },
-      "options": {}
+      "options": {},
+      "description": "Through the run, how often price crossed the busiest range and the average range each day, over the longest lookback."
     }
   ]
 }
