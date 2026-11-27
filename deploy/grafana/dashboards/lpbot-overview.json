@@ -155,8 +155,8 @@
           },
           "links": [
             {
-              "title": "System: Reth internals",
-              "url": "/d/lpbot-reth-node"
+              "title": "System: machine and node",
+              "url": "/d/lpbot-machine"
             }
           ]
         },
@@ -529,11 +529,11 @@
     },
     {
       "type": "stat",
-      "title": "Runs stored",
-      "description": "Backtest and agent runs stored in the result tables, and the experiments they belong to.",
+      "title": "Machine",
+      "description": "The node machine itself, from node-exporter. Free: space on the data volume, red below 150 GB. CPU: the hottest core, normal at 90 to 100 °C under load, red from 102 °C (the kernel switches the machine off at 105). Drive: the NVMe drive, red from 70 °C.",
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "results"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 18,
@@ -545,13 +545,38 @@
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "results"
+            "type": "prometheus",
+            "uid": "prometheus"
           },
-          "rawQuery": true,
           "editorMode": "code",
-          "format": "table",
-          "rawSql": "select count(*) as runs, count(distinct experiment) as experiments from runs"
+          "expr": "min(node_filesystem_avail_bytes{mountpoint=\"/data\"})",
+          "instant": true,
+          "range": false,
+          "legendFormat": "free"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(node_hwmon_temp_celsius{chip=~\"platform_coretemp_.*\"})",
+          "instant": true,
+          "range": false,
+          "legendFormat": "CPU"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+          "instant": true,
+          "range": false,
+          "legendFormat": "drive"
         }
       ],
       "fieldConfig": {
@@ -571,8 +596,8 @@
           },
           "links": [
             {
-              "title": "Runs: experiments",
-              "url": "/d/lpbot-runs"
+              "title": "System: machine and node",
+              "url": "/d/lpbot-machine"
             }
           ]
         },
@@ -580,12 +605,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "runs"
+              "options": "free"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "none"
+                "value": "decbytes"
               },
               {
                 "id": "thresholds",
@@ -593,8 +618,16 @@
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "blue",
+                      "color": "red",
                       "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 150000000000.0
+                    },
+                    {
+                      "color": "green",
+                      "value": 300000000000.0
                     }
                   ]
                 }
@@ -604,12 +637,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "experiments"
+              "options": "CPU"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "none"
+                "value": "celsius"
               },
               {
                 "id": "thresholds",
@@ -617,8 +650,48 @@
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "blue",
+                      "color": "green",
                       "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 95
+                    },
+                    {
+                      "color": "red",
+                      "value": 102
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "drive"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 70
                     }
                   ]
                 }
@@ -874,17 +947,48 @@
       "id": 7
     },
     {
+      "type": "alertlist",
+      "title": "Alerts firing",
+      "description": "Every alert that is firing or about to, from the rules in deploy/grafana/alerting/rules.yml: the node, the watcher, the agents and the machine. Each says what to do, and the same goes to Telegram. The daily check-in is left out. Empty where alerting is off, as on a laptop.",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 6
+      },
+      "options": {
+        "viewMode": "list",
+        "groupMode": "default",
+        "groupBy": [],
+        "maxItems": 20,
+        "sortOrder": 1,
+        "dashboardAlerts": false,
+        "alertName": "",
+        "alertInstanceLabelFilter": "{kind!=\"heartbeat\"}",
+        "stateFilter": {
+          "firing": true,
+          "pending": true,
+          "noData": true,
+          "error": true,
+          "normal": false,
+          "recovering": true
+        },
+        "showInstances": true
+      },
+      "id": 8
+    },
+    {
       "type": "row",
       "title": "Agents",
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 20,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 8
+      "id": 9
     },
     {
       "type": "table",
@@ -896,7 +1000,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 21,
         "w": 24,
         "h": 7
       },
@@ -1139,20 +1243,20 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 9
+      "id": 10
     },
     {
       "type": "row",
       "title": "Pools",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 28,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 10
+      "id": 11
     },
     {
       "type": "table",
@@ -1164,7 +1268,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 32,
         "w": 24,
         "h": 8
       },
@@ -1351,7 +1455,7 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 11
+      "id": 12
     },
     {
       "type": "stat",
@@ -1363,7 +1467,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 29,
         "w": 24,
         "h": 3
       },
@@ -1415,20 +1519,20 @@
           "titleSize": 13
         }
       },
-      "id": 12
+      "id": 13
     },
     {
       "type": "row",
       "title": "Runs",
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 40,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 13
+      "id": 14
     },
     {
       "type": "table",
@@ -1440,8 +1544,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
-        "w": 24,
+        "y": 41,
+        "w": 20,
         "h": 12
       },
       "targets": [
@@ -1559,20 +1663,83 @@
         "cellHeight": "sm",
         "showHeader": true
       },
-      "id": 14
+      "id": 15
+    },
+    {
+      "type": "stat",
+      "title": "Stored",
+      "description": "Backtest and agent runs stored in the result tables, and the experiments they belong to.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 41,
+        "w": 4,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) as runs, count(distinct experiment) as experiments from runs"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "links": [
+            {
+              "title": "Runs: experiments",
+              "url": "/d/lpbot-runs"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 13
+        }
+      },
+      "id": 16
     },
     {
       "type": "row",
       "title": "Where things are",
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 53,
         "w": 24,
         "h": 1
       },
       "collapsed": false,
       "panels": [],
-      "id": 15
+      "id": 17
     },
     {
       "type": "text",
@@ -1580,15 +1747,15 @@
       "description": "Every dashboard, the question it answers, and where the commands are.",
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 54,
         "w": 24,
         "h": 13
       },
       "options": {
         "mode": "markdown",
-        "content": "| Subject | Dashboard | The question it answers |\n| --- | --- | --- |\n| Overview | [Overview](/d/lpbot-overview) | What is the whole system doing now, and does anything need me? |\n| Agents | [Agents](/d/lpbot-agents) | What is each agent doing, how is it doing, and why did it decide that? |\n| Pools | [Pools: live](/d/lpbot-live) | What are the followed pools doing right now? |\n| Pools | [Pools: history](/d/lpbot-pool) | How has one pool behaved over its stored history? |\n| Runs | [Runs: experiments](/d/lpbot-runs) | Which experiments are there, and how did the runs of one do? |\n| Runs | [Runs: one run](/d/lpbot-run) | What happened in one run, and where did its result come from? |\n| Runs | [Runs: compare](/d/lpbot-compare) | How do chosen runs, or groups of runs, compare? |\n| Runs | [Runs: pool and range choice](/d/lpbot-zones) | What did a run see when it chose its pool and its ranges? |\n| System | [System: Reth internals](/d/lpbot-reth-node) | Reth's own detailed metrics |\n\nThe same menu sits at the top of every dashboard: **Overview**, **Agents**, and the **Pools**, **Runs** and **System** lists.\n\nTo act, on the node machine, in `~/lpbot`: `make status` checks the whole machine, `make agents` shows every agent with what is wrong, and `deploy/RUNBOOK.md` says what to do."
+        "content": "| Subject | Dashboard | The question it answers |\n| --- | --- | --- |\n| Overview | [Overview](/d/lpbot-overview) | What is the whole system doing now, and does anything need me? |\n| Agents | [Agents](/d/lpbot-agents) | What is each agent doing, how is it doing, and why did it decide that? |\n| Pools | [Pools: live](/d/lpbot-live) | What are the followed pools doing right now? |\n| Pools | [Pools: history](/d/lpbot-pool) | How has one pool behaved over its stored history? |\n| Runs | [Runs: experiments](/d/lpbot-runs) | Which experiments are there, and how did the runs of one do? |\n| Runs | [Runs: one run](/d/lpbot-run) | What happened in one run, and where did its result come from? |\n| Runs | [Runs: compare](/d/lpbot-compare) | How do chosen runs, or groups of runs, compare? |\n| Runs | [Runs: pool and range choice](/d/lpbot-zones) | What did a run see when it chose its pool and its ranges? |\n| System | [System: machine and node](/d/lpbot-machine) | Is the machine healthy and the node at the head of the chain? |\n| System | [System: Reth internals](/d/lpbot-reth-node) | Reth's own detailed metrics |\n\nThe same menu sits at the top of every dashboard: **Overview**, **Agents**, and the **Pools**, **Runs** and **System** lists.\n\nTo act, on the node machine, in `~/lpbot`: `make status` checks the whole machine, `make agents` shows every agent with what to do, and `deploy/RUNBOOK.md`, \"When something is red\", says what to do for everything this page can show red. Alerts go to Telegram, and each says what to do too."
       },
-      "id": 16
+      "id": 18
     }
   ]
 }

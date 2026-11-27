@@ -8,6 +8,10 @@
 #   make dashboards-preview HOST=<user>@<node>      # data from the node machine
 #   make dashboards-preview-stop
 #
+# ALERTS=1 also loads the alert rules, policies and message template of
+# deploy/grafana/alerting, with a contact point that sends nowhere, to check
+# that they load and evaluate. Without it no alerts are loaded.
+#
 # With HOST it opens its own SSH tunnel to the node's Postgres and Prometheus
 # (local ports 15432 and 19090) unless one is already open, reads the node's
 # database password inside the command that uses it, never printing it, and
@@ -102,8 +106,29 @@ datasources:
       password: \$POSTGRES_PASSWORD
 EOF
 
-  local home
+  local home alerting
   home=$(home_page)
+  alerting="$ROOT/deploy/grafana/alerting-off"
+  if [[ -n "${ALERTS:-}" ]]; then
+    # The node's rules and policies, and a contact point of the same name
+    # that sends to a port nothing listens on: nothing leaves this computer.
+    alerting="$STATE/alerting"
+    rm -rf "$alerting"
+    mkdir -p "$alerting"
+    cp "$ROOT/deploy/grafana/alerting/rules.yml" "$ROOT/deploy/grafana/alerting/policies.yml" \
+      "$ROOT/deploy/grafana/alerting/templates.yml" "$alerting/"
+    cat > "$alerting/contact-points.yml" <<NOWHERE
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: owner
+    receivers:
+      - uid: lpbot-preview-nowhere
+        type: webhook
+        settings:
+          url: http://127.0.0.1:9/
+NOWHERE
+  fi
   POSTGRES_PASSWORD="$password" docker run -d --rm --name "$NAME" \
     -p "127.0.0.1:$PORT:3000" \
     --add-host host.docker.internal:host-gateway \
@@ -118,6 +143,7 @@ EOF
     ${home:+-e GF_USERS_HOME_PAGE="$home"} \
     -v "$ROOT/deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro" \
     -v "$STATE/datasources:/etc/grafana/provisioning/datasources:ro" \
+    -v "$alerting:/etc/grafana/provisioning/alerting:ro" \
     "$(image)" >/dev/null
   echo "Preview starting at http://127.0.0.1:$PORT (read-only, no login). Stop it with: make dashboards-preview-stop"
 }

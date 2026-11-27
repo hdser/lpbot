@@ -96,7 +96,7 @@ cd ~/lpbot && docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 
 ### The services
 
-Six containers, all from `deploy/docker-compose.yml` in `~/lpbot` (compose project `lpbot`, containers `lpbot-<service>-1`). Docker brings them back after a restart.
+Seven containers, all from `deploy/docker-compose.yml` in `~/lpbot` (compose project `lpbot`, containers `lpbot-<service>-1`). Docker brings them back after a restart.
 
 | Service | Image on 25 November 2026 | Listens on the machine | Keeps its data in |
 | --- | --- | --- | --- |
@@ -146,7 +146,7 @@ On `main`, at the commit the owner last pulled. It fetches from GitHub over SSH 
 
 | Path | Holds |
 | --- | --- |
-| `deploy/.env` | Settings for compose, the scripts and the Makefile. Keys: `DATA_DIR`, `RETH_VERSION`, `LIGHTHOUSE_VERSION`, `RETH_EXTRA_ARGS`, `CHECKPOINT_SYNC_URL`, `POSTGRES_PASSWORD`, `GRAFANA_PASSWORD`, `HOST_UID`, `HOST_GID`. Compose also reads `LPBOT_WATCH_ARGS` and `CARGO_BUILD_JOBS` when set; neither is. List the keys with `sed -n 's/^\([A-Z_][A-Z0-9_]*\)=.*/\1/p' deploy/.env`, never the file. `DATA_DIR` is `/data/lpbot` |
+| `deploy/.env` | Settings for compose, the scripts and the Makefile. Keys: `DATA_DIR`, `RETH_VERSION`, `LIGHTHOUSE_VERSION`, `RETH_EXTRA_ARGS`, `CHECKPOINT_SYNC_URL`, `POSTGRES_PASSWORD`, `GRAFANA_PASSWORD`, `HOST_UID`, `HOST_GID`, and for alerts `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GRAFANA_ALERTING`, `GRAFANA_ROOT_URL` ([RUNBOOK.md](RUNBOOK.md), "Alerts on Telegram"; the token is a secret, rule 2). Compose also reads `LPBOT_WATCH_ARGS` and `CARGO_BUILD_JOBS` when set; neither is. List the keys with `sed -n 's/^\([A-Z_][A-Z0-9_]*\)=.*/\1/p' deploy/.env`, never the file. `DATA_DIR` is `/data/lpbot` |
 | `deploy/jwt/jwt.hex` | The engine secret. Mounted as `./jwt`, relative to the compose file, which is why compose runs only from here |
 | `target/release/lpbot` | The binary. Build it with `CARGO_BUILD_JOBS=2 cargo build --release -p lpbot` (cargo 1.100.0 in `~/.cargo/bin`). `lpbot --version` prints only `0.1.0`: compare `ls -l target/release/lpbot` with `git log -1 --format=%ci` to see whether it is older than the checkout |
 | `logs/` | `gates-<time>.log`, the whole output of each `make gates` (UTC time in the name). Beside them, logs kept by hand: `make-gates-<time>.log`, `history-<time>.log`, `build-lpbot.log` |
@@ -207,6 +207,7 @@ Dashboards are the JSON files in `deploy/grafana/dashboards/`, provisioned into 
 | Runs | `Runs: one run` | `lpbot-run` | `lpbot-run.json` |
 | Runs | `Runs: compare` | `lpbot-compare` | `lpbot-compare.json` |
 | Runs | `Runs: pool and range choice` | `lpbot-zones` | `lpbot-zones.json` |
+| System | `System: machine and node` | `lpbot-machine` | `lpbot-machine.json` |
 | System | `System: Reth internals` | `lpbot-reth-node` | `reth-node.json` |
 
 Two data sources, from `deploy/grafana/datasources/datasources.yml`: `Prometheus` (uid `prometheus`) and `Results` (uid `results`, the Postgres database). Grafana's user is `admin`; the password is `GRAFANA_PASSWORD` (rule 2 and 3).
@@ -217,14 +218,15 @@ What it looked like on 25 November 2026 is the yardstick.
 
 | Check | How | Healthy |
 | --- | --- | --- |
-| Everything at once | `make status` | Six containers `running`; Reth `synced, head block N`; `newest block made N s ago` under half a minute (a warning past two minutes); Lighthouse `synced`, about 160 to 170 peers; the disk line |
+| Everything at once | `make status` | Seven containers `running`; Reth `synced, head block N`; `newest block made N s ago` under half a minute (a warning past two minutes); Lighthouse `synced`, about 160 to 170 peers; the disk line |
 | The newest block's age, alone | `curl -s -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}' http://127.0.0.1:8545`: its `timestamp` against `date +%s` (18545 from the laptop) | Up to about 12 seconds |
 | The watcher keeps up | The `Pools: live` dashboard: "Block age" up to about 12 s, "Blocks behind the head" 0 or 1, "Written" a few seconds. The same in SQL: `select pool_name, extract(epoch from now())::bigint - time as block_age_s, head_block - block as behind, extract(epoch from now())::bigint - updated as written_s from live_pools order by pool_name;` | 24 rows, ages of seconds, 0 behind |
 | Reth's log | `$C logs --no-color --tail 50 reth` | `Block added to canonical chain` and `Canonical chain committed` every 12 s. While catching up, batches of `Headers`, `Bodies`, `Execution`, `MerkleExecute`, `Finish` instead |
 | Lighthouse's log | `$C logs --no-color --tail 50 lighthouse` | `Synced` with a peer count, `New block received`. `Low peer count` or `Stalled` means the internet is down |
 | The watcher's log | `$C logs --no-color --tail 20 watcher` | `block N (0 behind the head, M past the finalized), ...` |
 | Every agent waiting, deciding or paused | `make agents` (or the Agents section of `make status`, or the Now row of the `Agents` dashboard). The same in SQL: `select agent, state, detail, extract(epoch from now())::bigint - checked as checked_s from agent_status order by agent;` | No agent in red (late, no waiter, stopped, failing, scheduler down); checked within the last minute or two. [RUNBOOK.md](RUNBOOK.md), "Is every agent working?", says what to do for each state |
-| Metrics | `curl -s http://127.0.0.1:9090/api/v1/targets` | Both targets `"health":"up"` |
+| Metrics | `curl -s http://127.0.0.1:9090/api/v1/targets` | All three targets (`reth`, `lighthouse`, `node`) `"health":"up"` |
+| Alerts | The Overview's "Alerts firing"; the daily check-in on Telegram | Nothing firing; a check-in every day. Rules in `deploy/grafana/alerting/rules.yml`, [RUNBOOK.md](RUNBOOK.md), "When something is red" |
 | Heat | `sensors` | The `coretemp` package at about 50 °C idle, 90 to 100 °C under load. It prints `ALARM (CRIT)` beside every core even at 50 °C: read the temperatures, not the flag. NVMe `Composite` about 40 °C |
 | Turbo | `cat /sys/devices/system/cpu/intel_pstate/no_turbo` | `1`. A restart sets it back to `0`; the owner turns it off again with `echo 1 \| sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo` |
 | Disk | `df -h /data` | 466 GB free of 3.4 TB (87% used) on 25 November 2026, shrinking by a few GB a day. `make status` warns below 150 GB; the node stops when it is full |
