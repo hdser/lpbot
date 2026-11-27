@@ -530,7 +530,7 @@
     {
       "type": "stat",
       "title": "Machine",
-      "description": "The node machine itself, from node-exporter. Free: space on the data volume, red below 150 GB. CPU: the hottest core, normal at 90 to 100 °C under load, red from 102 °C (the kernel switches the machine off at 105). Drive: the NVMe drive, red from 70 °C.",
+      "description": "The node machine itself, from node-exporter. Free: space on the data volume, red below 150 GB. CPU: the hottest core, normal at 90 to 100 °C under load, red from 102 °C (the kernel switches the machine off at 105). Drive: the NVMe drive's Composite sensor (its controller reads higher and is left out), red from 70 °C.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -573,7 +573,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\", sensor=\"temp1\"})",
           "instant": true,
           "range": false,
           "legendFormat": "drive"
