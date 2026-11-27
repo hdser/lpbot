@@ -136,6 +136,8 @@ paths; unsupported arguments fail the build before provenance is written.
 The runner must pin the binary's absolute path and SHA-256 as well as checking its marker.
 Invoke its normal options directly, without a leading exec argument.
 
-Shell syntax, source hashes, patch applicability and lock normalization
-regressions have been checked locally. The patched binary and upstream regression tests have not yet
-been compiled or run; successful build provenance must precede deployment.
+Lightweight checks verify source hashes, patch applicability and lock
+normalization without compiling Codex. `make check` validates lpbot, not this
+separate host. Require a successful native build, both upstream regressions,
+marker and argument probes, and the recorded binary provenance before
+deployment; a launched build or populated cache is not that evidence.

@@ -82,6 +82,10 @@ The following are required before cutover:
   coordinate an older binary. Already-running CLI processes retain the old
   code. Let them drain naturally before relying on the new lock guarantee;
   do not interrupt or stop Claude's session.
+  The current readiness gate compares executable inodes, so it also waits for
+  an older compatible binary. A long `next --wait` can delay cutover until its
+  due look. Plan upgrades around those waiters; do not substitute an unverified
+  compatibility exception.
 - `LPBOT_DATA_DIR=/data/lpbot/lake` and `RAYON_NUM_THREADS=2` are set for every
   runner invocation. The supplied user service sets both.
 - The owner has pinned the exact Codex CLI build reviewed for the worker's
