@@ -195,18 +195,19 @@ Database and user `lpbot`. Sixteen tables, created empty by the start-up script 
 
 ### Grafana
 
-Dashboards are the JSON files in `deploy/grafana/dashboards/`, provisioned into the folder `lpbot` and read again from disk every 30 seconds (`dashboards.yml`). Change a dashboard in its file; on the machine, `git pull` is enough.
+Dashboards are the JSON files in `deploy/grafana/dashboards/`, provisioned into the folder `lpbot` and read again from disk every 30 seconds (`dashboards.yml`). Change a dashboard in its file; on the machine, `git pull` is enough. Grafana opens on the Overview (`GF_USERS_HOME_PAGE`), and every dashboard starts with the same menu: Overview, Agents, and the Pools, Runs and System lists. Before a change reaches the machine, `make dashboards-preview HOST=<user>@<node machine>` shows the working copy's dashboards on the laptop, read-only, at http://127.0.0.1:3002, with this machine's data; `make dashboards-preview-stop` removes it.
 
-| Dashboard | uid | File |
-| --- | --- | --- |
-| `lpbot: runs` | `lpbot-runs` | `lpbot-runs.json` |
-| `lpbot: run detail` | `lpbot-run` | `lpbot-run.json` |
-| `lpbot: compare` | `lpbot-compare` | `lpbot-compare.json` |
-| `lpbot: pools and zones` | `lpbot-zones` | `lpbot-zones.json` |
-| `lpbot: pool` | `lpbot-pool` | `lpbot-pool.json` |
-| `lpbot: live` | `lpbot-live` | `lpbot-live.json` |
-| `lpbot: agents` | `lpbot-agents` | `lpbot-agents.json` |
-| `Reth node` | `lpbot-reth-node` | `reth-node.json` |
+| Subject | Dashboard | uid | File |
+| --- | --- | --- | --- |
+| Overview | `Overview` | `lpbot-overview` | `lpbot-overview.json` |
+| Agents | `Agents` | `lpbot-agents` | `lpbot-agents.json` |
+| Pools | `Pools: live` | `lpbot-live` | `lpbot-live.json` |
+| Pools | `Pools: history` | `lpbot-pool` | `lpbot-pool.json` |
+| Runs | `Runs: experiments` | `lpbot-runs` | `lpbot-runs.json` |
+| Runs | `Runs: one run` | `lpbot-run` | `lpbot-run.json` |
+| Runs | `Runs: compare` | `lpbot-compare` | `lpbot-compare.json` |
+| Runs | `Runs: pool and range choice` | `lpbot-zones` | `lpbot-zones.json` |
+| System | `System: Reth internals` | `lpbot-reth-node` | `reth-node.json` |
 
 Two data sources, from `deploy/grafana/datasources/datasources.yml`: `Prometheus` (uid `prometheus`) and `Results` (uid `results`, the Postgres database). Grafana's user is `admin`; the password is `GRAFANA_PASSWORD` (rule 2 and 3).
 
@@ -218,11 +219,11 @@ What it looked like on 25 November 2026 is the yardstick.
 | --- | --- | --- |
 | Everything at once | `make status` | Six containers `running`; Reth `synced, head block N`; `newest block made N s ago` under half a minute (a warning past two minutes); Lighthouse `synced`, about 160 to 170 peers; the disk line |
 | The newest block's age, alone | `curl -s -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}' http://127.0.0.1:8545`: its `timestamp` against `date +%s` (18545 from the laptop) | Up to about 12 seconds |
-| The watcher keeps up | The `lpbot: live` dashboard: "Block age" up to about 12 s, "Blocks behind the head" 0 or 1, "Written" a few seconds. The same in SQL: `select pool_name, extract(epoch from now())::bigint - time as block_age_s, head_block - block as behind, extract(epoch from now())::bigint - updated as written_s from live_pools order by pool_name;` | 24 rows, ages of seconds, 0 behind |
+| The watcher keeps up | The `Pools: live` dashboard: "Block age" up to about 12 s, "Blocks behind the head" 0 or 1, "Written" a few seconds. The same in SQL: `select pool_name, extract(epoch from now())::bigint - time as block_age_s, head_block - block as behind, extract(epoch from now())::bigint - updated as written_s from live_pools order by pool_name;` | 24 rows, ages of seconds, 0 behind |
 | Reth's log | `$C logs --no-color --tail 50 reth` | `Block added to canonical chain` and `Canonical chain committed` every 12 s. While catching up, batches of `Headers`, `Bodies`, `Execution`, `MerkleExecute`, `Finish` instead |
 | Lighthouse's log | `$C logs --no-color --tail 50 lighthouse` | `Synced` with a peer count, `New block received`. `Low peer count` or `Stalled` means the internet is down |
 | The watcher's log | `$C logs --no-color --tail 20 watcher` | `block N (0 behind the head, M past the finalized), ...` |
-| Every agent waiting, deciding or paused | `make agents` (or the Agents section of `make status`, or the Now row of the `lpbot: agents` dashboard). The same in SQL: `select agent, state, detail, extract(epoch from now())::bigint - checked as checked_s from agent_status order by agent;` | No agent in red (late, no waiter, stopped, failing, scheduler down); checked within the last minute or two. [RUNBOOK.md](RUNBOOK.md), "Is every agent working?", says what to do for each state |
+| Every agent waiting, deciding or paused | `make agents` (or the Agents section of `make status`, or the Now row of the `Agents` dashboard). The same in SQL: `select agent, state, detail, extract(epoch from now())::bigint - checked as checked_s from agent_status order by agent;` | No agent in red (late, no waiter, stopped, failing, scheduler down); checked within the last minute or two. [RUNBOOK.md](RUNBOOK.md), "Is every agent working?", says what to do for each state |
 | Metrics | `curl -s http://127.0.0.1:9090/api/v1/targets` | Both targets `"health":"up"` |
 | Heat | `sensors` | The `coretemp` package at about 50 °C idle, 90 to 100 °C under load. It prints `ALARM (CRIT)` beside every core even at 50 °C: read the temperatures, not the flag. NVMe `Composite` about 40 °C |
 | Turbo | `cat /sys/devices/system/cpu/intel_pstate/no_turbo` | `1`. A restart sets it back to `0`; the owner turns it off again with `echo 1 \| sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo` |

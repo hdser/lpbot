@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-pool",
-  "title": "lpbot: pool",
-  "description": "One pool over its stored history: price, value held by positions, volume, fees, how busy it is for its size, and the liquidity around the price now and over time. Filled by `lpbot pool-stats` and `lpbot load-results`.",
+  "title": "Pools: history",
+  "description": "How has one pool behaved over its stored history? Price, value held by positions, volume, fees, how busy it is for its size, and the liquidity around the price now and over time. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "pools"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -51,7 +52,80 @@
   "annotations": {
     "list": []
   },
-  "links": [],
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "This pool live",
+      "type": "link",
+      "url": "/d/lpbot-live?var-pool=${pool}",
+      "tooltip": "Pools: live, for this pool",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
   "panels": [
     {
       "id": 1,

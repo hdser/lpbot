@@ -1,0 +1,1483 @@
+{
+  "uid": "lpbot-overview",
+  "title": "Overview",
+  "description": "What is the whole system doing now, and does anything need me? The node, the watcher, every agent, the busiest pools and the newest experiments, each a link to its detail. Refreshed every minute. Times are UTC.",
+  "tags": [
+    "lpbot",
+    "overview"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Now",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Chain head age",
+      "description": "How old the newest block the node follows is, from its consensus client (Lighthouse). A block comes every 12 seconds; over 5 minutes means the node is behind the chain.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "time() - (1606824023 + 12 * max(beacon_head_slot))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "head age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "System: Reth internals",
+              "url": "/d/lpbot-reth-node"
+            }
+          ],
+          "noValue": "no node"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Node peers",
+      "description": "How many peers the node's two clients have: Reth (execution) and Lighthouse (consensus). Red at none: the node cannot follow the chain.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(reth_network_connected_peers)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "execution"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max(libp2p_peers)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "consensus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "System: Reth internals",
+              "url": "/d/lpbot-reth-node"
+            }
+          ],
+          "noValue": "no node"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Watcher last wrote",
+      "description": "How long ago the watcher last wrote the live tables. It writes every few seconds, with or without a new block; red past 2 minutes means the watcher or the database has stopped.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(updated), 999999) as value from live_pools"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Pools: live",
+              "url": "/d/lpbot-live"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 4
+    },
+    {
+      "type": "stat",
+      "title": "Pools followed",
+      "description": "How many pools the watcher (lpbot watch-pools) follows block by block.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) as value from live_pools"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Pools: live",
+              "url": "/d/lpbot-live"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 5
+    },
+    {
+      "type": "stat",
+      "title": "Agents",
+      "description": "Forward agents fine (waiting for their next look, deciding one, or paused or ended on purpose) and those needing someone (late, stopped, failing, without a waiter or with their scheduler down). Needs attention, below, says which and why.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select count(*) filter (where state not in ('late','no waiter','stopped','failing','scheduler down')) as \"fine\", count(*) filter (where state in ('late','no waiter','stopped','failing','scheduler down')) as \"need someone\" from agent_status"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Agents",
+              "url": "/d/lpbot-agents"
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "need someone"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 6
+    },
+    {
+      "type": "stat",
+      "title": "Status checked",
+      "description": "How long ago the agent status was last written (every minute, by cron on the node). Red past 10 minutes or when there is none: then nothing about the agents here is current.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select coalesce(extract(epoch from now())::bigint - max(checked), 999999) as value from agent_status"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 180
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Agents",
+              "url": "/d/lpbot-agents"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "id": 7
+    },
+    {
+      "type": "row",
+      "title": "Needs attention",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 8
+    },
+    {
+      "type": "table",
+      "title": "Needs attention",
+      "description": "Everything that needs someone now: agents in a red state, an agent status that is not being written, and a watcher that has stopped. Since is when the agent's look was due, or when the status or the watcher last wrote. Click a row's first column to open where the detail is. One green row means all is well.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "with problems as (\n  select 1 as rank, s.agent as what, s.experiment as \"where\", s.state, s.detail as \"what is wrong\",\n    to_timestamp(s.due) as since,\n    '/d/lpbot-agents?var-experiment=' || s.experiment || '&var-agent=' || s.run_id as link\n  from agent_status s where s.state in ('late','no waiter','stopped','failing','scheduler down')\n  union all\n  select 2, 'agent status', 'cron on the node', 'stale',\n    'The agent status was last written ' || coalesce(round((extract(epoch from now()) - max(checked)) / 60) || ' minutes ago', 'never') || ': the cron line or the binary needs a look.',\n    to_timestamp(max(checked)), '/d/lpbot-agents'\n  from agent_status having coalesce(extract(epoch from now())::bigint - max(checked), 999999) > 600\n  union all\n  select 3, 'watcher', 'the node', 'stale',\n    'The watcher last wrote ' || coalesce(round((extract(epoch from now()) - max(updated)) / 60) || ' minutes ago', 'never') || ': the watcher or the database has stopped.',\n    to_timestamp(max(updated)), '/d/lpbot-live'\n  from live_pools having coalesce(extract(epoch from now())::bigint - max(updated), 999999) > 120\n)\nselect what, \"where\", state, \"what is wrong\", since, link from problems\nunion all\nselect 'nothing needs you now', '', 'fine', 'Every agent is fine, its status is current and the watcher is writing.', null, '/d/lpbot-agents'\nwhere not exists (select 1 from problems)\norder by 5 nulls last"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "what"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open where the detail is",
+                    "url": "${__data.fields.link}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "where"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 220
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "waiting": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "deciding": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "due": {
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "unverified": {
+                        "color": "yellow",
+                        "index": 3
+                      },
+                      "paused": {
+                        "color": "text",
+                        "index": 4
+                      },
+                      "ended": {
+                        "color": "text",
+                        "index": 5
+                      },
+                      "late": {
+                        "color": "red",
+                        "index": 6
+                      },
+                      "no waiter": {
+                        "color": "red",
+                        "index": 7
+                      },
+                      "stopped": {
+                        "color": "red",
+                        "index": 8
+                      },
+                      "failing": {
+                        "color": "red",
+                        "index": 9
+                      },
+                      "scheduler down": {
+                        "color": "red",
+                        "index": 10
+                      },
+                      "stale": {
+                        "color": "red",
+                        "index": 11
+                      },
+                      "fine": {
+                        "color": "green",
+                        "index": 12
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "since"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "what is wrong"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "link"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "id": 9
+    },
+    {
+      "type": "row",
+      "title": "Agents",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 10
+    },
+    {
+      "type": "table",
+      "title": "Every forward agent",
+      "description": "One row an agent, whatever runs it. Next look in: time until its next look is due, negative when it is late. Last decision: what it did at its last look, and the range in percent from the price. Result: the run's result so far in its value token, updated every hour. Click an agent to see it on Agents.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select s.agent, s.model, s.experiment as panel, s.state,\n  s.due - extract(epoch from now())::bigint as \"next look in\",\n  coalesce(s.last_action || coalesce(' ' || s.last_range, ''), 'none') as \"last decision\",\n  s.looks, r.result_pct as \"result, %\", s.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom agent_status s left join runs r on r.run_id = s.run_id\norder by case when s.state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, s.experiment, s.agent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show this agent on Agents",
+                    "url": "/d/lpbot-agents?var-experiment=${__data.fields.panel}&var-agent=${__data.fields.run_id}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "waiting": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "deciding": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "due": {
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "unverified": {
+                        "color": "yellow",
+                        "index": 3
+                      },
+                      "paused": {
+                        "color": "text",
+                        "index": 4
+                      },
+                      "ended": {
+                        "color": "text",
+                        "index": 5
+                      },
+                      "late": {
+                        "color": "red",
+                        "index": 6
+                      },
+                      "no waiter": {
+                        "color": "red",
+                        "index": 7
+                      },
+                      "stopped": {
+                        "color": "red",
+                        "index": 8
+                      },
+                      "failing": {
+                        "color": "red",
+                        "index": 9
+                      },
+                      "scheduler down": {
+                        "color": "red",
+                        "index": 10
+                      },
+                      "stale": {
+                        "color": "red",
+                        "index": 11
+                      },
+                      "fine": {
+                        "color": "green",
+                        "index": 12
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "next look in"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "result, %"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "looks"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "id": 11
+    },
+    {
+      "type": "row",
+      "title": "Pools",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 12
+    },
+    {
+      "type": "table",
+      "title": "Busiest followed pools, last 24 hours",
+      "description": "The six followed pools with the most volume in the last 24 hours, as the watcher counts it from the local node. Click a pool to see it live.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select pool_name as pool, price, price_unit as \"price in\", volume_usd_24h as \"volume 24h, $\",\n  fees_usd_24h as \"fees 24h, $\", tvl_usd as \"value held, $\", positions_in_range as \"positions in range\",\n  positions_open as \"positions open\", pool as address\nfrom live_pools order by volume_usd_24h desc nulls last limit 6"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pool"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "This pool live",
+                    "url": "/d/lpbot-live?var-pool=${__data.fields.address}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume 24h, $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fees 24h, $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value held, $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price in"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 115
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "positions in range"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "in range"
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "positions open"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "open"
+              },
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "address"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "id": 13
+    },
+    {
+      "type": "stat",
+      "title": "All followed pools, last 24 hours",
+      "description": "Volume and fees over the last 24 hours, and the value positions hold now, summed over every followed pool.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 21,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select sum(volume_usd_24h) as \"volume\", sum(fees_usd_24h) as \"fees\", sum(tvl_usd) as \"value held\" from live_pools"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "links": [
+            {
+              "title": "Pools: live",
+              "url": "/d/lpbot-live"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 22,
+          "titleSize": 13
+        }
+      },
+      "id": 14
+    },
+    {
+      "type": "row",
+      "title": "Runs",
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 15
+    },
+    {
+      "type": "table",
+      "title": "Newest experiments",
+      "description": "The ten experiments with the newest windows. Best and median are their runs' results in dollars, in percent of the starting capital. Click one to see its runs.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select experiment, count(*) as runs, min(window_from) as \"from\", max(window_to) as \"to\",\n  count(distinct pool) as pools, max(result_pct_usd) as \"best in $, %\",\n  percentile_cont(0.5) within group (order by result_pct_usd) as \"median in $, %\"\nfrom runs group by experiment order by max(window_to) desc, experiment limit 10"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "experiment"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show the runs of this experiment",
+                    "url": "/d/lpbot-runs?var-experiment=${__value.raw}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "best in $, %"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "median in $, %"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runs"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pools"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "id": 16
+    },
+    {
+      "type": "row",
+      "title": "Where things are",
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": [],
+      "id": 17
+    },
+    {
+      "type": "text",
+      "title": "Where things are",
+      "description": "Every dashboard, the question it answers, and where the commands are.",
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 13
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "| Subject | Dashboard | The question it answers |\n| --- | --- | --- |\n| Overview | [Overview](/d/lpbot-overview) | What is the whole system doing now, and does anything need me? |\n| Agents | [Agents](/d/lpbot-agents) | What is each agent doing, how is it doing, and why did it decide that? |\n| Pools | [Pools: live](/d/lpbot-live) | What are the followed pools doing right now? |\n| Pools | [Pools: history](/d/lpbot-pool) | How has one pool behaved over its stored history? |\n| Runs | [Runs: experiments](/d/lpbot-runs) | Which experiments are there, and how did the runs of one do? |\n| Runs | [Runs: one run](/d/lpbot-run) | What happened in one run, and where did its result come from? |\n| Runs | [Runs: compare](/d/lpbot-compare) | How do chosen runs, or groups of runs, compare? |\n| Runs | [Runs: pool and range choice](/d/lpbot-zones) | What did a run see when it chose its pool and its ranges? |\n| System | [System: Reth internals](/d/lpbot-reth-node) | Reth's own detailed metrics |\n\nThe same menu sits at the top of every dashboard: **Overview**, **Agents**, and the **Pools**, **Runs** and **System** lists.\n\nTo act, on the node machine, in `~/lpbot`: `make status` checks the whole machine, `make agents` shows every agent with what is wrong, and `deploy/RUNBOOK.md` says what to do."
+      },
+      "id": 18
+    }
+  ]
+}

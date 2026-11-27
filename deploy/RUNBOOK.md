@@ -69,7 +69,7 @@ vmstat 5          # one line every 5 seconds; Ctrl-c stops it, not the download
 
 ## The live tables (the watcher)
 
-The watcher is the service that runs `lpbot watch-pools`. It follows every stored pool from the local node, block by block, and keeps the live tables in Postgres current; the Grafana dashboard `lpbot: live` reads them. It is a container like the others: `make up` builds and starts it, and it comes back by itself after a restart.
+The watcher is the service that runs `lpbot watch-pools`. It follows every stored pool from the local node, block by block, and keeps the live tables in Postgres current; the Grafana dashboard `Pools: live` reads them. It is a container like the others: `make up` builds and starts it, and it comes back by itself after a restart.
 
 | To | Type |
 | --- | --- |
@@ -172,7 +172,7 @@ If the session ends, nothing is lost: the decisions file and the reasoning log b
 | Wait for questions between looks | `target/release/lpbot agent inbox <experiment> --agent <name> --wait 1d`, in the background: it returns as soon as a question arrives |
 | Answer one | `target/release/lpbot agent answer <experiment> --agent <name> --ask <id> --answer "..." [--would stay_out\|hold\|exit\|enter] [--confidence <0-1>]` |
 | See who asked and answered what | `target/release/lpbot agent board <experiment>` |
-| Score the decisions and put the run on the dashboards so far | On the node machine cron does it, below. By hand: `deploy/agents/refresh.sh experiments/agent-usdc-weth-forward.yml`, which runs `target/release/lpbot agent evaluate` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run ... --results-dir runs/usdc-weth-forward`, then `lpbot load-results`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `lpbot: agents` dashboard reads. A panel of several agents is scored and loaded the same way |
+| Score the decisions and put the run on the dashboards so far | On the node machine cron does it, below. By hand: `deploy/agents/refresh.sh experiments/agent-usdc-weth-forward.yml`, which runs `target/release/lpbot agent evaluate` (each decision against cash and holding, into `<name>.eval.jsonl` beside the decisions), then `target/release/lpbot run ... --results-dir runs/usdc-weth-forward`, then `lpbot load-results`. `lpbot run` writes the agent tables too (`agent_looks`, `agent_scores`), which the `Agents` dashboard reads. A panel of several agents is scored and loaded the same way |
 | Put the looks decided since on the dashboard, without the replays | `deploy/agents/refresh.sh --looks`, which runs `target/release/lpbot load-looks <experiment>`: each look with its reasoning, in seconds |
 
 **Keeping the agents dashboard current.** Grafana reads Postgres, not the agents' files, so something has to load them. Two cron lines on the node machine do it for every forward panel with decisions on disk (an experiment under `experiments/` with `to: open`):
@@ -204,7 +204,7 @@ crontab -e     # then add these two lines
 
 ### Is every agent working?
 
-`make agents` prints every forward agent on the machine, whatever runs it: its state, when its next look is due (counted from its last decision, never from when a look was last shown), what waits for it and, in a column of its own, what schedules it. `make status` ends with the same in one line an agent, and the `lpbot: agents` dashboard has it in its Now row, written every minute by `refresh.sh --looks`. A change of state is a line in `logs/agent-refresh.log`, such as `agents: b (agent-panel-forward): waiting -> late (...)`.
+`make agents` prints every forward agent on the machine, whatever runs it: its state, when its next look is due (counted from its last decision, never from when a look was last shown), what waits for it and, in a column of its own, what schedules it. `make status` ends with the same in one line an agent, and the `Agents` dashboard has it in its Now row, written every minute by `refresh.sh --looks`. A change of state is a line in `logs/agent-refresh.log`, such as `agents: b (agent-panel-forward): waiting -> late (...)`.
 
 The agent list `data/agents/agents.yml` (copy `deploy/agents/agents.example.yml`) says what the files cannot: agents that have not decided yet, what runs each one and where, whether a session here keeps `agent next --wait` (`waits_here: true`), and agents set aside on purpose (`state: paused` or `ended`, with a `reason`). Keep it in step when a panel starts or stops.
 
@@ -269,7 +269,7 @@ The machine and the containers keep running without the internet, and nothing ne
 
 - Lighthouse logs `Low peer count`, then `Sync state updated` with `new_state: Stalled`, and Reth stops at its last block.
 - `make status` says how old the node's newest block is, with a warning past two minutes, and how many peers Lighthouse has. Reth's own line still reads `synced` or `block N of N`: it knows of no higher block.
-- On the `lpbot: live` dashboard, "Block age" grows while "Blocks behind the head" stays at 0 and "Written" stays fresh: the watcher keeps up with a node that is itself behind.
+- On the `Pools: live` dashboard, "Block age" grows while "Blocks behind the head" stays at 0 and "Written" stays fresh: the watcher keeps up with a node that is itself behind.
 
 When the connection comes back, Lighthouse finds peers within a minute or two and syncs (`make status` gives how many slots it is behind), and Reth follows in batches that `make logs` shows stage by stage: Headers, Bodies, Execution, MerkleExecute, then Finish. The newest block moves only at the end of a batch, so it can stand still for ten minutes or more. The watcher follows Reth by itself. Days offline take hours to catch up: after 4 days and 6 hours without internet (20 to 24 November 2026, about 30,700 blocks), Reth's first batch of 500 blocks took 12 minutes, most of it in Execution and MerkleExecute, and later batches were larger.
 
@@ -298,5 +298,5 @@ sudo poweroff
 | The node's own log | `make logs`; Ctrl-c leaves it and the node keeps running |
 | Temperatures | `sensors` (package `lm-sensors`); `sudo nvme smart-log /dev/nvme0` (package `nvme-cli`) |
 | Dashboards | From the laptop: `make tunnel HOST=<user>@<node machine>`, then http://127.0.0.1:3001 |
-| The live tables | The `lpbot: live` dashboard: "Block age", "Blocks behind the head" and "Written"; `make watch-logs` |
-| The agents | `make agents`; the Now row of the `lpbot: agents` dashboard; changes of state in `logs/agent-refresh.log` |
+| The live tables | The `Pools: live` dashboard: "Block age", "Blocks behind the head" and "Written"; `make watch-logs` |
+| The agents | `make agents`; the Now row of the `Agents` dashboard; changes of state in `logs/agent-refresh.log` |

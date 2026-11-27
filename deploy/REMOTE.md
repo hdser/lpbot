@@ -146,8 +146,8 @@ The same works from outside the house over whatever already gets you an SSH sess
 | Grafana refuses the password | The laptop's password was used, the browser filled in a saved one, or several wrong tries locked the login for five minutes | On the node machine: `make grafana-reset-password`, then `make grafana-password`, and type it by hand |
 | `permission denied ... docker.sock` | The shell is from before `host-setup.sh` added you to the Docker group. A tmux window from before keeps the old permissions too | `newgrp docker` in that shell, or log in again |
 | Dashboards say a table does not exist | The database was started by a version without the schema step | `git pull`, then `make viewer` (or `make up`) again; it creates the empty tables |
-| The `Reth node` dashboard says `lookup prometheus ... server misbehaving` | Prometheus is not running: the viewer was started by a version that left it out | `git pull`, then `make viewer` again |
-| The `Reth node` dashboard is empty | The node is not running yet | Nothing until the snapshot is in place; then `make up` |
+| The `System: Reth internals` dashboard says `lookup prometheus ... server misbehaving` | Prometheus is not running: the viewer was started by a version that left it out | `git pull`, then `make viewer` again |
+| The `System: Reth internals` dashboard is empty | The node is not running yet | Nothing until the snapshot is in place; then `make up` |
 | The lpbot dashboards are empty | No runs have been loaded | `make demo` then `make load` for demo runs; real runs come from `make backtest` |
 | The address on port 3001 does not load | Grafana is not running on the node machine, or the tunnel was closed | On the node machine: `make viewer` (or `make up`); on the laptop: start the tunnel again |
 
@@ -172,7 +172,7 @@ Jobs that were running in `tmux`, such as the snapshot download or `make gates`,
 
 ## Watching the node
 
-`make status` shows the containers, how far both clients have synced, and the free space on the data drive. In Grafana, the `Reth node` dashboard in the `lpbot` folder is Reth's own overview dashboard, fed by Prometheus.
+`make status` shows the containers, how far both clients have synced, and the free space on the data drive. In Grafana, the `System: Reth internals` dashboard in the `lpbot` folder is Reth's own overview dashboard, fed by Prometheus.
 
 ## Later: pruning
 
