@@ -391,6 +391,14 @@ fn a_panel_on_disk_shows_every_listed_agent_with_its_state() {
     assert_eq!(b.due, Some(i64::try_from(start).unwrap()));
     assert_eq!(b.state, "late", "{}", b.detail);
     assert!(b.detail.contains("nothing has shown it"), "{}", b.detail);
+    // A session here: look at its window, or start it again from the panel.
+    assert!(
+        b.what_to_do
+            .contains("deploy/agents/start-agent.sh experiments/panel.yml b"),
+        "{}",
+        b.what_to_do
+    );
+    assert!(by_agent(&rows, "a").what_to_do.is_empty());
 
     let c = by_agent(&rows, "c");
     assert_eq!(c.state, "failing");
@@ -422,6 +430,55 @@ fn a_panel_on_disk_shows_every_listed_agent_with_its_state() {
         "{}",
         brief_line(b)
     );
+    // What to do follows on a line of its own, in the brief and the table.
+    assert!(brief_line(b).contains("\n  what to do: Its session"));
+    assert!(!brief_line(by_agent(&rows, "a")).contains('\n'));
+    assert!(text.contains("what to do: Its session"), "{text}");
+    // The same sentence on the next pass, a minute on: no times in it.
+    let (again, _) = rows_at(root, now + 60, &mut memory);
+    assert_eq!(by_agent(&again, "b").what_to_do, b.what_to_do);
+}
+
+fn rows_at(root: &Path, now: u64, memory: &mut Memory) -> (Vec<AgentStatusRow>, bool) {
+    rows(
+        root,
+        Path::new("experiments"),
+        &listed(root),
+        &Fake(vec![]),
+        memory,
+        now,
+        600,
+    )
+    .unwrap()
+}
+
+#[test]
+fn every_state_that_needs_someone_says_what_to_do() {
+    let here = Scheduler::Session { here: true };
+    let away = Scheduler::Session { here: false };
+    let runner = Scheduler::Runner { process: true };
+    let say = |state, scheduler: &Scheduler, place| {
+        what_to_do(state, scheduler, place, "experiments/panel.yml", "b")
+    };
+    for state in STATES {
+        for scheduler in [&here, &away, &runner] {
+            let text = say(state, scheduler, Some("the laptop"));
+            assert_eq!(
+                text.is_empty(),
+                !(state.needs_attention() || state == State::Unverified),
+                "{state:?} under {scheduler:?}: {text:?}"
+            );
+        }
+    }
+    assert!(say(State::Late, &here, None).contains(
+        "tmux new-window -d -t agent -n b deploy/agents/start-agent.sh experiments/panel.yml b"
+    ));
+    assert!(say(State::Late, &away, Some("the laptop")).contains("(the laptop)"));
+    assert!(say(State::Late, &away, None).contains("not named in data/agents/agents.yml"));
+    assert!(say(State::Late, &runner, None)
+        .contains("agent-runner data/codex/panel-runner.yml --status"));
+    assert!(say(State::SchedulerDown, &runner, None).contains("systemctl --user start codex-panel"));
+    assert!(say(State::Stopped, &runner, None).contains("docs/CODEX_RUNNER.md"));
 }
 
 #[test]

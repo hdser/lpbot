@@ -223,6 +223,20 @@ The agent list `data/agents/agents.yml` (copy `deploy/agents/agents.example.yml`
 
 "Not listening for questions" in the detail means a panel agent here has no `agent inbox --wait` running: a question to it waits until its own next look.
 
+Under each agent that needs someone, `make agents` prints what to do, with the commands; the `Agents` dashboard and the Overview's Needs attention show the same sentence. It comes from `agent_status.what_to_do`, which the status writes beside the detail.
+
+## When something is red
+
+The Overview, the first page Grafana opens, shows the node, the watcher and the agents. Each row here is one thing it can show red, what it means and what to do, on the node machine in `~/lpbot`. Sudo is the owner's.
+
+| What is red | It means | What to do |
+| --- | --- | --- |
+| An agent: `late`, `no waiter`, `stopped`, `failing`, `scheduler down` | The agent will not decide by itself, or something stopped it | `make agents` says what to do under each one; the table in "Is every agent working?" explains each state |
+| Agent status age past 10 minutes, or no agents at all | Nothing writes `agent_status`: the cron line, the binary or the database | `crontab -l` should list `deploy/agents/refresh.sh --looks`; run it by hand and read the end of `logs/agent-refresh.log` |
+| Watcher last wrote past 2 minutes | The watcher or the database has stopped. The watcher writes every few seconds even without a new block | `make watch-logs`; if it has stopped, `make watch-start`. "The live tables (the watcher)" above has the rest |
+| Node head age past 5 minutes | The node is behind the chain: the internet, Lighthouse, or a machine that is too hot | `make status`; "After the internet was down" and "Keep an eye on" below |
+| Node peers at 0 | A client cannot reach the network | `make status`, then `docker compose -f deploy/docker-compose.yml logs --tail 50 reth` (or `lighthouse`) |
+
 ## After the machine was off
 
 1. Log in and look:

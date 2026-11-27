@@ -195,7 +195,7 @@
     {
       "type": "table",
       "title": "Every agent now",
-      "description": "Every forward agent on the node, from `lpbot supervisor status`, checked every minute. Lateness counts from the look's due time. Next look: seconds until it is due, negative when it is overdue. Scheduler is kept apart from the agent: a waiting process or a runner's files show activity, not health. Red states need someone; deploy/RUNBOOK.md, \"Is every agent working?\", says what to do. Click an agent to see its runs below.",
+      "description": "Every forward agent on the node, from `lpbot supervisor status`, checked every minute. Lateness counts from the look's due time. Next look: seconds until it is due, negative when it is overdue. Scheduler is kept apart from the agent: a waiting process or a runner's files show activity, not health. Red states need someone, and What to do says how, with the commands to type on the node machine in ~/lpbot. Click an agent to see its runs below.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -216,7 +216,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select s.agent, s.model, s.experiment, s.runner, s.state,\n  s.due - extract(epoch from now())::bigint as \"next look\",\n  to_timestamp(s.last_time) as \"last look\",\n  coalesce(s.last_action || coalesce(' ' || s.last_range, ''), 'none') as \"last decision\",\n  s.listening, s.detail, s.scheduler, s.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom agent_status s left join runs r on r.run_id = s.run_id\norder by case when s.state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, s.experiment, s.agent"
+          "rawSql": "select s.agent, s.model, s.experiment, s.runner, s.state,\n  s.due - extract(epoch from now())::bigint as \"next look\",\n  to_timestamp(s.last_time) as \"last look\",\n  coalesce(s.last_action || coalesce(' ' || s.last_range, ''), 'none') as \"last decision\",\n  s.listening, s.detail, s.what_to_do as \"what to do\", s.scheduler, s.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom agent_status s left join runs r on r.run_id = s.run_id\norder by case when s.state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, s.experiment, s.agent"
         }
       ],
       "fieldConfig": {
@@ -378,6 +378,25 @@
             "properties": [
               {
                 "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "what to do"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              },
+              {
+                "id": "custom.inspect",
                 "value": true
               }
             ]

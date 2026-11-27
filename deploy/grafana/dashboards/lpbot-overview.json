@@ -663,7 +663,7 @@
     {
       "type": "table",
       "title": "Needs attention",
-      "description": "Everything that needs someone now: agents in a red state, an agent status that is not being written, and a watcher that has stopped. Since is when the agent's look was due, or when the status or the watcher last wrote. Click a row's first column to open where the detail is. One green row means all is well.",
+      "description": "Everything that needs someone now: agents in a red state, an agent status that is not being written, and a watcher that has stopped, each with what to do: the commands to type on the node machine, in ~/lpbot. Since is when the agent's look was due, or when the status or the watcher last wrote. Click a row's first column to open where the detail is. One green row means all is well.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "results"
@@ -672,7 +672,7 @@
         "x": 0,
         "y": 6,
         "w": 24,
-        "h": 6
+        "h": 8
       },
       "targets": [
         {
@@ -684,7 +684,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "with problems as (\n  select 1 as rank, s.agent as what, s.experiment as \"where\", s.state, s.detail as \"what is wrong\",\n    to_timestamp(s.due) as since,\n    '/d/lpbot-agents?var-experiment=' || s.experiment || '&var-agent=' || s.run_id as link\n  from agent_status s where s.state in ('late','no waiter','stopped','failing','scheduler down')\n  union all\n  select 2, 'agent status', 'cron on the node', 'stale',\n    'The agent status was last written ' || coalesce(round((extract(epoch from now()) - max(checked)) / 60) || ' minutes ago', 'never') || ': the cron line or the binary needs a look.',\n    to_timestamp(max(checked)), '/d/lpbot-agents'\n  from agent_status having coalesce(extract(epoch from now())::bigint - max(checked), 999999) > 600\n  union all\n  select 3, 'watcher', 'the node', 'stale',\n    'The watcher last wrote ' || coalesce(round((extract(epoch from now()) - max(updated)) / 60) || ' minutes ago', 'never') || ': the watcher or the database has stopped.',\n    to_timestamp(max(updated)), '/d/lpbot-live'\n  from live_pools having coalesce(extract(epoch from now())::bigint - max(updated), 999999) > 120\n)\nselect what, \"where\", state, \"what is wrong\", since, link from problems\nunion all\nselect 'nothing needs you now', '', 'fine', 'Every agent is fine, its status is current and the watcher is writing.', null, '/d/lpbot-agents'\nwhere not exists (select 1 from problems)\norder by 5 nulls last"
+          "rawSql": "with problems as (\n  select 1 as rank, s.agent as what, s.experiment as \"where\", s.state, s.detail as \"what is wrong\",\n    s.what_to_do as \"what to do\", to_timestamp(s.due) as since,\n    '/d/lpbot-agents?var-experiment=' || s.experiment || '&var-agent=' || s.run_id as link\n  from agent_status s where s.state in ('late','no waiter','stopped','failing','scheduler down')\n  union all\n  select 2, 'agent status', 'cron on the node', 'stale',\n    'The agent status was last written ' || coalesce(round((extract(epoch from now()) - max(checked)) / 60) || ' minutes ago', 'never') || '.',\n    'On the node machine: crontab -l should list deploy/agents/refresh.sh --looks; run it by hand and read logs/agent-refresh.log.',\n    to_timestamp(max(checked)), '/d/lpbot-agents'\n  from agent_status having coalesce(extract(epoch from now())::bigint - max(checked), 999999) > 600\n  union all\n  select 3, 'watcher', 'the node', 'stale',\n    'The watcher last wrote ' || coalesce(round((extract(epoch from now()) - max(updated)) / 60) || ' minutes ago', 'never') || ': the watcher or the database has stopped.',\n    'On the node machine: make watch-logs; if it has stopped, make watch-start.',\n    to_timestamp(max(updated)), '/d/lpbot-live'\n  from live_pools having coalesce(extract(epoch from now())::bigint - max(updated), 999999) > 120\n)\nselect what, \"where\", state, \"what is wrong\", \"what to do\", since, link from problems\nunion all\nselect 'nothing needs you now', '', 'fine', 'Every agent is fine, its status is current and the watcher is writing.', '', null, '/d/lpbot-agents'\nwhere not exists (select 1 from problems)\norder by 6 nulls last"
         }
       ],
       "fieldConfig": {
@@ -841,6 +841,21 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "what to do"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "link"
             },
             "properties": [
@@ -863,7 +878,7 @@
       "title": "Agents",
       "gridPos": {
         "x": 0,
-        "y": 12,
+        "y": 14,
         "w": 24,
         "h": 1
       },
@@ -881,7 +896,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 15,
         "w": 24,
         "h": 7
       },
@@ -1131,7 +1146,7 @@
       "title": "Pools",
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 22,
         "w": 24,
         "h": 1
       },
@@ -1149,7 +1164,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 26,
         "w": 24,
         "h": 8
       },
@@ -1348,7 +1363,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 23,
         "w": 24,
         "h": 3
       },
@@ -1407,7 +1422,7 @@
       "title": "Runs",
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 34,
         "w": 24,
         "h": 1
       },
@@ -1425,7 +1440,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 33,
+        "y": 35,
         "w": 24,
         "h": 12
       },
@@ -1551,7 +1566,7 @@
       "title": "Where things are",
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 47,
         "w": 24,
         "h": 1
       },
@@ -1565,7 +1580,7 @@
       "description": "Every dashboard, the question it answers, and where the commands are.",
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 48,
         "w": 24,
         "h": 13
       },
