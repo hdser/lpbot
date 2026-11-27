@@ -54,9 +54,10 @@ viewer:
 
 ## A throwaway, read-only Grafana at http://127.0.0.1:3002 showing this
 ## working copy's dashboards, to look at a change before it reaches the node.
-## Data from this computer's viewer, or from the node with HOST=<user>@<node>.
+## Data from this computer's viewer, or from the node with HOST=<user>@<node>;
+## ALERTS=1 also loads the alert rules, sending nowhere.
 dashboards-preview:
-	@HOST="$(HOST)" ./scripts/dashboards-preview.sh start
+	@HOST="$(HOST)" ALERTS="$(ALERTS)" ./scripts/dashboards-preview.sh start
 
 dashboards-preview-stop:
 	@./scripts/dashboards-preview.sh stop

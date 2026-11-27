@@ -1,0 +1,723 @@
+# The alert rules, evaluated every minute. Each says what it means and what to do;
+# deploy/RUNBOOK.md, "When something is red", has the same in a table. Written as JSON,
+# which is YAML, so every field is spelled out.
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "lpbot health",
+      "folder": "lpbot",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "lpbot-agent-needs-someone",
+          "title": "Agent needs someone",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "results",
+              "model": {
+                "refId": "A",
+                "rawQuery": true,
+                "editorMode": "code",
+                "format": "table",
+                "rawSql": "select run_id, agent, experiment, state, coalesce(nullif(what_to_do, ''), 'see make agents') as what_to_do,\n  case when state in ('late','no waiter','stopped','failing','scheduler down') then 1 else 0 end as value\nfrom agent_status"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "10m",
+          "labels": {
+            "urgency": "notice"
+          },
+          "annotations": {
+            "summary": "{{ $labels.agent }} ({{ $labels.experiment }}) is {{ $labels.state }}",
+            "what_to_do": "{{ $labels.what_to_do }}",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-agents",
+            "__panelId__": "12"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-agent-status-stale",
+          "title": "Agent status not written",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "results",
+              "model": {
+                "refId": "A",
+                "rawQuery": true,
+                "editorMode": "code",
+                "format": "table",
+                "rawSql": "select coalesce(extract(epoch from now())::bigint - max(checked), 999999) as value from agent_status"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        600
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "Alerting",
+          "execErrState": "Alerting",
+          "for": "0s",
+          "labels": {
+            "urgency": "notice"
+          },
+          "annotations": {
+            "summary": "Nobody has written the agent status for over 10 minutes, so nothing about the agents is current",
+            "what_to_do": "On the node machine: crontab -l should list deploy/agents/refresh.sh --looks; run it by hand and read logs/agent-refresh.log. If the database is down, make status.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-agents",
+            "__panelId__": "14"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-agent-rows-missing",
+          "title": "Agent missing from the status",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "results",
+              "model": {
+                "refId": "A",
+                "rawQuery": true,
+                "editorMode": "code",
+                "format": "table",
+                "rawSql": "select coalesce(max(expected), 1) - count(*) as value from agent_status"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "5m",
+          "labels": {
+            "urgency": "notice"
+          },
+          "annotations": {
+            "summary": "The agent status has fewer agents than it found",
+            "what_to_do": "On the node machine: make agents, and compare with data/agents/agents.yml.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-agents",
+            "__panelId__": "12"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-node-behind",
+          "title": "Node behind the chain",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "time() - (1606824023 + 12 * max(beacon_head_slot))",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        300
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "5m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "The newest block the node follows is over 5 minutes old",
+            "what_to_do": "On the node machine: make status. Check the internet, then deploy/RUNBOOK.md, \"After the internet was down\"; a hot machine falls behind too.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "1"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-node-not-moving",
+          "title": "Node not following",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "delta(reth_blockchain_tree_canonical_chain_height[10m])",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "Reth has added no block for 10 minutes",
+            "what_to_do": "On the node machine: make status, then docker compose -f deploy/docker-compose.yml logs --tail 50 reth.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "2"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-target-down",
+          "title": "Something Prometheus watches is down",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "up{job=~\"reth|lighthouse|node\"}",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "Alerting",
+          "execErrState": "Alerting",
+          "for": "10m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "{{ $labels.job }} does not answer Prometheus",
+            "what_to_do": "On the node machine: make status, then docker compose -f deploy/docker-compose.yml logs --tail 50 {{ $labels.job }} (node is node-exporter).",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "4"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-node-alone",
+          "title": "Node without peers",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "min(reth_network_connected_peers or libp2p_peers)",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "10m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "A node client has no peers, so it cannot follow the chain",
+            "what_to_do": "On the node machine: make status; check the internet and the router's forwarded ports (30303, 9000).",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "3"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-watcher-not-writing",
+          "title": "Watcher not writing",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "results",
+              "model": {
+                "refId": "A",
+                "rawQuery": true,
+                "editorMode": "code",
+                "format": "table",
+                "rawSql": "select coalesce(extract(epoch from now())::bigint - max(updated), 999999) as value from live_pools"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        120
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "5m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "The watcher has not written the live tables for over 2 minutes",
+            "what_to_do": "On the node machine: make watch-logs; if it has stopped, make watch-start.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-live",
+            "__panelId__": "15"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-watcher-behind",
+          "title": "Watcher behind the node",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "results",
+              "model": {
+                "refId": "A",
+                "rawQuery": true,
+                "editorMode": "code",
+                "format": "table",
+                "rawSql": "select coalesce(max(head_block - block), 0) as value from live_pools"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        50
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "10m",
+          "labels": {
+            "urgency": "notice"
+          },
+          "annotations": {
+            "summary": "The watcher is over 50 blocks behind the node",
+            "what_to_do": "On the node machine: make watch-logs; a hot machine or a busy disk slows it.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-live",
+            "__panelId__": "14"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-disk-low",
+          "title": "Disk low",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "min(node_filesystem_avail_bytes{mountpoint=\"/data\"}) / 1e9",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        150
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "5m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "Less than 150 GB free on /data",
+            "what_to_do": "On the node machine: df -h /data, and say what is growing before deleting anything (deploy/NODE.md, rule 9).",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "10"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-cpu-hot",
+          "title": "CPU hot",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "max(node_hwmon_temp_celsius{chip=~\"platform_coretemp_.*\"})",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        101.5
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "5m",
+          "labels": {
+            "urgency": "urgent"
+          },
+          "annotations": {
+            "summary": "The CPU has been at 102 °C or more for 5 minutes; the kernel switches the machine off at 105",
+            "what_to_do": "On the node machine: sensors; stop the heaviest job (a build, a backfill). The fan and the BIOS fan profile are the owner's.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "8"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-drive-hot",
+          "title": "Drive hot",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        69.5
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "KeepLast",
+          "execErrState": "KeepLast",
+          "for": "10m",
+          "labels": {
+            "urgency": "notice"
+          },
+          "annotations": {
+            "summary": "The NVMe drive has been at 70 °C or more for 10 minutes",
+            "what_to_do": "Check the machine's ventilation; the drive throttles when hot.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-machine",
+            "__panelId__": "9"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "lpbot-daily-check-in",
+          "title": "Daily check-in",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 600,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "vector(1)",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "A",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "Alerting",
+          "execErrState": "Alerting",
+          "for": "0s",
+          "labels": {
+            "kind": "heartbeat"
+          },
+          "annotations": {
+            "summary": "Alerts are working: this comes once a day",
+            "what_to_do": "Nothing. If this message stops coming, Grafana or the machine is down: check the machine.",
+            "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
+            "__dashboardUid__": "lpbot-overview",
+            "__panelId__": "8"
+          },
+          "isPaused": false
+        }
+      ]
+    }
+  ]
+}

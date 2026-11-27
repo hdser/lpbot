@@ -1,0 +1,21 @@
+# The text of every alert message: what happened, since when, what to do,
+# and where to look. Telegram shows it as plain text.
+apiVersion: 1
+
+templates:
+  - orgId: 1
+    name: lpbot
+    template: |
+      {{ define "lpbot.message" -}}
+      {{ range .Alerts.Firing -}}
+      ALERT: {{ .Annotations.summary }}
+      Since {{ .StartsAt.UTC.Format "2006-01-02 15:04 UTC" }}.
+      What to do: {{ .Annotations.what_to_do }}
+      Runbook: {{ .Annotations.runbook_url }}
+      {{ if .DashboardURL }}Dashboard: {{ .DashboardURL }}
+      {{ end }}
+      {{ end -}}
+      {{ range .Alerts.Resolved -}}
+      RESOLVED: {{ .Annotations.summary }}
+      {{ end -}}
+      {{- end }}

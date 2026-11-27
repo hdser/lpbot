@@ -178,7 +178,10 @@ Jobs that were running in `tmux`, such as the snapshot download or `make gates`,
 
 The archive keeps the state at every past block, which the bot uses only to read a pool's state at the start of a backfill. Once it is clear how much history the backtests need, Reth can be told to keep only that window. Check the Reth documentation of the version running for the prune settings and for how much space pruning an existing archive gives back; that has not been looked into yet.
 
+## Alerts
+
+Grafana sends alerts to Telegram when the node falls behind, a service stops, the disk fills, the machine runs too hot, the watcher stops or an agent needs someone, and a check-in once a day. Setting it up takes a bot and four keys in `deploy/.env`: [RUNBOOK.md](RUNBOOK.md), "Alerts on Telegram".
+
 ## Not set up yet
 
-- An alert when the node falls behind or the disk fills. Prometheus already collects the numbers, and `make status` warns below 150 GB free.
 - Backups. Everything except `deploy/.env`, the `runs/` folder and, later, the bot's key can be rebuilt from the chain. Keep a copy of `deploy/.env` somewhere safe.

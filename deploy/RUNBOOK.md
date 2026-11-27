@@ -236,6 +236,26 @@ The Overview, the first page Grafana opens, shows the node, the watcher and the 
 | Watcher last wrote past 2 minutes | The watcher or the database has stopped. The watcher writes every few seconds even without a new block | `make watch-logs`; if it has stopped, `make watch-start`. "The live tables (the watcher)" above has the rest |
 | Node head age past 5 minutes | The node is behind the chain: the internet, Lighthouse, or a machine that is too hot | `make status`; "After the internet was down" and "Keep an eye on" below |
 | Node peers at 0 | A client cannot reach the network | `make status`, then `docker compose -f deploy/docker-compose.yml logs --tail 50 reth` (or `lighthouse`) |
+| Something Prometheus watches is down (`reth`, `lighthouse` or `node`, which is node-exporter) | Prometheus cannot reach it | `make status`, then `docker compose -f deploy/docker-compose.yml logs --tail 50 <service>`; node-exporter's service is `node-exporter` |
+| Free on /data below 150 GB | The data volume is filling; the node stops when it is full | `df -h /data`, and say what is growing before deleting anything ([NODE.md](NODE.md), rule 9) |
+| CPU at 102 °C or more | The machine is about to throttle hard; the kernel switches it off at 105 °C | `sensors`; stop the heaviest job (a build, a backfill). The fan, the dust and the BIOS fan profile are the owner's |
+| NVMe drive at 70 °C or more | The drive slows down when hot | The machine's ventilation |
+| No daily check-in on Telegram | Grafana, the machine or its internet is down, since nothing else could send | From the laptop: `ssh` to the machine, then `make status` |
+
+### Alerts on Telegram
+
+Grafana evaluates the rules in `deploy/grafana/alerting/rules.yml` every minute: one for each row above. A firing alert sends a Telegram message with what happened, since when, what to do and a link through the laptop's tunnel; urgent ones (the node, the watcher, the disk, the CPU) repeat every 2 hours, notices (an agent, the status) every 12, and a message comes when an alert resolves. Once a day comes a check-in: if it stops coming, nothing can send. The Overview lists what is firing, under Needs attention.
+
+Alerting is on only where `GRAFANA_ALERTING` names the alerting folder; elsewhere (the laptop's viewer) it is off. To turn it on, on the node machine:
+
+1. The owner creates a bot: in Telegram, talk to `@BotFather`, send `/newbot`, and keep the token it gives.
+2. The owner sends the bot any message, then reads the chat id from `https://api.telegram.org/bot<token>/getUpdates` (`"chat":{"id":...}`) in a browser.
+3. The owner adds to `deploy/.env`: `TELEGRAM_BOT_TOKEN=<token>`, `TELEGRAM_CHAT_ID=<id>`, `GRAFANA_ROOT_URL=http://127.0.0.1:3001/` and, last, `GRAFANA_ALERTING=./grafana/alerting`. With alerting on and a key blank, Grafana does not start, and every dashboard with it.
+4. `docker compose -f deploy/docker-compose.yml up -d --no-deps grafana`. The daily check-in arrives within a minute or two: that is the test.
+
+The token is a secret: never print `deploy/.env`, and note that `docker inspect` and `docker compose config` print the Grafana container's environment, token included.
+
+In Grafana, under Alerting: the rules and their history, and silences, which stop the messages of an alert for a while (during planned work, say). A rule itself changes only in its file, then `git pull` and the `up` above.
 
 ## After the machine was off
 

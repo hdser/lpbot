@@ -769,3 +769,167 @@ fn the_column_reader_names_what_a_query_returns() {
     assert_eq!(title_room(6), 20);
     assert_eq!(title_length("Price, ${unit}"), 21);
 }
+
+fn yaml(path: &str) -> serde_yaml::Value {
+    let path = deploy().join(path);
+    serde_yaml::from_str(&fs::read_to_string(&path).unwrap())
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// GitHub's anchor for a Markdown heading.
+fn anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+#[test]
+fn every_alert_reads_what_exists_and_says_what_to_do() {
+    let sources = datasources();
+    let known = known_tables();
+    let all = dashboards();
+    let runbook = fs::read_to_string(deploy().join("RUNBOOK.md")).unwrap();
+    let anchors: BTreeSet<String> = runbook
+        .lines()
+        .filter(|l| l.starts_with('#'))
+        .map(|l| anchor(l.trim_start_matches('#')))
+        .collect();
+    let folder = yaml("grafana/dashboards/dashboards.yml")["providers"][0]["folder"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rules = yaml("grafana/alerting/rules.yml");
+    let mut seen = BTreeSet::new();
+    let mut count = 0;
+    for group in rules["groups"].as_sequence().unwrap() {
+        assert_eq!(
+            group["folder"].as_str(),
+            Some(folder.as_str()),
+            "alert rules live in the dashboards' folder"
+        );
+        for rule in group["rules"].as_sequence().unwrap() {
+            count += 1;
+            let uid = rule["uid"].as_str().unwrap();
+            assert!(seen.insert(uid.to_string()), "two rules are called {uid}");
+            let refs: Vec<&str> = rule["data"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|d| d["refId"].as_str().unwrap())
+                .collect();
+            assert!(
+                refs.contains(&rule["condition"].as_str().unwrap()),
+                "{uid}: its condition is not one of its queries"
+            );
+            for d in rule["data"].as_sequence().unwrap() {
+                let source = d["datasourceUid"].as_str().unwrap();
+                assert!(
+                    source == "__expr__" || sources.contains(source),
+                    "{uid}: reads {source}, which is not provisioned"
+                );
+                if let Some(sql) = d["model"]["rawSql"].as_str() {
+                    for table in tables(sql) {
+                        assert!(
+                            known.contains(&table),
+                            "{uid}: reads {table:?}, not one of the viewer's tables"
+                        );
+                    }
+                }
+            }
+            let notes = &rule["annotations"];
+            for key in ["summary", "what_to_do", "runbook_url"] {
+                assert!(
+                    notes[key].as_str().is_some_and(|t| t.len() > 5),
+                    "{uid}: needs a {key}"
+                );
+            }
+            let link = notes["runbook_url"].as_str().unwrap();
+            let target = link.rsplit_once('#').map(|(_, a)| a).unwrap_or_default();
+            assert!(
+                link.contains("deploy/RUNBOOK.md#") && anchors.contains(target),
+                "{uid}: {link} is not a heading of deploy/RUNBOOK.md"
+            );
+            // Grafana refuses a rule with one of the two: both, and the
+            // panel must be on that dashboard.
+            let dashboard = notes["__dashboardUid__"].as_str().unwrap_or_default();
+            let panel = notes["__panelId__"].as_str().unwrap_or_default();
+            let target = all
+                .iter()
+                .find(|d| d.uid() == dashboard)
+                .unwrap_or_else(|| {
+                    panic!("{uid}: links to the dashboard {dashboard:?}, which does not exist")
+                });
+            assert!(
+                panel
+                    .parse::<u64>()
+                    .is_ok_and(|id| target.panels().iter().any(|p| p["id"].as_u64() == Some(id))),
+                "{uid}: links to panel {panel:?}, which {dashboard} does not have"
+            );
+            let labels = &rule["labels"];
+            assert!(
+                matches!(labels["urgency"].as_str(), Some("urgent" | "notice"))
+                    || labels["kind"].as_str() == Some("heartbeat"),
+                "{uid}: needs urgency urgent or notice"
+            );
+        }
+    }
+    assert!(count >= 10, "only {count} rules");
+}
+
+#[test]
+fn alerting_is_off_unless_the_node_turns_it_on_and_holds_no_secret() {
+    let compose = yaml("docker-compose.yml");
+    let grafana = &compose["services"]["grafana"];
+    let mounts: Vec<&str> = grafana["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        mounts.contains(
+            &"${GRAFANA_ALERTING:-./grafana/alerting-off}:/etc/grafana/provisioning/alerting:ro"
+        ),
+        "alerting must default to the empty folder: {mounts:?}"
+    );
+    for key in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] {
+        assert_eq!(
+            grafana["environment"][key].as_str(),
+            Some(format!("${{{key}:-}}").as_str()),
+            "{key} comes from deploy/.env"
+        );
+    }
+    let off = deploy().join("grafana/alerting-off");
+    for entry in fs::read_dir(&off).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".yml") && !name.ends_with(".yaml"),
+            "{name} in alerting-off would turn alerting on everywhere"
+        );
+    }
+    let points = yaml("grafana/alerting/contact-points.yml");
+    let receiver = &points["contactPoints"][0]["receivers"][0];
+    assert_eq!(
+        receiver["settings"]["bottoken"].as_str(),
+        Some("$TELEGRAM_BOT_TOKEN")
+    );
+    assert_eq!(
+        receiver["settings"]["chatid"].as_str(),
+        Some("$TELEGRAM_CHAT_ID")
+    );
+    let name = points["contactPoints"][0]["name"].as_str().unwrap();
+    let policies = yaml("grafana/alerting/policies.yml");
+    let root = &policies["policies"][0];
+    assert_eq!(root["receiver"].as_str(), Some(name));
+    let heartbeat = root["routes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|r| r["object_matchers"][0][0].as_str() == Some("kind"))
+        .expect("a route for the daily check-in");
+    assert_eq!(heartbeat["repeat_interval"].as_str(), Some("24h"));
+}
