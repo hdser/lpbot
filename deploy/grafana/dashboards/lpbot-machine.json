@@ -731,7 +731,7 @@
     {
       "type": "stat",
       "title": "NVMe drive",
-      "description": "The data drive's temperature. It slows down when hot; at 70 °C for 10 minutes an alert fires.",
+      "description": "The data drive's temperature, from its Composite sensor; the drive's second sensor, its controller, reads about 40 °C higher and is left out. The drive slows down when hot; at 70 °C for 10 minutes an alert fires.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -750,7 +750,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\", sensor=\"temp1\"})",
           "legendFormat": "drive",
           "instant": true,
           "range": false
@@ -922,7 +922,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+          "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\", sensor=\"temp1\"})",
           "legendFormat": "NVMe drive",
           "instant": false,
           "range": true

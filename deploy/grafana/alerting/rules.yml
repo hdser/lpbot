@@ -623,7 +623,7 @@
               "datasourceUid": "prometheus",
               "model": {
                 "refId": "A",
-                "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\"})",
+                "expr": "max(node_hwmon_temp_celsius{chip=~\".*nvme.*\", sensor=\"temp1\"})",
                 "instant": true,
                 "range": false
               }
@@ -655,7 +655,7 @@
             "urgency": "notice"
           },
           "annotations": {
-            "summary": "The NVMe drive has been at 70 °C or more for 10 minutes",
+            "summary": "The NVMe drive (its Composite sensor) has been at 70 °C or more for 10 minutes",
             "what_to_do": "Check the machine's ventilation; the drive throttles when hot.",
             "runbook_url": "https://github.com/hdser/lpbot/blob/main/deploy/RUNBOOK.md#when-something-is-red",
             "__dashboardUid__": "lpbot-machine",
