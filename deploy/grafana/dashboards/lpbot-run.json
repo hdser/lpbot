@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-run",
-  "title": "lpbot: run detail",
-  "description": "One run: its result in the value token and in dollars, how its time split between in range, out of range, resting and flat, the price with its ranges and campaigns, the pool's liquidity, its value against holding, and every campaign. Open it from a run id on the runs dashboard, which sets the time range to the run's window; otherwise use Zoom to data.",
+  "title": "Runs: one run",
+  "description": "What happened in one run, and where did its result come from? Its result, its time in and out of range, the price with its ranges, its value against holding, and every campaign. Opened from a run, the time range is the run's window; otherwise use Zoom to data. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "runs"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -24,12 +25,13 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select distinct experiment from runs order by 1",
-        "definition": "select distinct experiment from runs order by 1",
+        "query": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
+        "definition": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       },
       {
         "name": "run",
@@ -44,7 +46,24 @@
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
+      },
+      {
+        "name": "pool_address",
+        "label": "Pool address",
+        "type": "query",
+        "hide": 2,
+        "refresh": 1,
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "results"
+        },
+        "skipUrlSync": true,
+        "query": "select pool from pool_series where pool_name = (select pool from runs where run_id = '$run') limit 1",
+        "definition": "select pool from pool_series where pool_name = (select pool from runs where run_id = '$run') limit 1",
+        "sort": 0,
+        "current": {}
       }
     ]
   },
@@ -81,10 +100,112 @@
   },
   "links": [
     {
-      "title": "Compare runs",
+      "title": "Overview",
       "type": "link",
-      "url": "/d/lpbot-compare",
-      "icon": "dashboard"
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "All runs of this experiment",
+      "type": "link",
+      "url": "/d/lpbot-runs?var-experiment=${experiment}",
+      "tooltip": "Runs: experiments, with this experiment",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pool and range choice",
+      "type": "link",
+      "url": "/d/lpbot-zones?var-experiment=${experiment}&var-run=${run}",
+      "tooltip": "What this run saw when it chose its pool and its ranges",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pool history",
+      "type": "link",
+      "url": "/d/lpbot-pool?var-pool=${pool_address}",
+      "tooltip": "Pools: history, for this run's pool",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Compare with others",
+      "type": "link",
+      "url": "/d/lpbot-compare?var-experiment=${experiment}&var-runs=${run}",
+      "tooltip": "Runs: compare, with this run chosen",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
     }
   ],
   "panels": [

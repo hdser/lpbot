@@ -17,7 +17,7 @@ It checks for Docker, creates `deploy/.env` with generated passwords, generates 
 | postgres | Result tables for the viewer | `127.0.0.1:5432`, database and user `lpbot` |
 | prometheus | Node metrics | `http://127.0.0.1:9090` |
 | grafana | Viewer and monitoring | `http://127.0.0.1:3000` |
-| watcher | `lpbot watch-pools`: follows the stored pools from the node block by block and keeps the live tables current, for the `lpbot: live` dashboard. See "The live tables" in [RUNBOOK.md](RUNBOOK.md) | Nothing: it writes into Postgres |
+| watcher | `lpbot watch-pools`: follows the stored pools from the node block by block and keeps the live tables current, for the `Pools: live` dashboard. See "The live tables" in [RUNBOOK.md](RUNBOOK.md) | Nothing: it writes into Postgres |
 
 Only the peer-to-peer ports (30303 and 9000, TCP and UDP) are open to the network. Forward those on the router. Never forward the others.
 
@@ -60,7 +60,7 @@ Run it inside `tmux`: the first run stores months of history for every pool of t
 | `history` | Stores every pool's events from the longest zone lookback before the experiment's window, and replays them from the first day's state | Every pool replays to its state on the chain |
 | `fees` | Follows every position opened inside the stored history of the traded pool and compares what it collected with what the replica says it was owed | At least 20 emptied positions agree within 0.1% and none contradicts the replica |
 | `backtest` | Runs the experiment file | Every run writes its six tables |
-| `load` | Loads the tables into Postgres | The runs are in the database; open the `lpbot: runs` dashboard |
+| `load` | Loads the tables into Postgres | The runs are in the database; open the `Runs: experiments` dashboard |
 | `calibrate` | Fits the adaptive patience decision walk-forward and scores it against the fixed rules | It finishes; the output says which one ships |
 
 It stops at the first step that fails, so nothing is built on a check that did not hold, and ends with a summary: one line per step with `pass`, `open`, `FAIL`, `left out` or `not run`. `open` means nothing wrong was found but the check could not be decided, for example when too few positions were emptied; the steps after it still run. The whole output is kept under `logs/`.
@@ -122,7 +122,7 @@ To see the results, load them into Postgres and open Grafana:
 make load
 ```
 
-On a machine without the node, `make viewer` starts Postgres, Prometheus and Grafana, which is enough to load and look at results. The `Reth node` dashboard stays empty until a node runs. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). The folder `lpbot` has six dashboards: every run of an experiment side by side, one run in detail, runs and strategies compared, what a run saw of pools and zones, one pool over its stored history, and the followed pools live (filled by the watcher on the node machine). Start from the runs dashboard and click a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. Loading is safe to repeat; a run loaded twice replaces itself.
+On a machine without the node, `make viewer` starts Postgres, Prometheus and Grafana, which is enough to load and look at results. The `System: Reth internals` dashboard stays empty until a node runs. Grafana is on http://127.0.0.1:3000 (user `admin`, password `GRAFANA_PASSWORD` from `deploy/.env`). Grafana opens on the Overview, and the folder `lpbot` has nine dashboards in five subjects, with the same menu at the top of each: the Overview; Agents; Pools: live (filled by the watcher on the node machine) and Pools: history; Runs: experiments, Runs: one run, Runs: compare and Runs: pool and range choice; System: Reth internals. Start from Runs: experiments, click an experiment and then a run id: that opens the run in detail with the time range set to its window, which matters because backtests lie in the past. To look at a changed dashboard before it reaches the node, `make dashboards-preview` starts a read-only copy at http://127.0.0.1:3002 with this computer's data (`HOST=<user>@<node>` for the node's). Loading is safe to repeat; a run loaded twice replaces itself.
 
 `make rank` and `make backtest` are the short forms of the last two steps (`make backtest EXPERIMENT=<file>` for another file). The `make` targets find the stored history through `DATA_DIR` in `deploy/.env`. When you call `lpbot` directly and `DATA_DIR` is not `./data`, set `LPBOT_DATA_DIR=<DATA_DIR>/lake` or pass `--data-dir`.
 

@@ -137,6 +137,9 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      # Opening Grafana goes to the Overview. A home dashboard chosen in a
+      # user's or the organisation's preferences would come first.
+      GF_USERS_HOME_PAGE: /d/lpbot-overview
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro

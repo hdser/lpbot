@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-compare",
-  "title": "lpbot: compare",
-  "description": "Runs and strategies side by side: value curves in dollars and in the value token against holding ETH and holding dollars, their figures in a table, and every run of the chosen experiments averaged by rule, value token, width, pool or settings.",
+  "title": "Runs: compare",
+  "description": "How do chosen runs, or groups of runs, compare? Value curves against holding, their figures side by side, and every run of the chosen experiments averaged by group. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "runs"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -24,12 +25,13 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select distinct experiment from runs order by 1",
-        "definition": "select distinct experiment from runs order by 1",
+        "query": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
+        "definition": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
         "refresh": 1,
         "sort": 0,
         "multi": true,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       },
       {
         "name": "gas",
@@ -134,10 +136,76 @@
   },
   "links": [
     {
-      "title": "Runs",
+      "title": "Overview",
       "type": "link",
-      "url": "/d/lpbot-runs",
-      "icon": "dashboard"
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs of these experiments",
+      "type": "link",
+      "url": "/d/lpbot-runs?${experiment:queryparam}",
+      "tooltip": "Runs: experiments, with the first experiment chosen here",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
     }
   ],
   "panels": [
@@ -361,7 +429,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience as run, r.sweep, coalesce(r.gas_prices, 'fixed') as gas_prices, r.gas_gwei,\n  r.result_pct as result_value_pct, r.result_pct_usd as result_usd_pct, r.hold_value_pct_usd as holding_value_usd_pct,\n  50 * case when r.start_usd = r.start_capital then r.start_price / r.end_price - 1 else r.end_price / r.start_price - 1 end as half_and_half_usd_pct,\n  r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as apr_pct, r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as fee_apr_pct,\n  (r.end_capital - r.start_capital) - r.fees + r.gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id) as out_of_range_pct,\n  (select max(seconds_beyond) / 86400.0 from campaigns c where c.run_id = r.run_id) as longest_out_days,\n  r.campaigns, r.passes, r.max_drawdown_pct, r.window_from, r.window_to\nfrom runs r where r.run_id in ($runs) order by r.result_pct_usd desc"
+          "rawSql": "select r.experiment || ' ' || lpad(r.run_index::text, 3, '0') || ' ' || r.pool || ' ' || r.value_token || ' ' || coalesce(r.entry_shape, 'one_sided') || ' ' || r.width_ticks || 't ' || r.patience as run, r.sweep, coalesce(r.gas_prices, 'fixed') as gas_prices, r.gas_gwei,\n  r.result_pct as result_value_pct, r.result_pct_usd as result_usd_pct, r.hold_value_pct_usd as holding_value_usd_pct,\n  50 * case when r.start_usd = r.start_capital then r.start_price / r.end_price - 1 else r.end_price / r.start_price - 1 end as half_and_half_usd_pct,\n  r.result_pct * 365.0 / (r.window_to::date - r.window_from::date + 1) as apr_pct, r.fees / r.start_capital * 100 * 365.0 / (r.window_to::date - r.window_from::date + 1) as fee_apr_pct,\n  (r.end_capital - r.start_capital) - r.fees + r.gas as divergence,\n  (select 100.0 * count(*) filter (where state = 'in_range') / nullif(count(*), 0) from series s where s.run_id = r.run_id) as in_range_pct,\n  (select 100.0 * count(*) filter (where state in ('beyond', 'flipped')) / nullif(count(*), 0) from series s where s.run_id = r.run_id) as out_of_range_pct,\n  (select max(seconds_beyond) / 86400.0 from campaigns c where c.run_id = r.run_id) as longest_out_days,\n  r.campaigns, r.passes, r.max_drawdown_pct, r.window_from, r.window_to,\n  r.experiment, r.run_id, (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom runs r where r.run_id in ($runs) order by r.result_pct_usd desc"
         }
       ],
       "fieldConfig": {
@@ -564,6 +632,71 @@
               {
                 "id": "custom.width",
                 "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open this run",
+                    "url": "/d/lpbot-run?var-experiment=${__data.fields.experiment}&var-run=${__data.fields.run_id}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "experiment"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
               }
             ]
           }

@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next agents load pool-stats watch watch-build watch-start watch-stop watch-logs
+.PHONY: up env viewer dashboards-preview dashboards-preview-stop snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next agents load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -51,6 +51,15 @@ grafana-reset-password:
 ## For a laptop: `make demo`, `make viewer`, `make load`.
 viewer:
 	LPBOT_SERVICES="postgres prometheus grafana" ./scripts/up.sh
+
+## A throwaway, read-only Grafana at http://127.0.0.1:3002 showing this
+## working copy's dashboards, to look at a change before it reaches the node.
+## Data from this computer's viewer, or from the node with HOST=<user>@<node>.
+dashboards-preview:
+	@HOST="$(HOST)" ./scripts/dashboards-preview.sh start
+
+dashboards-preview-stop:
+	@./scripts/dashboards-preview.sh stop
 
 ## Stop everything. Data is kept.
 down:

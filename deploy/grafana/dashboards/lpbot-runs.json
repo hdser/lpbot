@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-runs",
-  "title": "lpbot: runs",
-  "description": "Every run of an experiment side by side. Results are in the value token and in dollars; fees and gas are in the value token.",
+  "title": "Runs: experiments",
+  "description": "Which experiments are there, and how did the runs of one do? Click an experiment in the first table to show its runs; click a run to open it. Results are in the value token and in dollars. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "runs"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -24,12 +25,13 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select distinct experiment from runs order by 1",
-        "definition": "select distinct experiment from runs order by 1",
+        "query": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
+        "definition": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       }
     ]
   },
@@ -38,13 +40,156 @@
   },
   "links": [
     {
-      "title": "Compare runs and strategies",
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Compare these runs",
       "type": "link",
       "url": "/d/lpbot-compare?var-experiment=${experiment}",
-      "icon": "dashboard"
+      "tooltip": "Runs: compare, with this experiment chosen",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
     }
   ],
   "panels": [
+    {
+      "type": "table",
+      "title": "Experiments, newest first",
+      "description": "Every experiment stored, newest window first. Click one to show its runs below. Best and median are the runs' results in dollars, in percent of the starting capital.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "results"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "results"
+          },
+          "rawQuery": true,
+          "editorMode": "code",
+          "format": "table",
+          "rawSql": "select experiment, count(*) as runs, min(window_from) as \"from\", max(window_to) as \"to\", count(distinct pool) as pools,\n  max(result_pct_usd) as \"best in $, %\",\n  percentile_cont(0.5) within group (order by result_pct_usd) as \"median in $, %\"\nfrom runs group by experiment order by max(window_to) desc, experiment"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "experiment"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show the runs of this experiment",
+                    "url": "/d/lpbot-runs?var-experiment=${__value.raw}"
+                  }
+                ]
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(runs|pools)$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "id": 5
+    },
     {
       "id": 1,
       "title": "Runs",
@@ -55,7 +200,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 9,
         "w": 24,
         "h": 10
       },
@@ -239,7 +384,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 10,
+        "y": 19,
         "w": 12,
         "h": 12
       },
@@ -285,7 +430,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 10,
+        "y": 19,
         "w": 12,
         "h": 12
       },
@@ -371,7 +516,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 31,
         "w": 24,
         "h": 8
       },

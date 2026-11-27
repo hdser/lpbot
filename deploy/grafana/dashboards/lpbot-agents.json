@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-agents",
-  "title": "lpbot: agents",
-  "description": "Agent runs side by side: each agent's result, how its decisions scored against cash and holding, how it stood toward its peers, and every look with what it saw, decided, expected and why. From the agent tables (agent_looks, agent_scores) and the runs and series tables.",
+  "title": "Agents",
+  "description": "What is each agent doing, how is it doing, and why did it decide that? The Now section shows every forward agent's state, refreshed every minute; below it, the agents of one experiment side by side, how their decisions scored against cash and holding, and every look with its reasoning. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "agents"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -25,15 +26,16 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select distinct r.experiment from runs r where exists (select 1 from agent_looks l where l.run_id = r.run_id) order by 1",
-        "definition": "select distinct r.experiment from runs r where exists (select 1 from agent_looks l where l.run_id = r.run_id) order by 1",
+        "query": "select r.experiment as __value, r.experiment || ' (' || count(distinct l.agent) || ' agents)' as __text from runs r join agent_looks l on l.run_id = r.run_id group by r.experiment order by max(r.window_to) desc, r.experiment",
+        "definition": "select r.experiment as __value, r.experiment || ' (' || count(distinct l.agent) || ' agents)' as __text from runs r join agent_looks l on l.run_id = r.run_id group by r.experiment order by max(r.window_to) desc, r.experiment",
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       },
       {
-        "name": "run",
+        "name": "agent",
         "label": "Agents",
         "type": "query",
         "datasource": {
@@ -93,23 +95,71 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select to_timestamp(time) as time,\n  agent || ' look ' || number || ': ' || action || case when action = 'enter' then ' ' || (case when lower_pct >= 0 then '+' else '' end || round((lower_pct)::numeric, 2) || '%') || ' to ' || (case when upper_pct >= 0 then '+' else '' end || round((upper_pct)::numeric, 2) || '%') else '' end || coalesce('. ' || nullif(note, ''), '') as text,\n  agent || ',' || action as tags\nfrom agent_looks where run_id in ($run) and action in ('enter', 'exit') and $__unixEpochFilter(time) order by 1"
+          "rawSql": "select to_timestamp(time) as time,\n  agent || ' look ' || number || ': ' || action || case when action = 'enter' then ' ' || (case when lower_pct >= 0 then '+' else '' end || round((lower_pct)::numeric, 2) || '%') || ' to ' || (case when upper_pct >= 0 then '+' else '' end || round((upper_pct)::numeric, 2) || '%') else '' end || coalesce('. ' || nullif(note, ''), '') as text,\n  agent || ',' || action as tags\nfrom agent_looks where run_id in ($agent) and action in ('enter', 'exit') and $__unixEpochFilter(time) order by 1"
         }
       }
     ]
   },
   "links": [
     {
-      "title": "Runs",
+      "title": "Overview",
       "type": "link",
-      "url": "/d/lpbot-runs",
-      "icon": "dashboard"
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
     },
     {
-      "title": "Compare runs",
+      "title": "Agents",
       "type": "link",
-      "url": "/d/lpbot-compare",
-      "icon": "dashboard"
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
     }
   ],
   "panels": [
@@ -124,7 +174,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above, then **click an agent's name** in the first table to set the time range to its window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`. The **Now** row shows every forward agent's state at this minute, from `lpbot supervisor status --load`, which `deploy/agents/refresh.sh --looks` runs every minute."
+        "content": "Agent runs side by side: each run of a panel is decided look by look by one agent, a Claude Code session or a person. Pick the experiment and the agents above. **Click an agent's name**, in Every agent now or in Agents side by side, to show only that agent over its run's window. Scores come from `lpbot agent evaluate`: each decision against staying in cash and against holding what was open, over the agent's own next look and the horizons scored. Load with `lpbot agent evaluate <experiment>`, `lpbot run <experiment>`, then `make load`. The **Now** row shows every forward agent's state at this minute, from `lpbot supervisor status --load`, which `deploy/agents/refresh.sh --looks` runs every minute."
       },
       "id": 1
     },
@@ -165,7 +215,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select agent, model, experiment, runner, state,\n  due - extract(epoch from now())::bigint as \"next look\",\n  to_timestamp(last_time) as \"last look\",\n  coalesce(last_action || coalesce(' ' || last_range, ''), 'none') as \"last decision\",\n  listening, detail, scheduler, run_id\nfrom agent_status\norder by case when state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, experiment, agent"
+          "rawSql": "select s.agent, s.model, s.experiment, s.runner, s.state,\n  s.due - extract(epoch from now())::bigint as \"next look\",\n  to_timestamp(s.last_time) as \"last look\",\n  coalesce(s.last_action || coalesce(' ' || s.last_range, ''), 'none') as \"last decision\",\n  s.listening, s.detail, s.scheduler, s.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom agent_status s left join runs r on r.run_id = s.run_id\norder by case when s.state in ('late','no waiter','stopped','failing','scheduler down') then 0 else 1 end, s.experiment, s.agent"
         }
       ],
       "fieldConfig": {
@@ -181,8 +231,8 @@
                 "id": "links",
                 "value": [
                   {
-                    "title": "Show this agent's runs",
-                    "url": "/d/lpbot-agents?var-experiment=${__data.fields.experiment}&var-run=${__data.fields.run_id}"
+                    "title": "Show only this agent, over its run's window",
+                    "url": "/d/lpbot-agents?var-experiment=${__data.fields.experiment}&var-agent=${__data.fields.run_id}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
                   }
                 ]
               }
@@ -299,6 +349,30 @@
             "matcher": {
               "id": "byName",
               "options": "run_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to_ms"
             },
             "properties": [
               {
@@ -522,7 +596,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select a.agent, a.model, a.looks, a.with_peers as \"peers shown\", r.result_pct as \"result %\", r.result_pct_usd as \"in $ %\",\n  r.hold_value_pct_usd as \"holding, in $ %\", r.max_drawdown_pct as \"max drawdown %\", r.campaigns, r.passes as \"round trips\",\n  r.fees, r.gas, r.value_token, r.window_from, r.window_to, r.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a join runs r on r.run_id = a.run_id\norder by a.agent"
+          "rawSql": "select a.agent, a.model, a.looks, a.with_peers as \"peers shown\", r.result_pct as \"result %\", r.result_pct_usd as \"in $ %\",\n  r.hold_value_pct_usd as \"holding, in $ %\", r.max_drawdown_pct as \"max drawdown %\", r.campaigns, r.passes as \"round trips\",\n  r.fees, r.gas, r.value_token, r.window_from, r.window_to, r.run_id,\n  (extract(epoch from r.window_from::date) * 1000)::bigint as from_ms,\n  (extract(epoch from r.window_to::date + 1) * 1000)::bigint as to_ms\nfrom (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($agent) group by run_id) a join runs r on r.run_id = a.run_id\norder by a.agent"
         }
       ],
       "fieldConfig": {
@@ -539,7 +613,7 @@
                 "value": [
                   {
                     "title": "Set the time range to this run's window",
-                    "url": "/d/lpbot-agents?${experiment:queryparam}&${run:queryparam}&${horizon:queryparam}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
+                    "url": "/d/lpbot-agents?${experiment:queryparam}&${agent:queryparam}&${horizon:queryparam}&from=${__data.fields.from_ms}&to=${__data.fields.to_ms}&timezone=utc"
                   }
                 ]
               }
@@ -709,7 +783,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select agent, model, horizon, count(*) as decisions,\n  avg(edge_vs_cash_pct) as \"edge over cash %\", avg(edge_vs_hold_pct) as \"edge over holding %\", count(edge_vs_hold_pct) as \"with a position open\",\n  sum(regret_pct) as \"regret %\", 100.0 * avg(case when best = 'decision' then 1.0 else 0.0 end) as \"best %\",\n  100.0 * avg(case when band_held then 1.0 when band_held is not null then 0.0 end) as \"band held %\", count(band_held) as \"bands\",\n  avg(brier) as \"Brier\"\nfrom agent_scores where run_id in ($run)\ngroup by agent, model, horizon order by horizon <> 'next', horizon, agent"
+          "rawSql": "select agent, model, horizon, count(*) as decisions,\n  avg(edge_vs_cash_pct) as \"edge over cash %\", avg(edge_vs_hold_pct) as \"edge over holding %\", count(edge_vs_hold_pct) as \"with a position open\",\n  sum(regret_pct) as \"regret %\", 100.0 * avg(case when best = 'decision' then 1.0 else 0.0 end) as \"best %\",\n  100.0 * avg(case when band_held then 1.0 when band_held is not null then 0.0 end) as \"band held %\", count(band_held) as \"bands\",\n  avg(brier) as \"Brier\"\nfrom agent_scores where run_id in ($agent)\ngroup by agent, model, horizon order by horizon <> 'next', horizon, agent"
         }
       ],
       "fieldConfig": {
@@ -838,7 +912,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(s.time) as time, a.agent || ' (' || a.model || ')' as metric, (s.equity / r.start_capital - 1) * 100 as value\nfrom series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\nwhere $__unixEpochFilter(s.time)\norder by 1"
+          "rawSql": "select to_timestamp(s.time) as time, a.agent || ' (' || a.model || ')' as metric, (s.equity / r.start_capital - 1) * 100 as value\nfrom series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($agent) group by run_id) a on a.run_id = s.run_id\nwhere $__unixEpochFilter(s.time)\norder by 1"
         }
       ],
       "fieldConfig": {
@@ -890,7 +964,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select time, metric, value from (\n  select to_timestamp(s.time) as time, 'price' as metric,\n    case when r.start_usd = r.start_capital then 1 / s.price else s.price end as value\n  from series s join runs r on r.run_id = s.run_id\n  where s.run_id = (select min(run_id) from agent_looks where run_id in ($run)) and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range low',\n    case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_lower is not null and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range high',\n    case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($run) group by run_id) a on a.run_id = s.run_id\n  where s.price_upper is not null and $__unixEpochFilter(s.time)\n) x order by 1"
+          "rawSql": "select time, metric, value from (\n  select to_timestamp(s.time) as time, 'price' as metric,\n    case when r.start_usd = r.start_capital then 1 / s.price else s.price end as value\n  from series s join runs r on r.run_id = s.run_id\n  where s.run_id = (select min(run_id) from agent_looks where run_id in ($agent)) and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range low',\n    case when r.start_usd = r.start_capital then 1 / s.price_upper else s.price_lower end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($agent) group by run_id) a on a.run_id = s.run_id\n  where s.price_lower is not null and $__unixEpochFilter(s.time)\n  union all\n  select to_timestamp(s.time), a.agent || ' range high',\n    case when r.start_usd = r.start_capital then 1 / s.price_lower else s.price_upper end\n  from series s join runs r on r.run_id = s.run_id join (select run_id, min(agent) as agent, min(model) as model, count(*) as looks, count(stance) as with_peers from agent_looks where run_id in ($agent) group by run_id) a on a.run_id = s.run_id\n  where s.price_upper is not null and $__unixEpochFilter(s.time)\n) x order by 1"
         }
       ],
       "fieldConfig": {
@@ -980,7 +1054,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "time_series",
-          "rawSql": "select to_timestamp(time) as time, agent || ' (' || model || ')' as metric, edge_vs_cash_pct as value\nfrom agent_scores where run_id in ($run) and horizon = '$horizon' and $__unixEpochFilter(time)\norder by 1"
+          "rawSql": "select to_timestamp(time) as time, agent || ' (' || model || ')' as metric, edge_vs_cash_pct as value\nfrom agent_scores where run_id in ($agent) and horizon = '$horizon' and $__unixEpochFilter(time)\norder by 1"
         }
       ],
       "fieldConfig": {
@@ -1032,7 +1106,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select agent, model, coalesce(stance || coalesce(' toward ' || toward, ''), 'none shown') as stance, count(*) as looks\nfrom agent_looks where run_id in ($run)\ngroup by 1, 2, 3 order by 1, 3"
+          "rawSql": "select agent, model, coalesce(stance || coalesce(' toward ' || toward, ''), 'none shown') as stance, count(*) as looks\nfrom agent_looks where run_id in ($agent)\ngroup by 1, 2, 3 order by 1, 3"
         }
       ],
       "fieldConfig": {
@@ -1081,7 +1155,7 @@
           "rawQuery": true,
           "editorMode": "code",
           "format": "table",
-          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  l.questions as \"asked the panel\", l.answers as \"answers\", l.unanswered as \"no answer from\",\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($run)\norder by l.time, l.agent"
+          "rawSql": "select to_timestamp(l.time) as time, l.agent, l.number as look,\n  l.action || case when l.action = 'enter' then ' ' || (case when l.lower_pct >= 0 then '+' else '' end || round((l.lower_pct)::numeric, 2) || '%') || ' to ' || (case when l.upper_pct >= 0 then '+' else '' end || round((l.upper_pct)::numeric, 2) || '%') else '' end as decision,\n  l.reasoning,\n  l.questions as \"asked the panel\", l.answers as \"answers\", l.unanswered as \"no answer from\",\n  case when l.expect_low_pct is not null then (case when l.expect_low_pct >= 0 then '+' else '' end || round((l.expect_low_pct)::numeric, 2) || '%') || ' to ' || (case when l.expect_high_pct >= 0 then '+' else '' end || round((l.expect_high_pct)::numeric, 2) || '%') || coalesce(', ' || round((l.expect_confidence * 100)::numeric) || '% sure', '') else l.expect_text end as \"expected until next look\",\n  s.band_held as \"band held\",\n  s.edge_vs_cash_pct as \"edge over cash %\", s.regret_pct as \"regret %\",\n  coalesce(l.stance || coalesce(' (' || l.toward || ')', ''), '') as stance, l.shown as \"peer records\",\n  l.note, l.next as \"next look in\",\n  l.position as \"position at the look\", l.result_pct as \"run so far %\",\n  l.change_1d_pct as \"1d move %\", l.vol_1d_pct as \"1d vol %\", round(l.day::numeric, 2) as day\nfrom agent_looks l\nleft join agent_scores s on s.run_id = l.run_id and s.look = l.look and s.horizon = 'next'\nwhere l.run_id in ($agent)\norder by l.time, l.agent"
         }
       ],
       "fieldConfig": {

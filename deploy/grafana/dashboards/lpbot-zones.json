@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-zones",
-  "title": "lpbot: pools and zones",
-  "description": "What a run saw when it chose its pool and its ranges.",
+  "title": "Runs: pool and range choice",
+  "description": "What did a run see when it chose its pool and its ranges? The pool ranking when it started, and the ranges it looked at with how often price crossed them. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "runs"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -24,12 +25,13 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select distinct experiment from runs order by 1",
-        "definition": "select distinct experiment from runs order by 1",
+        "query": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
+        "definition": "select experiment as __value, experiment || ' (' || count(*) || ' runs)' as __text from runs group by experiment order by max(window_to) desc, experiment",
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       },
       {
         "name": "run",
@@ -39,19 +41,93 @@
           "type": "grafana-postgresql-datasource",
           "uid": "results"
         },
-        "query": "select run_id from runs where experiment = '$experiment' order by run_index",
-        "definition": "select run_id from runs where experiment = '$experiment' order by run_index",
+        "query": "select run_id as __value, lpad(run_index::text, 3, '0') || '  ' || pool || '  ' || value_token || '  ' || width_ticks || ' ticks  ' || patience as __text\nfrom runs where experiment = '$experiment' order by run_index",
+        "definition": "select run_id as __value, lpad(run_index::text, 3, '0') || '  ' || pool || '  ' || value_token || '  ' || width_ticks || ' ticks  ' || patience as __text\nfrom runs where experiment = '$experiment' order by run_index",
         "refresh": 1,
         "sort": 0,
         "multi": false,
-        "includeAll": false
+        "includeAll": false,
+        "current": {}
       }
     ]
   },
   "annotations": {
     "list": []
   },
-  "links": [],
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "This run",
+      "type": "link",
+      "url": "/d/lpbot-run?var-experiment=${experiment}&var-run=${run}",
+      "tooltip": "Runs: one run, for this run",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false
+    }
+  ],
   "panels": [
     {
       "id": 1,

@@ -1,9 +1,10 @@
 {
   "uid": "lpbot-live",
-  "title": "lpbot: live",
-  "description": "The followed pools now, kept current by `lpbot watch-pools` from the local node: price, liquidity, volume and fees minute by minute, the liquidity around the price, recent swaps and every position the service knows.",
+  "title": "Pools: live",
+  "description": "What are the followed pools doing right now? Kept current from the local node by the watcher (lpbot watch-pools): price, liquidity, volume and fees minute by minute, the liquidity around the price, recent swaps and every position. Times are UTC.",
   "tags": [
-    "lpbot"
+    "lpbot",
+    "pools"
   ],
   "schemaVersion": 39,
   "version": 1,
@@ -123,9 +124,75 @@
   },
   "links": [
     {
-      "title": "Pool history",
+      "title": "Overview",
       "type": "link",
-      "url": "/d/lpbot-pool/lpbot-pool?var-pool=${pool}",
+      "url": "/d/lpbot-overview",
+      "tooltip": "What the whole system is doing now, and does anything need me?",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Agents",
+      "type": "link",
+      "url": "/d/lpbot-agents",
+      "tooltip": "What each agent is doing, how it is doing and why it decided that",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false
+    },
+    {
+      "title": "Pools",
+      "type": "dashboards",
+      "tags": [
+        "pools"
+      ],
+      "tooltip": "The followed pools: live now, or over their stored history",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "Runs",
+      "type": "dashboards",
+      "tags": [
+        "runs"
+      ],
+      "tooltip": "Experiments and their runs: results, one run in detail, comparisons",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "System",
+      "type": "dashboards",
+      "tags": [
+        "system"
+      ],
+      "tooltip": "The machine and the node",
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": false,
+      "targetBlank": false
+    },
+    {
+      "title": "This pool's history",
+      "type": "link",
+      "url": "/d/lpbot-pool?var-pool=${pool}",
+      "tooltip": "Pools: history, for this pool",
+      "icon": "dashboard",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
       "targetBlank": false
     }
   ],
