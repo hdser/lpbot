@@ -617,7 +617,18 @@ struct Job {
     token: String,
     directory: PathBuf,
     session: String,
+    /// Older retained jobs used the user's default server.
+    #[serde(default)]
+    tmux_socket: Option<String>,
     data_root: PathBuf,
+}
+
+fn tmux_command(socket: Option<&str>) -> Command {
+    let mut command = Command::new("tmux");
+    if let Some(socket) = socket {
+        command.args(["-L", socket]);
+    }
+    command
 }
 
 /// tmux children outlive their coordinator. Refuse release until every owned
@@ -695,11 +706,11 @@ fn shell_quote(path: &Path) -> String {
 }
 
 /// Whether a job's tmux session still runs. Tests pass their own.
-type Alive<'a> = &'a dyn Fn(&str) -> Result<bool>;
+type Alive<'a> = &'a dyn Fn(&Job) -> Result<bool>;
 
-fn tmux_alive(session: &str) -> Result<bool> {
-    Ok(Command::new("tmux")
-        .args(["has-session", "-t", session])
+fn tmux_alive(spec: &Job) -> Result<bool> {
+    Ok(tmux_command(spec.tmux_socket.as_deref())
+        .args(["has-session", "-t", &spec.session])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?
@@ -712,7 +723,7 @@ fn wait_job(spec: &Job, timeout: Duration, alive: Alive) -> Result<CliOutput> {
         if started.elapsed() > timeout {
             bail!("owned tmux job {} is still running; preserve it and reconcile before another command",spec.session);
         }
-        if !alive(&spec.session)? && !spec.directory.join("exit.json").exists() {
+        if !alive(spec)? && !spec.directory.join("exit.json").exists() {
             bail!("owned tmux job {} ended without exit status; inspect its exact output before continuing",spec.session);
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -745,6 +756,17 @@ fn drain(config: &Config, slot: Slot, alive: Alive) -> Result<Option<(Job, CliOu
     Ok(Some((previous, output)))
 }
 
+/// A delayed child still needs the existing owner token. Wait without holding
+/// its command lock, and leave the active record for normal reconciliation.
+fn wait_before_owner_rotation(config: &Config, agent: &Agent, alive: Alive) -> Result<()> {
+    let active = Slot::Commands(&agent.name).active(&config.state_dir);
+    if active.exists() {
+        let previous: Job = serde_json::from_slice(&std::fs::read(active)?)?;
+        wait_job(&previous, job_timeout(config), alive)?;
+    }
+    Ok(())
+}
+
 /// A new job's record, written in a fresh folder of its own; nothing runs.
 fn prepare(config: &Config, slot: Slot, token: &str, label: &str, args: &[String]) -> Result<Job> {
     let session = slot.session(label);
@@ -756,6 +778,7 @@ fn prepare(config: &Config, slot: Slot, token: &str, label: &str, args: &[String
         token: token.into(),
         directory: directory.clone(),
         session,
+        tmux_socket: Some("lpbot-codex-runner".into()),
         data_root: crate::backfill_cmd::data_dir(None),
     };
     agent_lock::atomic(&directory.join("job.json"), &serde_json::to_vec(&spec)?)?;
@@ -778,7 +801,7 @@ fn launch(config: &Config, slot: Slot, spec: &Job) -> Result<CliOutput> {
         shell_quote(&binary),
         shell_quote(&spec.directory.join("job.json"))
     );
-    let started = Command::new("tmux")
+    let started = tmux_command(spec.tmux_socket.as_deref())
         .args(["new-session", "-d", "-s", &spec.session, "-c"])
         .arg(std::env::current_dir()?)
         .arg(command)
@@ -1056,6 +1079,19 @@ fn reconcile(
     state.decisions = canonical.count;
     state.next_due = canonical.next_due;
     Ok(canonical)
+}
+
+fn record_cycle_result(state: &mut AgentState, result: &Result<()>) {
+    match result {
+        Ok(()) if !state.stopped => state.error = None,
+        Ok(()) => {}
+        Err(error) => {
+            state.error = Some(format!("{error:#}"));
+            if state.phase.is_empty() {
+                state.phase = "deferred".into();
+            }
+        }
+    }
 }
 
 fn cycle(
@@ -1519,6 +1555,7 @@ pub fn run(args: &Args) -> Result<()> {
     for agent in &config.agents {
         let lease =
             agent_lock::exclusive(&agent_lock::sibling(&agent.decisions, ".runner.lock"), true)?;
+        wait_before_owner_rotation(&config, agent, &tmux_alive)?;
         let _command = agent_lock::exclusive(
             &agent_lock::sibling(&agent.decisions, ".command.lock"),
             false,
@@ -1571,11 +1608,8 @@ pub fn run(args: &Args) -> Result<()> {
                 &state_path,
                 &mut state,
             );
+            record_cycle_result(&mut current, &result);
             if let Err(error) = result {
-                current.error = Some(format!("{error:#}"));
-                if current.phase.is_empty() {
-                    current.phase = "deferred".into();
-                }
                 eprintln!("{}: {error:#}", agent.name);
             }
             let last = Slot::Commands(&agent.name).last(&config.state_dir);

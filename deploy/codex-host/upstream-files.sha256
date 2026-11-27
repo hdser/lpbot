@@ -2,3 +2,4 @@
 4f1dde709255c8b317190dc9b645c7d5d381159d6424e9f6a2db4e01d6cffded  codex-rs/exec/src/main.rs
 c09151d38854ba85a39d9e22aa06363d0a67e3af34832e65f75b204c742e14b4  codex-rs/core/src/session/tests.rs
 27fb97634c177868d47a875aa088ad686db2223e4dd4c5dcadb84516d265069c  codex-rs/core/src/tools/spec_plan_tests.rs
+42a8f334ee469aeeb6fccda4bd468f5addbe6d4e564e2780a90473090112c5ab  codex-rs/Cargo.lock

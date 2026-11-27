@@ -67,12 +67,132 @@ fn attempt() -> Attempt {
     }
 }
 
-fn running(_: &str) -> Result<bool> {
+fn running(_: &Job) -> Result<bool> {
     Ok(true)
 }
 
-fn ended(_: &str) -> Result<bool> {
+fn ended(_: &Job) -> Result<bool> {
     Ok(false)
+}
+
+#[test]
+fn restarting_waits_for_a_delayed_command_before_rotating_its_token() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let agent = &config.agents[0];
+    let owner = agent_lock::sibling(&agent.decisions, ".runner-owner.json");
+    agent_lock::atomic(&owner, br#"{"token":"old-owner"}"#).unwrap();
+    let job = decide_job(&config, &attempt());
+    let active = Slot::Commands("solo").active(&config.state_dir);
+    agent_lock::atomic(&active, &serde_json::to_vec(&job).unwrap()).unwrap();
+    let worker_owner = owner.clone();
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let value: Value = serde_json::from_slice(&std::fs::read(worker_owner).unwrap()).unwrap();
+        assert_eq!(
+            value["token"], "old-owner",
+            "the delayed child still owns its token"
+        );
+        finish(&job, true, "done\n");
+    });
+    wait_before_owner_rotation(&config, agent, &running).unwrap();
+    agent_lock::atomic(&owner, br#"{"token":"new-owner"}"#).unwrap();
+    worker.join().unwrap();
+    assert!(
+        active.exists(),
+        "reconciliation must still see the exact old command"
+    );
+    assert!(!Slot::Commands("solo").last(&config.state_dir).exists());
+}
+
+#[test]
+fn new_jobs_use_the_private_server_and_old_job_records_keep_their_server() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let job = prepare(
+        &config,
+        Slot::Commands("solo"),
+        "owner",
+        "next",
+        &["agent".into(), "next".into()],
+    )
+    .unwrap();
+    assert_eq!(job.tmux_socket.as_deref(), Some("lpbot-codex-runner"));
+    let command = tmux_command(job.tmux_socket.as_deref());
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["-L", "lpbot-codex-runner"]
+    );
+    let mut legacy = serde_json::to_value(&job).unwrap();
+    legacy.as_object_mut().unwrap().remove("tmux_socket");
+    let legacy: Job = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.tmux_socket.is_none());
+    assert_eq!(
+        tmux_command(legacy.tmux_socket.as_deref())
+            .get_args()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn a_completed_review_clears_a_transient_error_while_waiting_but_keeps_inspection_errors() {
+    let dir = TestDir::new();
+    let config = config(&dir.0);
+    let review_dir = dir.0.join("review");
+    std::fs::create_dir(&review_dir).unwrap();
+    let independent = serde_json::to_vec(&response_json(&response())).unwrap();
+    std::fs::write(review_dir.join("stage1.json"), &independent).unwrap();
+    std::fs::write(review_dir.join("stage1.sha256"), digest(&independent)).unwrap();
+    std::fs::write(
+        review_dir.join("stage2.json"),
+        r#"{"assessment":"agreed","justification":"permitted look","limitations":"no outcome"}"#,
+    )
+    .unwrap();
+    let mut agent = AgentState {
+        error: Some("temporary model error".into()),
+        pending_review: Some(ReviewTask {
+            directory: review_dir,
+            input: "permitted look".into(),
+            author: json!({"action":"stay_out"}),
+            observation_day: "2026-11-27".into(),
+        }),
+        ..Default::default()
+    };
+    let mut all = State {
+        schema: "lpbot.codex-runner/1".into(),
+        experiment_sha256: String::new(),
+        activated_unix: 0,
+        context: "test".into(),
+        resolved_config_hashes: BTreeMap::new(),
+        evaluation_day: String::new(),
+        evaluation: None,
+        agents: BTreeMap::new(),
+    };
+    let initial = now() + 3_600;
+    let result = cycle(
+        &config,
+        &config.agents[0],
+        "owner",
+        initial,
+        &mut agent,
+        &config.state_dir.join("state.json"),
+        &mut all,
+    );
+    assert!(result.is_ok());
+    record_cycle_result(&mut agent, &result);
+    assert!(agent.pending_review.is_none());
+    assert_eq!(agent.reviewed_day.as_deref(), Some("2026-11-27"));
+    assert_eq!(agent.next_due, initial);
+    assert!(agent.error.is_none());
+
+    agent.stopped = true;
+    agent.error = Some("committed without audit: inspect".into());
+    record_cycle_result(&mut agent, &Ok(()));
+    assert_eq!(
+        agent.error.as_deref(),
+        Some("committed without audit: inspect")
+    );
 }
 
 /// The decide job the attempt saved, in a folder of its own, with its
@@ -91,6 +211,7 @@ fn decide_job(config: &Config, attempt: &Attempt) -> Job {
         token: "old-token".into(),
         directory: config.state_dir.join("jobs").join("own-decide"),
         session: "own-decide".into(),
+        tmux_socket: None,
         data_root: config.state_dir.join("lake"),
     };
     std::fs::create_dir_all(&job.directory).unwrap();
@@ -122,6 +243,7 @@ fn other_job(config: &Config, slot: Slot) -> Job {
         token: String::new(),
         directory: config.state_dir.join("jobs").join("daily-evaluate"),
         session: "daily-evaluate".into(),
+        tmux_socket: None,
         data_root: config.state_dir.join("lake"),
     };
     std::fs::create_dir_all(&job.directory).unwrap();
@@ -200,6 +322,7 @@ fn release_refuses_a_delayed_model_or_command_without_durable_exit() {
         token: "old-owner".into(),
         directory: job_dir.clone(),
         session: "delayed-own-job".into(),
+        tmux_socket: None,
         data_root: dir.0.join("lake"),
     };
     std::fs::write(

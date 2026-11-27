@@ -391,7 +391,12 @@ started; a committed action without its audit stops the identity for
 inspection instead of being submitted again. Long operations run in uniquely
 named owned tmux jobs with exact output and exit status, each in a slot of
 its own: one for each agent's commands, one for its model calls and one for
-the panel's daily work.
+the panel's daily work. New jobs use a private tmux socket, and stopping the
+user service stops only the coordinator so those jobs can finish and be
+reconciled. A restart waits for a retained command before rotating its owner
+token, preserving delayed children and their normal reconciliation.
+Inspection stops retain their errors; a successful nonterminal
+recovery clears a transient error.
 Blind-first review follows the manual two-stage workflow after submission so
 review latency does not age the action. Its independent assessment is sealed
 before disclosure of the author; no outcome or review enters an active
