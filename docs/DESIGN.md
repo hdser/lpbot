@@ -385,10 +385,13 @@ must drain naturally before those locks can protect a deployment.
 The coordinator records unchanged structured fields through `agent decide`,
 checking the exact pending look, its information boundary and freshness under
 the mutation lock. Decisions and pending/log replacements are durable atomic
-writes. An interrupted recording is reconciled against canonical decisions and
-the matching reasoning record; a committed action without its audit stops
-the identity for inspection instead of being submitted again. Long operations
-run in uniquely named owned tmux jobs with exact output and exit status.
+writes. An interrupted recording is reconciled against canonical decisions,
+the matching reasoning record and the decide job the attempt named before it
+started; a committed action without its audit stops the identity for
+inspection instead of being submitted again. Long operations run in uniquely
+named owned tmux jobs with exact output and exit status, each in a slot of
+its own: one for each agent's commands, one for its model calls and one for
+the panel's daily work.
 Blind-first review follows the manual two-stage workflow after submission so
 review latency does not age the action. Its independent assessment is sealed
 before disclosure of the author; no outcome or review enters an active

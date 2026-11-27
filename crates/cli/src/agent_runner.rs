@@ -104,6 +104,54 @@ struct Attempt {
     as_of: u64,
     response: Value,
     review: Option<ReviewTask>,
+    /// The decide job's own folder, named before the job starts.
+    /// Reconciliation reads this job's record, never whatever the agent's
+    /// slot ran since.
+    #[serde(default)]
+    decide_job: Option<PathBuf>,
+}
+
+/// A job slot runs one job at a time. Its record is `active/<key>.json`
+/// while the job runs and `last/<key>.json` once it has ended. Every agent
+/// has a slot for its commands (`next`, `brief`, `decide`) and one for its
+/// model calls, and the panel has one for its daily scoring, so no job
+/// overwrites another's record. Agent names are plain handles, so a key
+/// with a dot in it is never an agent's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot<'a> {
+    Commands(&'a str),
+    Model(&'a str),
+    Daily,
+}
+
+impl Slot<'_> {
+    fn key(self) -> String {
+        match self {
+            Slot::Commands(agent) => agent.to_string(),
+            Slot::Model(agent) => format!("{agent}.model"),
+            Slot::Daily => "panel.daily".into(),
+        }
+    }
+
+    /// A fresh tmux session name for a job in this slot. tmux names take
+    /// no dots, so this is not the key.
+    fn session(self, label: &str) -> String {
+        let owner = match self {
+            Slot::Commands(agent) | Slot::Model(agent) => agent,
+            Slot::Daily => "panel",
+        };
+        fresh_name(&format!("codex-runner-{owner}-{label}"))
+    }
+
+    fn active(self, state_dir: &Path) -> PathBuf {
+        state_dir
+            .join("active")
+            .join(format!("{}.json", self.key()))
+    }
+
+    fn last(self, state_dir: &Path) -> PathBuf {
+        state_dir.join("last").join(format!("{}.json", self.key()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,14 +199,18 @@ fn day() -> String {
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+/// A name no other job or folder of any process has: the clock alone can
+/// repeat between threads, so a counter follows it.
 fn fresh_name(label: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(
-        "{label}-{}-{}",
+        "{label}-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
 }
 
@@ -201,19 +253,26 @@ fn verify_recorded_output(output: &CliOutput, due: u64) -> Result<bool> {
     Ok(stopped)
 }
 
+/// Check a committed attempt against its own decide job: the exact
+/// recording arguments, a successful exit and the due acknowledgement.
 fn recovered_recording(
     config: &Config,
     agent: &Agent,
     attempt: &Attempt,
     due: u64,
+    alive: Alive,
 ) -> Result<bool> {
-    let last = config
-        .state_dir
-        .join("last")
-        .join(format!("{}.json", agent.name));
-    let job: Job = serde_json::from_slice(&std::fs::read(last).context(
-        "committed attempt lacks its durable last-job pointer; inspect before resuming",
+    let directory = attempt.decide_job.as_ref().ok_or_else(|| {
+        anyhow!("committed attempt names no decide job (an older runner saved it); inspect before resuming")
+    })?;
+    let job: Job = serde_json::from_slice(&std::fs::read(directory.join("job.json")).context(
+        "committed attempt's decide job has no durable record; inspect before resuming",
     )?)?;
+    if job.directory != *directory {
+        bail!(
+            "committed attempt's decide job record names another folder; inspect before resuming"
+        );
+    }
     let response: codex_worker::Response = serde_json::from_value(attempt.response.clone())?;
     let waiting = agent_cmd::Pending {
         look: attempt.look,
@@ -224,9 +283,9 @@ fn recovered_recording(
         record: None,
     };
     if job.args != recording_args(config, agent, &waiting, &response)? {
-        bail!("committed attempt's retained job does not match its exact recording arguments");
+        bail!("committed attempt's decide job does not match its exact recording arguments");
     }
-    let output = wait_job(&job, Duration::from_secs(1))?;
+    let output = wait_job(&job, Duration::from_secs(1), alive)?;
     verify_recorded_output(&output, due)
 }
 
@@ -304,6 +363,15 @@ fn committed_audit(path: &Path, attempt: &Attempt) -> Result<bool> {
     }))
 }
 
+/// An agent name the runner accepts: letters, digits, `_` and `-`. No dot,
+/// so no agent's command slot can share a model or daily slot's key.
+fn is_handle(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn validate(config: &Config) -> Result<Vec<lpbot_core::ResolvedRun>> {
     if config.agents.is_empty()
         || config.poll_seconds == 0
@@ -323,13 +391,7 @@ fn validate(config: &Config) -> Result<Vec<lpbot_core::ResolvedRun>> {
     let mut names = std::collections::HashSet::new();
     let mut paths = std::collections::HashSet::new();
     for agent in &config.agents {
-        if agent.name.is_empty()
-            || !agent
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            || !names.insert(&agent.name)
-            || !paths.insert(&agent.decisions)
+        if !is_handle(&agent.name) || !names.insert(&agent.name) || !paths.insert(&agent.decisions)
         {
             bail!("runner agent names and decisions paths must be unique and names must be simple handles");
         }
@@ -632,18 +694,25 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
-fn wait_job(spec: &Job, timeout: Duration) -> Result<CliOutput> {
+/// Whether a job's tmux session still runs. Tests pass their own.
+type Alive<'a> = &'a dyn Fn(&str) -> Result<bool>;
+
+fn tmux_alive(session: &str) -> Result<bool> {
+    Ok(Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success())
+}
+
+fn wait_job(spec: &Job, timeout: Duration, alive: Alive) -> Result<CliOutput> {
     let started = Instant::now();
     while !spec.directory.join("exit.json").exists() {
         if started.elapsed() > timeout {
             bail!("owned tmux job {} is still running; preserve it and reconcile before another command",spec.session);
         }
-        let alive = Command::new("tmux")
-            .args(["has-session", "-t", &spec.session])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !alive.success() && !spec.directory.join("exit.json").exists() {
+        if !alive(&spec.session)? && !spec.directory.join("exit.json").exists() {
             bail!("owned tmux job {} ended without exit status; inspect its exact output before continuing",spec.session);
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -655,34 +724,30 @@ fn wait_job(spec: &Job, timeout: Duration) -> Result<CliOutput> {
     })
 }
 
-fn cli(
-    config: &Config,
-    agent: &Agent,
-    token: &str,
-    label: &str,
-    args: &[String],
-) -> Result<CliOutput> {
-    let active = config
-        .state_dir
-        .join("active")
-        .join(format!("{}.json", agent.name));
-    let timeout = Duration::from_secs(config.timeout_seconds.saturating_mul(4).saturating_add(120));
-    if active.exists() {
-        let previous: Job = serde_json::from_slice(&std::fs::read(&active)?)?;
-        let result = wait_job(&previous, timeout)?;
-        agent_lock::atomic(
-            &config
-                .state_dir
-                .join("last")
-                .join(format!("{}.json", agent.name)),
-            &serde_json::to_vec(&previous)?,
-        )?;
-        std::fs::remove_file(&active)?;
-        if previous.args == args {
-            return Ok(result);
-        }
+fn job_timeout(config: &Config) -> Duration {
+    Duration::from_secs(config.timeout_seconds.saturating_mul(4).saturating_add(120))
+}
+
+/// Wait for the job a slot still holds, a tmux child that can outlive the
+/// coordinator that started it, then move its record to `last/`.
+fn drain(config: &Config, slot: Slot, alive: Alive) -> Result<Option<(Job, CliOutput)>> {
+    let active = slot.active(&config.state_dir);
+    if !active.exists() {
+        return Ok(None);
     }
-    let session = fresh_name(&format!("codex-runner-{}-{label}", agent.name));
+    let previous: Job = serde_json::from_slice(&std::fs::read(&active)?)?;
+    let output = wait_job(&previous, job_timeout(config), alive)?;
+    agent_lock::atomic(
+        &slot.last(&config.state_dir),
+        &serde_json::to_vec(&previous)?,
+    )?;
+    std::fs::remove_file(&active)?;
+    Ok(Some((previous, output)))
+}
+
+/// A new job's record, written in a fresh folder of its own; nothing runs.
+fn prepare(config: &Config, slot: Slot, token: &str, label: &str, args: &[String]) -> Result<Job> {
+    let session = slot.session(label);
     let directory = config.state_dir.join("jobs").join(&session);
     std::fs::create_dir_all(&directory)?;
     let directory = std::fs::canonicalize(directory)?;
@@ -693,14 +758,25 @@ fn cli(
         session,
         data_root: crate::backfill_cmd::data_dir(None),
     };
-    let spec_path = directory.join("job.json");
-    agent_lock::atomic(&spec_path, &serde_json::to_vec(&spec)?)?;
-    agent_lock::atomic(&active, &serde_json::to_vec(&spec)?)?;
+    agent_lock::atomic(&directory.join("job.json"), &serde_json::to_vec(&spec)?)?;
+    Ok(spec)
+}
+
+/// Start a prepared job in its slot, which must be free, and wait for it.
+fn launch(config: &Config, slot: Slot, spec: &Job) -> Result<CliOutput> {
+    let active = slot.active(&config.state_dir);
+    if active.exists() {
+        bail!(
+            "job slot {} still holds a job; reconcile it before starting another",
+            slot.key()
+        );
+    }
+    agent_lock::atomic(&active, &serde_json::to_vec(spec)?)?;
     let binary = std::env::current_exe()?;
     let command = format!(
         "{} runner-job {}",
         shell_quote(&binary),
-        shell_quote(&spec_path)
+        shell_quote(&spec.directory.join("job.json"))
     );
     let started = Command::new("tmux")
         .args(["new-session", "-d", "-s", &spec.session, "-c"])
@@ -713,16 +789,28 @@ fn cli(
             spec.session
         );
     }
-    let result = wait_job(&spec, timeout)?;
-    agent_lock::atomic(
-        &config
-            .state_dir
-            .join("last")
-            .join(format!("{}.json", agent.name)),
-        &serde_json::to_vec(&spec)?,
-    )?;
+    let result = wait_job(spec, job_timeout(config), &tmux_alive)?;
+    agent_lock::atomic(&slot.last(&config.state_dir), &serde_json::to_vec(spec)?)?;
     std::fs::remove_file(active)?;
     Ok(result)
+}
+
+/// Run a command in a slot. A job the slot still holds is waited for
+/// first, and its result is the answer when it ran these same arguments.
+fn cli(
+    config: &Config,
+    slot: Slot,
+    token: &str,
+    label: &str,
+    args: &[String],
+) -> Result<CliOutput> {
+    if let Some((previous, output)) = drain(config, slot, &tmux_alive)? {
+        if previous.args == args {
+            return Ok(output);
+        }
+    }
+    let spec = prepare(config, slot, token, label, args)?;
+    launch(config, slot, &spec)
 }
 
 fn agent_args(config: &Config, agent: &Agent, command: &str) -> Vec<String> {
@@ -773,11 +861,18 @@ pub fn model_job(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn infer(config: &Config, prompt: &str, artifacts: &Path, schema: Option<Value>) -> Result<Value> {
+/// One model call for an agent, in that agent's own model slot.
+fn infer(
+    config: &Config,
+    agent: &str,
+    prompt: &str,
+    artifacts: &Path,
+    schema: Option<Value>,
+) -> Result<Value> {
     let path = config
         .state_dir
         .join("model-inputs")
-        .join(format!("{}.json", fresh_name("model")));
+        .join(format!("{}.json", fresh_name(&format!("{agent}-model"))));
     agent_lock::atomic(
         &path,
         &serde_json::to_vec(&ModelJob {
@@ -791,13 +886,9 @@ fn infer(config: &Config, prompt: &str, artifacts: &Path, schema: Option<Value>)
         })?,
     )?;
     let path = std::fs::canonicalize(path)?;
-    let dummy = Agent {
-        name: "model".into(),
-        decisions: PathBuf::new(),
-    };
     let out = cli(
         config,
-        &dummy,
+        Slot::Model(agent),
         "",
         "inference",
         &[
@@ -815,11 +906,12 @@ fn infer(config: &Config, prompt: &str, artifacts: &Path, schema: Option<Value>)
 
 fn infer_decision(
     config: &Config,
+    agent: &str,
     input: &str,
     artifacts: &Path,
 ) -> Result<codex_worker::Response> {
     Ok(serde_json::from_value(infer(
-        config, input, artifacts, None,
+        config, agent, input, artifacts, None,
     )?)?)
 }
 
@@ -879,7 +971,8 @@ fn recording_args(
 }
 
 /// Blind first, durably sealed before the author's response enters stage two.
-fn review(config: &Config, task: &ReviewTask) -> Result<()> {
+/// Its model calls run in the reviewed agent's model slot.
+fn review(config: &Config, agent: &str, task: &ReviewTask) -> Result<()> {
     let dir = &task.directory;
     let input = &task.input;
     std::fs::create_dir_all(dir)?;
@@ -890,7 +983,7 @@ fn review(config: &Config, task: &ReviewTask) -> Result<()> {
         }
         bytes
     } else {
-        let own = infer_decision(config,&format!("Manual independent blind review, stage 1 (not a built-in agent review command). Form your own decision before any author response or outcome is disclosed.\n\n{input}"),dir)?;
+        let own = infer_decision(config,agent,&format!("Manual independent blind review, stage 1 (not a built-in agent review command). Form your own decision before any author response or outcome is disclosed.\n\n{input}"),dir)?;
         let bytes = serde_json::to_vec_pretty(&response_json(&own))?;
         agent_lock::atomic(&dir.join("stage1.json"), &bytes)?;
         agent_lock::atomic(&dir.join("stage1.sha256"), digest(&bytes).as_bytes())?;
@@ -898,7 +991,7 @@ fn review(config: &Config, task: &ReviewTask) -> Result<()> {
     };
     let schema = json!({"type":"object","properties":{"assessment":{"type":"string"},"justification":{"type":"string"},"limitations":{"type":"string"}},"required":["assessment","justification","limitations"],"additionalProperties":false});
     if !dir.join("stage2.json").exists() {
-        let stage2 = infer(config,&format!("Manual independent review, stage 2. No outcome is provided. Assess the author's reasoning against the permitted look and your preserved independent assessment.\n\n{input}\n\nYour preserved stage 1:\n{}\n\nAuthor response:\n{}",String::from_utf8(stage1)?,task.author),dir,Some(schema))?;
+        let stage2 = infer(config,agent,&format!("Manual independent review, stage 2. No outcome is provided. Assess the author's reasoning against the permitted look and your preserved independent assessment.\n\n{input}\n\nYour preserved stage 1:\n{}\n\nAuthor response:\n{}",String::from_utf8(stage1)?,task.author),dir,Some(schema))?;
         agent_lock::atomic(
             &dir.join("stage2.json"),
             &serde_json::to_vec_pretty(&stage2)?,
@@ -907,35 +1000,18 @@ fn review(config: &Config, task: &ReviewTask) -> Result<()> {
     Ok(())
 }
 
-fn cycle(
+/// Settle what an earlier cycle left before this one acts. A tmux child
+/// can still be committing after its coordinator died, so the agent's
+/// command job is waited for first. Then a saved attempt is reconciled
+/// against the canonical decisions, from its own decide job's record.
+fn reconcile(
     config: &Config,
     agent: &Agent,
-    token: &str,
     initial: u64,
     state: &mut AgentState,
-    state_path: &Path,
-    all: &mut State,
-) -> Result<()> {
-    // A durable tmux child can still be committing after its daemon died.
-    // Drain it before inspecting counts or discarding an uncertain attempt.
-    let active = config
-        .state_dir
-        .join("active")
-        .join(format!("{}.json", agent.name));
-    if active.exists() {
-        let previous: Job = serde_json::from_slice(&std::fs::read(&active)?)?;
-        let output = wait_job(
-            &previous,
-            Duration::from_secs(config.timeout_seconds.saturating_mul(4).saturating_add(120)),
-        )?;
-        agent_lock::atomic(
-            &config
-                .state_dir
-                .join("last")
-                .join(format!("{}.json", agent.name)),
-            &serde_json::to_vec(&previous)?,
-        )?;
-        std::fs::remove_file(active)?;
+    alive: Alive,
+) -> Result<Snapshot> {
+    if let Some((previous, output)) = drain(config, Slot::Commands(&agent.name), alive)? {
         if state.attempt.is_some()
             && previous
                 .args
@@ -957,7 +1033,7 @@ fn cycle(
                 state.phase = "committed_without_complete_audit".into();
                 bail!("decision committed but its matching reasoning record is missing; preserve the attempt and inspect before resuming");
             }
-            match recovered_recording(config, agent, attempt, canonical.next_due) {
+            match recovered_recording(config, agent, attempt, canonical.next_due, alive) {
                 Ok(stopped) => state.stopped |= stopped,
                 Err(error) => {
                     state.stopped = true;
@@ -979,8 +1055,21 @@ fn cycle(
     }
     state.decisions = canonical.count;
     state.next_due = canonical.next_due;
+    Ok(canonical)
+}
+
+fn cycle(
+    config: &Config,
+    agent: &Agent,
+    token: &str,
+    initial: u64,
+    state: &mut AgentState,
+    state_path: &Path,
+    all: &mut State,
+) -> Result<()> {
+    let canonical = reconcile(config, agent, initial, state, &tmux_alive)?;
     if let Some(task) = &state.pending_review {
-        review(config, task)?;
+        review(config, &agent.name, task)?;
         let task = task.clone();
         mark_reviewed_other(state, &task);
         state.pending_review = None;
@@ -997,7 +1086,7 @@ fn cycle(
     resources(config, &crate::backfill_cmd::data_dir(None))?;
     let next = cli(
         config,
-        agent,
+        Slot::Commands(&agent.name),
         token,
         "next",
         &agent_args(config, agent, "next"),
@@ -1032,7 +1121,7 @@ fn cycle(
     }
     let brief = cli(
         config,
-        agent,
+        Slot::Commands(&agent.name),
         token,
         "brief",
         &agent_args(config, agent, "brief"),
@@ -1041,7 +1130,12 @@ fn cycle(
         bail!("agent brief failed");
     }
     let input = prompt(&brief.text, &next.text);
-    let answer = infer_decision(config, &input, &config.state_dir.join("workers"))?;
+    let answer = infer_decision(
+        config,
+        &agent.name,
+        &input,
+        &config.state_dir.join("workers"),
+    )?;
     let at = waiting
         .at
         .ok_or_else(|| anyhow!("pending information boundary missing"))?;
@@ -1076,12 +1170,23 @@ fn cycle(
         &shown,
         &who.peers,
     )?;
+    // The decide job is named before the attempt is saved, so reconciling
+    // the attempt reads this job's record and no other.
+    let commands = Slot::Commands(&agent.name);
+    let decide = prepare(
+        config,
+        commands,
+        token,
+        "decide",
+        &recording_args(config, agent, &waiting, &answer)?,
+    )?;
     state.attempt = Some(Attempt {
         count_before: canonical.count,
         look: waiting.look,
         as_of: at,
         response: response_json(&answer),
         review: task.clone(),
+        decide_job: Some(decide.directory.clone()),
     });
     state.phase = "recording".into();
     all.agents.insert(agent.name.clone(), state.clone());
@@ -1091,13 +1196,7 @@ fn cycle(
     if now().saturating_sub(at) > 300 {
         bail!("response became stale; obtain a new head look on the next cycle");
     }
-    let recorded = cli(
-        config,
-        agent,
-        token,
-        "decide",
-        &recording_args(config, agent, &waiting, &answer)?,
-    )?;
+    let recorded = launch(config, commands, &decide)?;
     let after = snapshot(&agent.decisions, initial)?;
     if after.count != canonical.count + 1 || after.last_look != Some(waiting.look) {
         bail!(
@@ -1127,7 +1226,7 @@ fn cycle(
     all.agents.insert(agent.name.clone(), state.clone());
     save(state_path, all)?;
     if let Some(task) = &state.pending_review {
-        review(config, task)?;
+        review(config, &agent.name, task)?;
         let task = task.clone();
         mark_reviewed_other(state, &task);
         state.pending_review = None;
@@ -1275,12 +1374,13 @@ fn daily(config: &Config, state: &mut State) -> Result<()> {
         );
     }
     reserve_daily(config, state, &today)?;
-    let dummy = &config.agents[0];
+    // The panel's own slot: scoring never touches an agent's job records.
+    let slot = Slot::Daily;
     let token = "";
     let experiment = config.experiment.to_string_lossy().into_owned();
     let output = cli(
         config,
-        dummy,
+        slot,
         token,
         "evaluate",
         &[
@@ -1318,7 +1418,7 @@ fn daily(config: &Config, state: &mut State) -> Result<()> {
     let results = config.results_dir.to_string_lossy().into_owned();
     let replay = cli(
         config,
-        dummy,
+        slot,
         token,
         "replay",
         &[
@@ -1333,7 +1433,7 @@ fn daily(config: &Config, state: &mut State) -> Result<()> {
     }
     let loaded = cli(
         config,
-        dummy,
+        slot,
         token,
         "load",
         &["load-results".into(), "--results-dir".into(), results],
@@ -1478,10 +1578,7 @@ pub fn run(args: &Args) -> Result<()> {
                 }
                 eprintln!("{}: {error:#}", agent.name);
             }
-            let last = config
-                .state_dir
-                .join("last")
-                .join(format!("{}.json", agent.name));
+            let last = Slot::Commands(&agent.name).last(&config.state_dir);
             if last.exists() {
                 let job: Job = serde_json::from_slice(&std::fs::read(last)?)?;
                 current.last_job = job.directory.to_string_lossy().into_owned();

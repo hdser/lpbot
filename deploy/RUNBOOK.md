@@ -159,6 +159,8 @@ tmux new-window -d -t agent -n b deploy/agents/start-agent.sh experiments/agent-
 
 The first start on a machine shows Claude Code's first-run screens in that window (theme, security notes, trust of the folder): answer them there once. Between its looks a session runs two commands in the background, `agent next ... --wait 2d` for its next look and `agent inbox ... --wait 2d` for questions to it; whichever returns first wakes it. After answering a question it starts `inbox --wait` again. At a look it may ask the others and wait for their answers before deciding. The decision acts no earlier than the newest answer it read, and no answer in time means it decides alone. `docs/DESIGN.md`, "Advice in forward and live runs", has the rest.
 
+**What `agent-panel-forward` shows its agents changed on 26 November 2026 at 22:38:43 UTC,** when the node's `target/release/lpbot` was rebuilt with pull requests 24 and 25. From then on a and b are handed only the peer scores whose horizon is complete, and their commands take the command lock and the lake lock. Their looks before that time were shown under the old rules. The run files do not record this; this line does.
+
 If the session ends, nothing is lost: the decisions file and the reasoning log beside it hold the run. Its window stays open and prints the command that starts it again. A new session with the same brief runs `agent next` and carries on; a look that came due meanwhile is shown at the head as it is then, and acted on there.
 
 | To | Type |

@@ -207,7 +207,8 @@ claim that the service survives logout or a reboot.
 
 The journal holds service messages; `state_dir/state.json` holds coordinator
 state and `state_dir/jobs` holds CLI job arguments, stdout, stderr and exit
-records. Worker directories retain the permitted prompt, schema, response,
+records. `state_dir/active` and `state_dir/last` name each job slot's running
+and last finished job (see "Recovery and maintenance"). Worker directories retain the permitted prompt, schema, response,
 event stream and runtime provenance. Keep those records out of decider
 context. Monitor scheduling lateness, health deferrals, model failures and
 canonical decision acknowledgments. A running process alone does not prove
@@ -241,6 +242,18 @@ connection is lost, command success is unknown until canonical state is
 checked. The runner reconciles that state under the agent lock before it
 retries. Do not resend a saved response by hand, edit JSONL files, delete a
 pending look or discard runner state to force progress.
+
+Each job runs in a slot of its own. Every agent has one for its commands
+(`next`, `brief`, `decide`) and one for its model calls, decisions and
+reviews alike, and the panel has one for its daily scoring, replay and load.
+A slot's running job is recorded in `state_dir/active/<key>.json` and its
+last finished job in `state_dir/last/<key>.json`; the key is the agent's
+name, `<agent>.model` or `panel.daily`. Agent names have no dots, so no two
+slots share a record, whatever the agents are called. Before `decide` starts,
+the saved attempt names that job's folder. Reconciliation first waits for a
+job the agent's command slot still holds, then reads the attempt's own
+`job.json`, `stdout.txt` and `exit.json`, never whatever the slot ran since.
+A slot that still holds a job starts no other.
 
 If the look or `as_of` changed while inference ran, discard the stale response
 and obtain the current permitted look. Never apply it to the next look or
