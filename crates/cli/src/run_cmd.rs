@@ -19,7 +19,7 @@ use lpbot_data::store::EventStore;
 use lpbot_risk::LossLimit;
 use lpbot_sim::agent::{AgentAction, AgentDecision, AgentPlan};
 use lpbot_sim::engine::{
-    self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Settings, Shape, Token,
+    self, Dollar, FollowSpan, GasModel, MoveDirection, Policy, Regime, Settings, Shape, Token,
     DEFAULT_SIGNAL_STEP,
 };
 use lpbot_sim::tables::{write_run, PoolRankRow, RunInfo};
@@ -548,10 +548,52 @@ pub fn block_fees(
 }
 
 /// Whole days of history a run needs before its window: its longest zone
-/// lookback, rounded up.
+/// lookback, or the longest window of a long-timeframe gate that is set,
+/// rounded up.
 pub fn history_days(strategy: &StrategyConfig) -> Result<u32> {
-    let longest = lookbacks(strategy)?.into_iter().max().unwrap_or(0);
+    let longest = lookbacks(strategy)?
+        .into_iter()
+        .chain([regime(strategy)?.longest_window()])
+        .max()
+        .unwrap_or(0);
     Ok(longest.div_ceil(DAY) as u32)
+}
+
+/// The long-timeframe gates of a run (`regime.*`) and its trend exit
+/// (`exit.trend_min_pct`, `exit.trend_max_pct`). Percentages are changes
+/// of the volatile token's dollar price and may be negative.
+pub fn regime(strategy: &StrategyConfig) -> Result<Regime> {
+    let off = Regime::off();
+    let extra = &strategy.extra;
+    // A change of -100 percent or worse is not a price.
+    let ticks = |path: &[&str]| -> Result<Option<f64>> {
+        match lookup(extra, path) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .filter(|pct| pct.is_finite() && *pct > -100.0)
+                .map(|pct| Some(lpbot_sim::agent::pct_to_ticks(pct)))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "`{}` must be a change in percent above -100, such as -5 or 10",
+                        path.join(".")
+                    )
+                }),
+        }
+    };
+    Ok(Regime {
+        trend_window: duration(extra, &["regime", "trend_window"], off.trend_window)?,
+        trend_min_ticks: ticks(&["regime", "trend_min_pct"])?,
+        trend_max_ticks: ticks(&["regime", "trend_max_pct"])?,
+        chop_window: duration(extra, &["regime", "chop_window"], off.chop_window)?,
+        min_efficiency: number(extra, &["regime", "min_efficiency"]),
+        max_efficiency: number(extra, &["regime", "max_efficiency"]),
+        band_window: duration(extra, &["regime", "band_window"], off.band_window)?,
+        band_min: number(extra, &["regime", "band_min"]),
+        band_max: number(extra, &["regime", "band_max"]),
+        exit_trend_min_ticks: ticks(&["exit", "trend_min_pct"])?,
+        exit_trend_max_ticks: ticks(&["exit", "trend_max_pct"])?,
+    })
 }
 
 /// How a run decides when price has left a position behind: a fixed rule,
@@ -948,6 +990,7 @@ fn settings(
         after_move_ticks: number(&strategy.extra, &["entry", "after_move_pct"]).map(pct_to_ticks),
         move_window: duration(&strategy.extra, &["entry", "move_window"], 4 * 3_600)?,
         move_direction: move_direction(strategy)?,
+        regime: regime(strategy)?,
         width_vol_multiple: number(&strategy.extra, &["entry", "width_vol_multiple"]),
         follow: follow_spans(strategy, history.snapshot.pool)?,
         follow_join_within: duration(&strategy.extra, &["follow", "join_within"], 3_600)?,
@@ -2115,6 +2158,58 @@ pub(crate) mod tests {
         for bad in ["[0s]", "[]", "[7]", "weekly"] {
             let s = strategy(&format!("{BASE}zone: {{ lookbacks: {bad} }}\n"));
             assert!(lookbacks(&s).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_regime_is_read_in_percent_and_asks_for_its_history() {
+        let off = regime(&strategy(BASE)).unwrap();
+        assert_eq!(off, Regime::off());
+        assert_eq!(history_days(&strategy(BASE)).unwrap(), 90);
+
+        let set = strategy(&format!(
+            "{BASE}zone: {{ lookbacks: [1d, 7d] }}\nregime: {{ trend_window: 60d, trend_min_pct: -5, \
+             trend_max_pct: 10, chop_window: 3d, max_efficiency: 0.3, band_window: 14d, band_min: \
+             0.2, band_max: 0.8 }}\nexit: {{ trend_min_pct: -15 }}\n"
+        ));
+        let read = regime(&set).unwrap();
+        assert_eq!(read.trend_window, 60 * DAY);
+        // About 100 ticks a percent, a little more on the way down.
+        let near = |ticks: Option<f64>, wanted: f64| (ticks.unwrap() - wanted).abs() < 0.5;
+        assert!(near(read.trend_min_ticks, -513.0), "{read:?}");
+        assert!(near(read.trend_max_ticks, 953.0), "{read:?}");
+        assert!(near(read.exit_trend_min_ticks, -1625.0), "{read:?}");
+        assert_eq!(read.exit_trend_max_ticks, None);
+        assert_eq!(
+            (read.chop_window, read.max_efficiency),
+            (3 * DAY, Some(0.3))
+        );
+        assert_eq!(read.min_efficiency, None);
+        assert_eq!(
+            (read.band_window, read.band_min, read.band_max),
+            (14 * DAY, Some(0.2), Some(0.8))
+        );
+        // The trend window is the longest thing the run looks back on.
+        assert_eq!(history_days(&set).unwrap(), 60);
+
+        // A gate that is off does not ask for its window's history.
+        let unused = strategy(&format!(
+            "{BASE}zone: {{ lookbacks: [1d, 7d] }}\nregime: {{ trend_window: 60d }}\n"
+        ));
+        assert_eq!(history_days(&unused).unwrap(), 7);
+        // null is off, as a sweep writes it.
+        let null = strategy(&format!("{BASE}regime: {{ trend_min_pct: null }}\n"));
+        assert_eq!(regime(&null).unwrap(), Regime::off());
+
+        for bad in [
+            "regime: { trend_min_pct: -100 }",
+            "regime: { trend_max_pct: up }",
+            "exit: { trend_max_pct: -250 }",
+            "regime: { band_window: 0d, band_min: 0.2 }",
+            "regime: { trend_window: monthly }",
+        ] {
+            let s = strategy(&format!("{BASE}{bad}\n"));
+            assert!(regime(&s).is_err(), "{bad}");
         }
     }
 

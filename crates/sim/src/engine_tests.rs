@@ -15,7 +15,7 @@ use lpbot_venues::uniswap_v3::tick_math::get_sqrt_ratio_at_tick;
 use crate::agent::{AgentAction, AgentDecision, AgentPlan};
 use crate::engine::{
     after_protocol, diluted_fee_growth, run, share_of, thinnest_liquidity, to_f64, Dollar,
-    FollowSpan, GasModel, MoveDirection, Output, Policy, Settings, Shape, SimError, Token,
+    FollowSpan, GasModel, MoveDirection, Output, Policy, Regime, Settings, Shape, SimError, Token,
 };
 
 const T0: u64 = 1_800_000_000;
@@ -138,6 +138,7 @@ fn settings(rule: FixedRule) -> Settings {
         after_move_ticks: None,
         move_window: 4 * HOUR,
         move_direction: MoveDirection::Any,
+        regime: Regime::off(),
         width_vol_multiple: None,
         follow: None,
         follow_join_within: HOUR,
@@ -1991,7 +1992,16 @@ fn after_a_deep_excursion_a_campaign_leaves_as_price_comes_back() {
 
 /// Six quiet hours around tick 5, then a jump to 60 and quiet again.
 fn quiet_then_a_jump() -> (PoolSnapshot, Vec<TimedEvent>) {
-    history(&[5, 6, 5, 6, 5, 6, 60, 61, 60, 61, 60, 61])
+    quiet_then_a_jump_to(60)
+}
+
+/// Six quiet hours around tick 5, then a jump to `tick` and quiet again.
+fn quiet_then_a_jump_to(tick: i32) -> (PoolSnapshot, Vec<TimedEvent>) {
+    let high = [tick, tick + 1];
+    let targets: Vec<i32> = (0..12)
+        .map(|i| if i < 6 { [5, 6][i % 2] } else { high[i % 2] })
+        .collect();
+    history(&targets)
 }
 
 #[test]
@@ -2199,4 +2209,243 @@ fn a_followed_range_on_either_side_of_the_price_is_entered_in_its_token() {
     assert!((-0.002..-0.0005).contains(&(loss + 0.012)), "{loss}");
     assert_conserved(&below);
     assert_conserved(&above);
+}
+
+/// When each campaign of a run opened, in hours after the start.
+fn opened_hours(out: &Output) -> Vec<u64> {
+    out.campaigns
+        .iter()
+        .map(|c| (c.opened_time - T0) / HOUR)
+        .collect()
+}
+
+/// The tick falls by ten an hour for five hours and then settles: here the
+/// volatile token is token1, priced in token0, so its price rose.
+const A_RISE_THEN_QUIET: [i32; 14] = [100, 90, 80, 70, 60, 50, 51, 50, 51, 50, 51, 50, 51, 50];
+
+#[test]
+fn the_trend_gate_lets_a_campaign_start_only_in_its_long_timeframe() {
+    let (snapshot, events) = history(&A_RISE_THEN_QUIET);
+    let gated = |regime: Regime| {
+        let settings = Settings {
+            regime,
+            ..around(FixedRule::Wait)
+        };
+        run(snapshot.clone(), &events, &settings).unwrap()
+    };
+    // No gate: in at the first look.
+    assert_eq!(opened_hours(&gated(Regime::off()))[0], 2);
+
+    // Up at least 25 ticks over three hours. The first look with three
+    // hours of ten-minute buckets behind it is hour 5, which sees 100 to
+    // 70; the position opens in the next block.
+    let rising = Regime {
+        trend_window: 3 * HOUR,
+        trend_min_ticks: Some(25.0),
+        ..Regime::off()
+    };
+    assert_eq!(opened_hours(&gated(rising))[0], 6);
+    // It never rose 35 ticks in three hours.
+    let steep = Regime {
+        trend_min_ticks: Some(35.0),
+        ..rising
+    };
+    assert!(gated(steep).campaigns.is_empty());
+    // At most 10 ticks up: only once the rise is nearly out of the window,
+    // at the look of hour 9.
+    let calm = Regime {
+        trend_window: 3 * HOUR,
+        trend_max_ticks: Some(10.0),
+        ..Regime::off()
+    };
+    assert_eq!(opened_hours(&gated(calm))[0], 10);
+
+    // With token0 as the value token the volatile token is still token1,
+    // and with token1 as the dollar the volatile one is token0: the same
+    // ticks are then a falling price.
+    let mirrored = |regime: Regime| {
+        let settings = Settings {
+            regime,
+            dollar: Dollar::Value,
+            ..around(FixedRule::Wait)
+        };
+        run(snapshot.clone(), &events, &settings).unwrap()
+    };
+    assert!(mirrored(rising).campaigns.is_empty());
+    let falling = Regime {
+        trend_window: 3 * HOUR,
+        trend_max_ticks: Some(-25.0),
+        ..Regime::off()
+    };
+    assert_eq!(opened_hours(&mirrored(falling))[0], 6);
+    assert!(gated(falling).campaigns.is_empty());
+}
+
+#[test]
+fn the_band_gate_asks_where_price_sits_between_its_low_and_its_high() {
+    // The tick goes to 100, to 0, back to 20 and creeps up from there. The
+    // volatile token's price falls as the tick rises.
+    let targets = [100, 0, 20, 22, 24, 26, 28, 30, 32, 34];
+    let (snapshot, events) = history(&targets);
+    let gated = |band_min: Option<f64>, band_max: Option<f64>| {
+        let settings = Settings {
+            regime: Regime {
+                band_window: 3 * HOUR,
+                band_min,
+                band_max,
+                ..Regime::off()
+            },
+            ..around(FixedRule::Wait)
+        };
+        run(snapshot.clone(), &events, &settings).unwrap()
+    };
+    // The look of hour 5 is the first with the window behind it: the band
+    // runs from tick 0 to 100 and the last close is 22, 0.78 of the way up
+    // in price.
+    assert_eq!(opened_hours(&gated(Some(0.7), None))[0], 6);
+    // An hour later the high of 100 has left the window: price is at the
+    // top tick of its band, the bottom of its price band, and stays there.
+    assert_eq!(opened_hours(&gated(None, Some(0.3)))[0], 7);
+    assert!(gated(Some(0.9), None).campaigns.is_empty());
+}
+
+#[test]
+fn the_chop_gate_measures_how_straight_price_went() {
+    // Five hours straight down the ticks, then back and forth.
+    let targets = [10, 20, 30, 40, 50, 60, 50, 60, 50, 60, 50, 60, 50, 60];
+    let (snapshot, events) = history(&targets);
+    let gated = |min_efficiency: Option<f64>, max_efficiency: Option<f64>| {
+        let settings = Settings {
+            regime: Regime {
+                chop_window: 4 * HOUR,
+                min_efficiency,
+                max_efficiency,
+                ..Regime::off()
+            },
+            ..around(FixedRule::Wait)
+        };
+        run(snapshot.clone(), &events, &settings).unwrap()
+    };
+    // Four hours of ten-minute steps are behind the look of hour 6, and
+    // they only went one way.
+    assert_eq!(opened_hours(&gated(Some(0.9), None))[0], 7);
+    // At hour 8 the window holds 30, 40, 50, 60 and back to 50: 20 ticks
+    // made of 40 walked.
+    assert_eq!(opened_hours(&gated(None, Some(0.6)))[0], 9);
+}
+
+#[test]
+fn a_campaign_is_closed_when_the_trend_turns_against_it() {
+    // Six quiet hours, then the tick jumps 35: the volatile token's price
+    // fell that far.
+    let (snapshot, events) = quiet_then_a_jump_to(40);
+    let turning = Settings {
+        regime: Regime {
+            trend_window: 3 * HOUR,
+            trend_min_ticks: Some(-20.0),
+            exit_trend_min_ticks: Some(-20.0),
+            ..Regime::off()
+        },
+        reposition: false,
+        ..around(FixedRule::Wait)
+    };
+    let out = run(snapshot.clone(), &events, &turning).unwrap();
+    let first = &out.campaigns[0];
+    // In at the first look with three hours behind it.
+    assert_eq!((first.opened_time - T0) / HOUR, 6);
+    // The jump of hour 7 shows once its ten-minute bucket has ended, at
+    // hour 8; the campaign is closed in the next block.
+    assert_eq!(first.exit_reason, "trend_exit");
+    assert_eq!((first.closed_time - T0) / HOUR, 9);
+    // The same gate keeps it out while the fall is inside the window.
+    assert!(opened_hours(&out)[1..].iter().all(|hour| *hour >= 12));
+    assert_conserved(&out);
+
+    // Without the exit it stays in.
+    let staying = Settings {
+        regime: Regime {
+            exit_trend_min_ticks: None,
+            ..turning.regime
+        },
+        ..turning.clone()
+    };
+    let out = run(snapshot.clone(), &events, &staying).unwrap();
+    assert_ne!(out.campaigns[0].exit_reason, "trend_exit");
+
+    // An exit on a rise does not fire on a fall.
+    let other_way = Settings {
+        regime: Regime {
+            exit_trend_min_ticks: None,
+            exit_trend_max_ticks: Some(20.0),
+            ..turning.regime
+        },
+        ..turning
+    };
+    let out = run(snapshot, &events, &other_way).unwrap();
+    assert_ne!(out.campaigns[0].exit_reason, "trend_exit");
+}
+
+#[test]
+fn regime_settings_that_cannot_be_met_are_refused() {
+    let (snapshot, events) = history(&CHOPPY);
+    let refused = |regime: Regime| {
+        let settings = Settings {
+            regime,
+            ..around(FixedRule::Wait)
+        };
+        match run(snapshot.clone(), &events, &settings) {
+            Err(SimError::Settings(message)) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    };
+    let band = refused(Regime {
+        band_min: Some(1.5),
+        ..Regime::off()
+    });
+    assert!(band.contains("regime.band_min"), "{band}");
+    let straight = refused(Regime {
+        max_efficiency: Some(-0.1),
+        ..Regime::off()
+    });
+    assert!(straight.contains("regime.max_efficiency"), "{straight}");
+    let crossed = refused(Regime {
+        trend_min_ticks: Some(10.0),
+        trend_max_ticks: Some(-10.0),
+        ..Regime::off()
+    });
+    assert!(crossed.contains("regime.trend_min_pct"), "{crossed}");
+    let no_window = refused(Regime {
+        chop_window: 0,
+        max_efficiency: Some(0.2),
+        ..Regime::off()
+    });
+    assert!(no_window.contains("regime.chop_window"), "{no_window}");
+    // Windows of gates that are off are not looked at.
+    let unused = Settings {
+        regime: Regime {
+            chop_window: 0,
+            ..Regime::off()
+        },
+        ..around(FixedRule::Wait)
+    };
+    assert!(run(snapshot.clone(), &events, &unused).is_ok());
+}
+
+#[test]
+fn the_longest_regime_window_counts_only_gates_that_are_set() {
+    assert_eq!(Regime::off().longest_window(), 0);
+    let trend = Regime {
+        trend_window: 90 * DAY,
+        exit_trend_max_ticks: Some(5.0),
+        ..Regime::off()
+    };
+    assert_eq!(trend.longest_window(), 90 * DAY);
+    let band = Regime {
+        trend_window: 90 * DAY,
+        band_window: 14 * DAY,
+        band_max: Some(0.5),
+        max_efficiency: Some(0.3),
+        ..Regime::off()
+    };
+    assert_eq!(band.longest_window(), 14 * DAY);
 }

@@ -237,6 +237,92 @@ pub enum MoveDirection {
     Down,
 }
 
+/// Steps a window is cut into to measure how straight price went
+/// (`TickBuckets::efficiency`). A random walk measures about 0.2 on them.
+pub const EFFICIENCY_STEPS: usize = 24;
+
+/// The long-timeframe state a campaign may start in (`regime` in the
+/// strategy's settings): gates measured on windows of days to months, on
+/// the volatile token's dollar price, while the entry itself is timed on
+/// minutes to hours. Every gate is off unless set, and a gate without the
+/// history to measure keeps the bot out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Regime {
+    /// How far back the trend looks, in seconds (`regime.trend_window`).
+    pub trend_window: u64,
+    /// The volatile token's price must have changed by at least this many
+    /// ticks over the trend window (`regime.trend_min_pct`); negative
+    /// allows a fall that deep.
+    pub trend_min_ticks: Option<f64>,
+    /// And by at most this many (`regime.trend_max_pct`).
+    pub trend_max_ticks: Option<f64>,
+    /// How far back the straightness of the move is measured, in seconds
+    /// (`regime.chop_window`).
+    pub chop_window: u64,
+    /// The move over the chop window must be at least this straight, from
+    /// 0 (price came back to where it was) to 1 (it only went one way):
+    /// `regime.min_efficiency`.
+    pub min_efficiency: Option<f64>,
+    /// And at most this straight (`regime.max_efficiency`): a market going
+    /// sideways.
+    pub max_efficiency: Option<f64>,
+    /// How far back the band looks, in seconds (`regime.band_window`).
+    pub band_window: u64,
+    /// Where the volatile token's price must sit between the lowest (0)
+    /// and the highest (1) it traded at over the band window, at least
+    /// (`regime.band_min`).
+    pub band_min: Option<f64>,
+    /// And at most (`regime.band_max`).
+    pub band_max: Option<f64>,
+    /// An open campaign is closed once the trend over the trend window
+    /// has fallen below this many ticks (`exit.trend_min_pct`).
+    pub exit_trend_min_ticks: Option<f64>,
+    /// Or risen above this many (`exit.trend_max_pct`).
+    pub exit_trend_max_ticks: Option<f64>,
+}
+
+impl Regime {
+    /// No gate and no exit; windows of 30, 7 and 30 days.
+    pub fn off() -> Self {
+        Self {
+            trend_window: 30 * DAY,
+            trend_min_ticks: None,
+            trend_max_ticks: None,
+            chop_window: 7 * DAY,
+            min_efficiency: None,
+            max_efficiency: None,
+            band_window: 30 * DAY,
+            band_min: None,
+            band_max: None,
+            exit_trend_min_ticks: None,
+            exit_trend_max_ticks: None,
+        }
+    }
+
+    /// The windows of the gates and exits that are set, in seconds.
+    fn windows_in_use(&self) -> impl Iterator<Item = u64> {
+        let trend = self.trend_min_ticks.is_some()
+            || self.trend_max_ticks.is_some()
+            || self.exit_trend_min_ticks.is_some()
+            || self.exit_trend_max_ticks.is_some();
+        let chop = self.min_efficiency.is_some() || self.max_efficiency.is_some();
+        let band = self.band_min.is_some() || self.band_max.is_some();
+        [
+            (trend, self.trend_window),
+            (chop, self.chop_window),
+            (band, self.band_window),
+        ]
+        .into_iter()
+        .filter_map(|(set, window)| set.then_some(window))
+    }
+
+    /// The longest window a gate or exit that is set looks back, in
+    /// seconds: the history a run needs before it can trade.
+    pub fn longest_window(&self) -> u64 {
+        self.windows_in_use().max().unwrap_or(0)
+    }
+}
+
 /// Everything that defines one run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -339,6 +425,8 @@ pub struct Settings {
     pub after_move_ticks: Option<Tick>,
     pub move_window: u64,
     pub move_direction: MoveDirection,
+    /// The long-timeframe gates and the trend exit.
+    pub regime: Regime,
     /// A new range is this many times the day's volatility wide, in
     /// ticks, rounded up to the tick spacing; `width` while there is not
     /// enough history to measure it. `None`: always `width`.
@@ -899,6 +987,80 @@ impl<'a> Engine<'a> {
             MoveDirection::Up => up >= needed,
             MoveDirection::Down => -up >= needed,
         }
+    }
+
+    /// The volatile token's dollar price change over the trend window, in
+    /// ticks, close to close on the buckets that have ended.
+    fn trend_ticks(&self, now: u64) -> Option<f64> {
+        let moved = self.buckets.move_ticks(now, self.s.regime.trend_window)?;
+        Some(f64::from(self.rise_sign() * moved))
+    }
+
+    /// Whether the long-timeframe gates let a campaign start now. A gate
+    /// with no history to measure keeps the bot out.
+    fn regime_allows(&self, now: u64) -> bool {
+        let regime = &self.s.regime;
+        if regime.trend_min_ticks.is_some() || regime.trend_max_ticks.is_some() {
+            let Some(trend) = self.trend_ticks(now) else {
+                return false;
+            };
+            if regime.trend_min_ticks.is_some_and(|min| trend < min)
+                || regime.trend_max_ticks.is_some_and(|max| trend > max)
+            {
+                return false;
+            }
+        }
+        if regime.min_efficiency.is_some() || regime.max_efficiency.is_some() {
+            let Some(straight) = self
+                .buckets
+                .efficiency(now, regime.chop_window, EFFICIENCY_STEPS)
+            else {
+                return false;
+            };
+            if regime.min_efficiency.is_some_and(|min| straight < min)
+                || regime.max_efficiency.is_some_and(|max| straight > max)
+            {
+                return false;
+            }
+        }
+        if regime.band_min.is_some() || regime.band_max.is_some() {
+            let Some((low, high, close)) = self.buckets.band_ticks(now, regime.band_window) else {
+                return false;
+            };
+            // Where the volatile token's price sits in its band: with the
+            // tick when it rises with it, against it otherwise. A band of
+            // no height puts the price in its middle.
+            let along = if high > low {
+                f64::from(close - low) / f64::from(high - low)
+            } else {
+                0.5
+            };
+            let place = if self.rise_sign() > 0 {
+                along
+            } else {
+                1.0 - along
+            };
+            if regime.band_min.is_some_and(|min| place < min)
+                || regime.band_max.is_some_and(|max| place > max)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the trend has turned far enough against the open campaign
+    /// to close it. Without the history to measure, never.
+    fn trend_turned(&self, now: u64) -> bool {
+        let regime = &self.s.regime;
+        if regime.exit_trend_min_ticks.is_none() && regime.exit_trend_max_ticks.is_none() {
+            return false;
+        }
+        let Some(trend) = self.trend_ticks(now) else {
+            return false;
+        };
+        regime.exit_trend_min_ticks.is_some_and(|min| trend < min)
+            || regime.exit_trend_max_ticks.is_some_and(|max| trend > max)
     }
 
     /// Whether the volatility gates let a campaign start now. A gate with
@@ -2184,6 +2346,9 @@ impl<'a> Engine<'a> {
         if campaign.far_beyond && (state == "in_range" || state == "resting") {
             return Some("return_exit");
         }
+        if self.trend_turned(time) {
+            return Some("trend_exit");
+        }
         if state == "resting"
             && self
                 .s
@@ -2351,7 +2516,7 @@ impl<'a> Engine<'a> {
                 .is_some_and(|(wait, closed)| time < closed.saturating_add(wait));
             if time >= self.next_check && !cooling {
                 self.next_check = time + self.s.check_every.max(1);
-                if self.calm_enough(time) && self.moved_enough(time) {
+                if self.calm_enough(time) && self.moved_enough(time) && self.regime_allows(time) {
                     if let Some((lower, upper)) = self.best_entry(time) {
                         self.schedule(
                             block,
@@ -2609,6 +2774,57 @@ pub fn run(
             "entry.after_move_pct needs a move above 0 and entry.move_window a duration above 0"
                 .into(),
         ));
+    }
+    let regime = &settings.regime;
+    if regime.windows_in_use().any(|window| window == 0) {
+        return Err(SimError::Settings(
+            "regime.trend_window, regime.chop_window and regime.band_window must be durations \
+             above 0, such as 30d and 7d"
+                .into(),
+        ));
+    }
+    let share = |value: Option<f64>| value.is_none_or(|v| (0.0..=1.0).contains(&v));
+    for (value, key) in [
+        (regime.min_efficiency, "regime.min_efficiency"),
+        (regime.max_efficiency, "regime.max_efficiency"),
+        (regime.band_min, "regime.band_min"),
+        (regime.band_max, "regime.band_max"),
+    ] {
+        if !share(value) {
+            return Err(SimError::Settings(format!(
+                "{key} is {}; set it between 0 and 1, or leave it out",
+                value.unwrap_or_default()
+            )));
+        }
+    }
+    let ordered = |low: Option<f64>, high: Option<f64>| {
+        low.zip(high).is_none_or(|(low, high)| low <= high)
+            && low.is_none_or(f64::is_finite)
+            && high.is_none_or(f64::is_finite)
+    };
+    for (low, high, keys) in [
+        (
+            regime.trend_min_ticks,
+            regime.trend_max_ticks,
+            "regime.trend_min_pct and regime.trend_max_pct",
+        ),
+        (
+            regime.min_efficiency,
+            regime.max_efficiency,
+            "regime.min_efficiency and regime.max_efficiency",
+        ),
+        (
+            regime.band_min,
+            regime.band_max,
+            "regime.band_min and regime.band_max",
+        ),
+    ] {
+        if !ordered(low, high) {
+            return Err(SimError::Settings(format!(
+                "{keys} leave nothing between them; set the first at or below the second, \
+                 above -100 percent, or leave one out"
+            )));
+        }
     }
     if settings.agent.is_some() && settings.follow.is_some() {
         return Err(SimError::Settings(

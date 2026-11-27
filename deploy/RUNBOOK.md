@@ -227,6 +227,21 @@ Under each agent that needs someone, `make agents` prints what to do, with the c
 
 **A decision committed but not logged.** If a `decide` died between committing the decision and writing the logs (the Codex runner then stops with `committed_without_complete_audit`), `target/release/lpbot agent next <experiment> --agent <name>` finishes it: it writes the reasoning and the shared record from `<decisions>.committing.json`, once, and the look stops waiting. Then resume as usual. Leave the `.committing.json` file alone; the command removes it.
 
+## Forward rules and the ladder
+
+Rules frozen on history run forward too (`docs/DESIGN.md`, "From a backtest to real positions"): their window is open at the end, and each run replays it up to the newest stored block. The watcher does not store days; the agents' catch-up and `make history` do, so run the backfill first when no forward agent is deciding on those pools.
+
+```sh
+cd ~/lpbot
+target/release/lpbot backfill --from 2026-10-31 --verify
+target/release/lpbot gas-history --from 2026-10-31
+target/release/lpbot run experiments/forward-regime-usdc.yml --results-dir runs/forward-regime
+target/release/lpbot run experiments/forward-regime-usdt.yml --results-dir runs/forward-regime
+target/release/lpbot select ladder selection/ladder.yml
+```
+
+`selection/ladder.yml` is a copy of `selection/ladder.example.yml` with the owner's gates. The last command prints where every forward run stands, rule or agent, what each still needs, and the plan; it writes `data/selection/<ladder>.json` and sends nothing. An agent panel is in the ladder once `deploy/agents/refresh.sh` has scored and replayed it into its results folder (hourly from cron); for the agents' gates it must score a day's horizon, `--horizons next,1d`. Once a day is often enough for the rules. Do not edit a forward experiment file once it runs: its commit is the proof of when the settings were fixed.
+
 ## When something is red
 
 The Overview, the first page Grafana opens, shows the node, the watcher and the agents. Each row here is one thing it can show red, what it means and what to do, on the node machine in `~/lpbot`. Sudo is the owner's.

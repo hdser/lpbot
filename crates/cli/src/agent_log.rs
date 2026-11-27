@@ -110,6 +110,8 @@ pub fn identity(strategy: &StrategyConfig) -> Result<Option<Identity>> {
         );
     }
     let model = text("model")?.unwrap_or_else(|| "unknown".into());
+    // A mandate that is not one is refused before any look is shown.
+    crate::agent_brief::mandate(strategy)?;
     let folder = stem.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut peers = Vec::new();
     match lookup(&strategy.extra, &["agent", "peers"]) {

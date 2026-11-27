@@ -5,11 +5,108 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use lpbot_core::config::StrategyConfig;
 use lpbot_core::experiment::ResolvedRun;
 
 use crate::agent_log::Identity;
 use crate::run_cmd::run_window;
+
+/// A way of trading an agent is told to follow (`agent.mandate`), so that
+/// a panel can set the same model on different mandates, or different
+/// models on the same one. `open`, or none, leaves the agent to itself.
+pub const MANDATES: [&str; 5] = ["open", "trend", "range", "fade", "patient"];
+
+/// The mandate of a run's agent, checked against `MANDATES`. `None` for
+/// `open` or none.
+pub fn mandate(strategy: &StrategyConfig) -> Result<Option<&'static str>> {
+    let value = strategy
+        .extra
+        .get("agent")
+        .and_then(|agent| agent.get("mandate"));
+    match value {
+        None | Some(serde_yaml::Value::Null) => Ok(None),
+        Some(value) => {
+            let name = value.as_str().unwrap_or_default().trim();
+            match MANDATES.iter().find(|known| **known == name) {
+                Some(&"open") => Ok(None),
+                Some(known) => Ok(Some(known)),
+                None => bail!(
+                    "agent.mandate `{}` is not one of {}",
+                    value.as_str().unwrap_or("that"),
+                    MANDATES.join(", ")
+                ),
+            }
+        }
+    }
+}
+
+/// What a mandate tells the agent, in terms of what a look shows. `dips`
+/// is whether the value token is the dollar: its one-sided ranges then sit
+/// below the price and buy the volatile token as it falls; otherwise they
+/// sit above and sell it as it rises.
+fn mandate_text(name: &str, value: &str, dips: bool) -> String {
+    let (favoured, against, entry_move, one_sided) = if dips {
+        (
+            "rising or holding",
+            "falling",
+            "a fall",
+            format!("below the price, buying the volatile token with {value} as it dips"),
+        )
+    } else {
+        (
+            "falling or holding",
+            "rising",
+            "a rise",
+            format!("above the price, selling {value} as it rises"),
+        )
+    };
+    match name {
+        "trend" => format!(
+            "Long timeframe first, then the short one. Read every look from the bottom of the \
+             table up.\n\n\
+             1. The 30- and 90-day lines are the trend: how far price moved over them and where \
+             it sits between their highs and lows. Your ranges sit {one_sided}, so they are \
+             paid when the long timeframe is {favoured}, and left holding the wrong token when \
+             it is {against}. While the 30- and 90-day lines are clearly {against}, stay out.\n\
+             2. The day and week lines say whether price is going back and forth or running. \
+             Prefer a market that goes back and forth inside the long trend.\n\
+             3. The 15-minute to 4-hour lines only time the entry: enter after {entry_move} \
+             against the long trend has slowed, not while it runs, in a range wide enough for \
+             the day's volatility.\n\n\
+             Give a position up when the long timeframe turns, not because of an hour's move. \
+             In every `--reasoning`, say what the long, the middle and the short timeframe each \
+             told you."
+        ),
+        "range" => format!(
+            "Provide liquidity only in a market that is going sideways. The week and the 30-day \
+             lines must show price going back and forth: a small change over them against the \
+             distance between their high and their low, with both visited. Place the range \
+             inside the band the 30 days held, {one_sided}, wide enough for the day's \
+             volatility, and leave it in place while price stays in that band. When price \
+             leaves the band, or the week turns into a run, exit and stay out until it is \
+             sideways again. Most looks in a running market should end in `stay_out`. In every \
+             `--reasoning`, give the band you see and why the market is or is not sideways."
+        ),
+        "fade" => format!(
+            "Stay out by default. Enter only after price has moved fast, several percent within \
+             hours on the 1-hour and 4-hour lines, and only as {entry_move}: a range \
+             {one_sided}, next to the price, a bet that the move stalls and comes back. One \
+             entry a move: after an exit, wait for a new one. Leave after about a day, or as \
+             soon as the position is back wholly in {value} with its fees. Look often enough \
+             to see a fast move, and expect most looks to end in `stay_out`. In every \
+             `--reasoning`, say how fast price moved and why you think it stalls."
+        ),
+        _ => format!(
+            "Few, wide and slow. Look once or twice a day. Enter rarely, in a range several \
+             days of volatility wide, {one_sided}, where the 30- and 90-day lines say price has \
+             turned before, and leave it for days. Do not move a range because price moved; \
+             exit only when the reason you entered no longer holds. Gas and swaps are paid on \
+             every change, so count them in. In every `--reasoning`, say what would make you \
+             exit."
+        ),
+    }
+}
 
 /// The brief for agent `who` of the experiment at `experiment`; `others`
 /// are the panel's other agents, who share its board.
@@ -115,6 +212,16 @@ pub fn brief(
             others = others.join(", ")
         );
     }
+    let dips = ["USDC", "USDT"].contains(&strategy.value_token.as_str());
+    if let Some(name) = mandate(strategy)? {
+        let _ = writeln!(
+            text,
+            "## Your mandate: {name}\n\n{}\n\nThe mandate is how you trade this run. Staying \
+             out is always allowed under it; trading another way is not. It is part of what is \
+             being measured, so follow it even when you would do otherwise.\n",
+            mandate_text(name, &strategy.value_token, dips)
+        );
+    }
     let _ = writeln!(
         text,
         "## What a decision means\n\n\
@@ -133,11 +240,7 @@ pub fn brief(
          - Other agents read your records: write your reasoning so another trader can follow \
          it and disagree with it.\n",
         value = strategy.value_token,
-        side = if ["USDC", "USDT"].contains(&strategy.value_token.as_str()) {
-            "below"
-        } else {
-            "above"
-        }
+        side = if dips { "below" } else { "above" }
     );
     let _ = writeln!(
         text,
@@ -173,6 +276,78 @@ mod tests {
     use super::*;
     use crate::agent_log::Peer;
     use lpbot_core::experiment::{resolve_experiment, RunOverrides};
+
+    #[test]
+    fn a_mandate_is_told_in_the_brief_for_the_side_the_value_token_trades() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let experiment = repo.join("experiments/agent-mandates-practice.yml");
+        let runs = resolve_experiment(&experiment, &RunOverrides::default()).unwrap();
+        let mut seen = Vec::new();
+        for run in &runs {
+            let strategy = &run.config.strategies[0];
+            let who = crate::agent_log::identity(strategy).unwrap().unwrap();
+            let text = brief(Path::new("experiments/x.yml"), run, &who, &[]).unwrap();
+            // The first line is what start-agent.sh reads the model from.
+            assert!(
+                text.starts_with(&format!("# Brief for agent {} ({})\n", who.name, who.model)),
+                "{text}"
+            );
+            assert!(!text.contains("2026"), "no dates: {text}");
+            match mandate(strategy).unwrap() {
+                None => assert!(!text.contains("## Your mandate"), "{text}"),
+                Some(name) => {
+                    assert!(
+                        text.contains(&format!("## Your mandate: {name}\n")),
+                        "{text}"
+                    );
+                    // Dollars are the value token: ranges below the price.
+                    assert!(text.contains("below the price, buying the volatile token with USDC"));
+                    assert!(text.contains("Staying out is always allowed"), "{text}");
+                    seen.push(name);
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, ["fade", "range", "trend"]);
+
+        // With the volatile token as the value token the ranges sit above.
+        for name in MANDATES {
+            let eth = mandate_text(name, "WETH", false);
+            assert!(
+                eth.contains("above the price, selling WETH"),
+                "{name}: {eth}"
+            );
+            assert!(!eth.contains("USDC"), "{name}");
+        }
+        assert!(mandate_text("trend", "WETH", false).contains("clearly rising, stay out"));
+        assert!(mandate_text("trend", "USDC", true).contains("clearly falling, stay out"));
+
+        // `open` and none are no mandate; anything else is refused by name.
+        let strategy = |agent: &str| -> StrategyConfig {
+            serde_yaml::from_str(&format!(
+                "id: s\nkind: zone_round_trip\nvalue_token: USDC\nagent: {agent}\n"
+            ))
+            .unwrap()
+        };
+        assert_eq!(mandate(&strategy("{ mandate: open }")).unwrap(), None);
+        assert_eq!(mandate(&strategy("{ mandate: null }")).unwrap(), None);
+        assert_eq!(mandate(&strategy("{ name: a }")).unwrap(), None);
+        assert_eq!(
+            mandate(&strategy("{ mandate: patient }")).unwrap(),
+            Some("patient")
+        );
+        let refused = mandate(&strategy("{ mandate: scalper }"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("`scalper` is not one of open, trend"),
+            "{refused}"
+        );
+        assert!(mandate(&strategy("{ mandate: 3 }")).is_err());
+        let with_file = strategy("{ mandate: scalper, decisions: data/agent/x/a.jsonl }");
+        assert!(crate::agent_log::identity(&with_file).is_err());
+    }
 
     #[test]
     fn a_forward_run_is_briefed_as_one_at_the_head_with_no_dates() {

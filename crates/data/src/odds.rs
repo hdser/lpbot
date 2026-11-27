@@ -110,6 +110,53 @@ impl TickBuckets {
         Some(self.close[end - 1] - self.close[end - 1 - back])
     }
 
+    /// The buckets that ended by `now` and cover the `window` seconds
+    /// before it, as indexes into the buckets: the first, and one past the
+    /// last. `None` without that much history.
+    fn window_buckets(&self, now: u64, window: u64) -> Option<(usize, usize)> {
+        let start = self.start?;
+        let end = ((now.checked_sub(start)? / self.step) as usize).min(self.close.len());
+        let back = (window / self.step) as usize;
+        (back > 0 && end > back).then(|| (end - back, end))
+    }
+
+    /// The band the price held over the `window` seconds before `now`: its
+    /// lowest and highest tick, and the close of the last bucket that
+    /// ended by `now`. `None` without that much history.
+    pub fn band_ticks(&self, now: u64, window: u64) -> Option<(Tick, Tick, Tick)> {
+        let (first, end) = self.window_buckets(now, window)?;
+        let low = self.low[first..end].iter().copied().min()?;
+        let high = self.high[first..end].iter().copied().max()?;
+        Some((low, high, self.close[end - 1]))
+    }
+
+    /// How straight the price went over the `window` seconds before `now`:
+    /// the window is cut into `steps` equal steps, and the move from its
+    /// first close to its last is divided by the sum of the steps' moves,
+    /// each counted as positive. 1 is a price that only went one way; a
+    /// price that came back to where it started is 0; a random walk gives
+    /// about one over the square root of `steps`. A price that did not
+    /// move at all is 0. `None` without that much history, or with a step
+    /// shorter than a bucket.
+    pub fn efficiency(&self, now: u64, window: u64, steps: usize) -> Option<f64> {
+        let (first, end) = self.window_buckets(now, window)?;
+        // The close before the window opens is where its first step starts.
+        let buckets = end - first;
+        if steps == 0 || buckets < steps {
+            return None;
+        }
+        let close_at = |step: usize| self.close[first - 1 + buckets * step / steps];
+        let mut path = 0i64;
+        for step in 1..=steps {
+            path += i64::from((close_at(step) - close_at(step - 1)).abs());
+        }
+        if path == 0 {
+            return Some(0.0);
+        }
+        let net = i64::from((close_at(steps) - close_at(0)).abs());
+        Some(net as f64 / path as f64)
+    }
+
     /// Odds of a move of `delta` ticks (up when positive, down when
     /// negative) within `horizon` seconds, over starting points in the
     /// `lookback` seconds before `now`. `None` when the history holds no
@@ -189,6 +236,66 @@ mod tests {
         assert_eq!(buckets.move_ticks(2_399, 600), Some(20));
         // Not that much history.
         assert_eq!(buckets.move_ticks(2_400, 2_400), None);
+    }
+
+    #[test]
+    fn the_band_is_the_lowest_and_highest_tick_of_the_window() {
+        let mut buckets = TickBuckets::new(HOUR);
+        // Hour 0 closes at 10 after touching 50; hours 1 to 3 close at 20,
+        // 5 and 30.
+        buckets.push(10, 50);
+        buckets.push(20, 10);
+        buckets.push(HOUR + 10, 20);
+        buckets.push(2 * HOUR + 10, 5);
+        buckets.push(3 * HOUR + 10, 30);
+        // At hour 4 all four hours have ended.
+        assert_eq!(buckets.band_ticks(4 * HOUR, 3 * HOUR), Some((5, 30, 30)));
+        // The spike to 50 in the first hour is outside both windows.
+        assert_eq!(buckets.band_ticks(4 * HOUR, 2 * HOUR), Some((5, 30, 30)));
+        assert_eq!(buckets.band_ticks(3 * HOUR, 2 * HOUR), Some((5, 20, 5)));
+        // The hour still filling is left out.
+        assert_eq!(buckets.band_ticks(4 * HOUR - 1, 2 * HOUR), Some((5, 20, 5)));
+        // A window as long as the history, or none at all, has no band.
+        assert_eq!(buckets.band_ticks(4 * HOUR, 4 * HOUR), None);
+        assert_eq!(buckets.band_ticks(4 * HOUR, 0), None);
+        assert_eq!(TickBuckets::new(HOUR).band_ticks(HOUR, HOUR), None);
+    }
+
+    #[test]
+    fn efficiency_is_one_for_a_straight_move_and_low_for_a_price_that_comes_back() {
+        // Up ten ticks an hour.
+        let straight = hourly(&(0..30).map(|i| i * 10).collect::<Vec<Tick>>());
+        assert_eq!(straight.efficiency(30 * HOUR, 24 * HOUR, 24), Some(1.0));
+        assert_eq!(straight.efficiency(30 * HOUR, 24 * HOUR, 6), Some(1.0));
+        // Down just the same.
+        let down = hourly(&(0..30).map(|i| -i * 10).collect::<Vec<Tick>>());
+        assert_eq!(down.efficiency(30 * HOUR, 24 * HOUR, 24), Some(1.0));
+        // Up and down by ten every hour: back where it started.
+        let chop = hourly(&(0..30).map(|i| (i % 2) * 10).collect::<Vec<Tick>>());
+        assert_eq!(chop.efficiency(30 * HOUR, 24 * HOUR, 24), Some(0.0));
+        // Twelve hours up by ten, then twelve flat hours: twelve steps of
+        // ten, all one way.
+        let half = hourly(&(0..30).map(|i| i.min(17) * 10).collect::<Vec<Tick>>());
+        assert_eq!(half.efficiency(30 * HOUR, 24 * HOUR, 24), Some(1.0));
+        // Three hours up by ten, then down by ten, repeated: over 24 hours
+        // a net of 120 ticks for 240 walked.
+        let closes: Vec<Tick> = (0..33)
+            .map(|i| (i / 4) * 20 + [0, 10, 20, 30][(i % 4) as usize])
+            .collect();
+        let saw = hourly(&closes);
+        assert_eq!(closes[32] - closes[8], 120);
+        assert_eq!(saw.efficiency(33 * HOUR, 24 * HOUR, 24), Some(0.5));
+        // Measured in six steps of four hours it only ever rose.
+        assert_eq!(saw.efficiency(33 * HOUR, 24 * HOUR, 6), Some(1.0));
+        // A flat price went nowhere.
+        assert_eq!(
+            hourly(&[7; 30]).efficiency(30 * HOUR, 24 * HOUR, 24),
+            Some(0.0)
+        );
+        // Not enough history, no steps, or steps shorter than a bucket.
+        assert_eq!(straight.efficiency(30 * HOUR, 30 * HOUR, 24), None);
+        assert_eq!(straight.efficiency(30 * HOUR, 24 * HOUR, 0), None);
+        assert_eq!(straight.efficiency(30 * HOUR, 12 * HOUR, 24), None);
     }
 
     #[test]
