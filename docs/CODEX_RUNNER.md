@@ -205,14 +205,27 @@ must enable user lingering if it is not already enabled. Check with
 change host login policy on the owner's behalf. Without lingering, do not
 claim that the service survives logout or a reboot.
 
+The service stops only its coordinator process (`KillMode=process`). Its owned
+tmux jobs deliberately finish after a stop or restart, including when the
+coordinator started the first tmux server after boot. New jobs use the private
+`lpbot-codex-runner` tmux socket; retained older jobs keep their recorded/default
+server for recovery. Do not kill a tmux server or assume that stopping the
+service has drained its jobs. Keep the ownership fence until reconciliation
+and `--release` have verified every owned exit record.
+On restart, the coordinator waits for any retained command job before rotating
+its owner token, so a delayed child can still authenticate and finish. The
+retained command record then goes through normal canonical reconciliation.
+
 The journal holds service messages; `state_dir/state.json` holds coordinator
 state and `state_dir/jobs` holds CLI job arguments, stdout, stderr and exit
 records. `state_dir/active` and `state_dir/last` name each job slot's running
-and last finished job (see "Recovery and maintenance"). Worker directories retain the permitted prompt, schema, response,
+and last finished job (see "Recovery and maintenance"). Worker directories
+retain the permitted prompt, schema, response,
 event stream and runtime provenance. Keep those records out of decider
 context. Monitor scheduling lateness, health deferrals, model failures and
-canonical decision acknowledgments. A running process alone does not prove
-that a due look was decided.
+canonical decision acknowledgments. Successful nonterminal recovery clears
+the old error in status; inspection stops retain their error. A running process
+alone does not prove that a due look was decided.
 
 ## Daily coordinator work
 

@@ -12,7 +12,9 @@ ExecStart=%h/lpbot/target/release/lpbot agent-runner %h/lpbot/data/codex/panel-r
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=330
-KillMode=control-group
+# Durable owned tmux jobs finish after the coordinator stops. Their exact
+# outcomes are reconciled before another write; the ownership fence stays.
+KillMode=process
 UMask=0077
 Nice=10
 CPUWeight=20

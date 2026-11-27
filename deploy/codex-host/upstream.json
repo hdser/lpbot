@@ -7,6 +7,15 @@
   "source_archive_url": "https://api.github.com/repos/openai/codex/tarball/rust-v0.172.0",
   "source_archive_sha256": "a9896d98b55372a8567441de7f07b77fcf6a2f92e547a20952e32af12c4ca0aa",
   "patch_sha256": "40c79b7b6ecfc3d8d21decdfbbafb7cd526b22fabe4fa6766295821935868c43",
+  "lock_normalization": {
+    "workspace_version": "0.172.0",
+    "original_sha256": "42a8f334ee469aeeb6fccda4bd468f5addbe6d4e564e2780a90473090112c5ab",
+    "derived_sha256": "0c017d96dae581ea09834ddbda7c572dd48e771cf86e9f87f8b3bcb4ab16f686",
+    "external_records_sha256": "cc78d5e030c9a3b9f19d765b237ab2408d9f04b81264de2cc676eba2bc525a29",
+    "local_packages": 174,
+    "external_packages": 1324,
+    "helper_sha256": "f0a0ba91afb0b82a96991aeeb5c972eb14f1c13179b47373765950b4e03f8d1f"
+  },
   "rust_toolchain": "1.99.1",
   "cargo_package": "codex-exec",
   "cargo_binary": "codex-exec",
