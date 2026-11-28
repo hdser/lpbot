@@ -17,6 +17,7 @@ use lpbot_core::{Step, StepRecord};
 use lpbot_exec::calls::Call;
 use lpbot_exec::journal::Journal;
 use lpbot_exec::planner::{plan, Allowances, OpenPosition, PlanContext};
+use lpbot_exec::reconcile;
 use lpbot_exec::submit::{submit, FeePolicy, Node, Order, RpcNode};
 use lpbot_signer::{Eip1559Tx, Key};
 use lpbot_venues::uniswap_v3::liquidity_amounts::{
@@ -251,6 +252,24 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
         U256::from(liquidity),
         "liquidity minted"
     );
+    // Read back as the executor does: the newest NFT, the plan's position.
+    assert_eq!(
+        reconcile::newest_token(&fork.node, POSITION_MANAGER, me).unwrap(),
+        Some(token_id)
+    );
+    let found = reconcile::read_position(&fork.node, POSITION_MANAGER, me, token_id).unwrap();
+    assert_eq!(
+        reconcile::compare(
+            Some(found),
+            &reconcile::Expected::Position {
+                tick_lower: lower,
+                tick_upper: upper,
+                min_liquidity: liquidity,
+            }
+        ),
+        reconcile::Outcome::Adopt(Some(found))
+    );
+    assert_eq!((found.token0, found.token1, found.fee), (USDC, WETH, 500));
     assert_eq!(
         weth_start - fork.balance(WETH),
         used,
@@ -290,6 +309,12 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
         fork.send(call);
     }
     assert_eq!(fork.balance(WETH) - before, out1, "WETH given back");
+    // The NFT is burned: reading it back finds no position to adopt.
+    assert!(reconcile::read_position(&fork.node, POSITION_MANAGER, me, token_id).is_err());
+    assert_eq!(
+        reconcile::balance(&fork.node, WETH, me).unwrap(),
+        fork.balance(WETH)
+    );
 
     // A swap of 0.1 WETH for USDC: the output simulated first, then sent
     // with the planner's bounds, lands exactly as simulated.
