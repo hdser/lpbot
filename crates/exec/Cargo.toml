@@ -8,4 +8,12 @@ publish.workspace = true
 
 [dependencies]
 lpbot-core.workspace = true
+lpbot-venues.workspace = true
+lpbot-chain.workspace = true
+lpbot-signer.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }

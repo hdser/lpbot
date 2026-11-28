@@ -12,12 +12,17 @@ Backtests, and the pools followed live. The bot reads pools from a node, replays
 | --- | --- |
 | One-command setup of the node and services (`make up`) | Paper mode |
 | Experiment files: base config, overrides, sweeps, config hashing | Differential test of the pool math against a mainnet fork |
-| Run-input checks (capital and loss limit are required) | Paper and live trading on the followed pools |
-| Uniswap v3 pool math, checked against the reference test vectors | Executor, Safe roles policy |
+| Run-input checks (capital and loss limit are required) | Live trading (`lpbot live`), reading positions back after a transaction |
+| Uniswap v3 pool math, checked against the reference test vectors | The Safe roles policy as code, and its fork test |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Watchdog |
 | Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Scoring decisions against the options not taken |
 | `lpbot pools`, `lpbot verify-pool` and `lpbot rank` (pools ranked by implied volatility) | The impact fill model (entries are capped instead) |
 | Zone map: passes per day, time in range, return times and per-zone implied volatility (`lpbot zones`) | |
+| Paper mode (`lpbot paper`): a forward experiment at the head with virtual positions, the engine fed block by block and checked against a replay of the same blocks | |
+| The seam to the executor: every change the engine makes recorded as a step; the planner turns an action's steps into bounded Uniswap calls batched through MultiSend and the roles module, checked on a fork of mainnet against the deployed contracts | |
+| The keeper's signer (`lpbot signer`), the executor's journal and its submitter (nonce, replacement of a stuck transaction within the gas cap) | |
+| Risk checks (width, price gaps, swap impact, slippage, gas, actions per day, node lag, replica against the chain, sleeve caps) and the pause flag (`lpbot pause`, `exit-all`, `resume`) | |
+| `lpbot select list`, `approve` and `check`, and the ladder every night (`deploy/selection/nightly.sh`) | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
 | Daily update of the stored history and gas prices from where the store ends (`lpbot backfill --resume`, `deploy/history/daily.sh` from cron); run from the laptop against the node, not yet in the node's crontab | |
 | Fee check: the replica's fees against what real positions collected, confirmed with the node's position records (`lpbot verify-fees`) | |
