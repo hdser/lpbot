@@ -102,8 +102,15 @@ pub struct Planned {
     pub inner: Vec<Call>,
     /// The inner calls as one `multiSend`, a delegate call from the Safe.
     pub batch: Call,
-    /// The transaction the keeper sends: the batch through the roles module.
+    /// The batch through the roles module: one transaction, but a delegate
+    /// call from the Safe, which the policy must then allow.
     pub outer: Call,
+    /// The transactions the keeper sends by default: each inner call on its
+    /// own through the roles module, with operation `Call`, so the policy
+    /// never has to allow a delegate call (`docs/DESIGN.md`, "What 2026
+    /// taught about Roles"). Sent in order, each after the one before has
+    /// landed.
+    pub separate: Vec<Call>,
     pub bounds: Vec<Bound>,
     /// The allowances once the plan has run, if every call takes what it
     /// asks for.
@@ -555,11 +562,17 @@ pub fn plan(records: &[StepRecord], ctx: &PlanContext) -> Result<Planned, PlanEr
     }
     let batch = multi_send(ctx.multisend, &b.inner)?;
     let outer = exec_transaction_with_role(ctx.roles, &batch, ctx.role_key, true);
+    let separate = b
+        .inner
+        .iter()
+        .map(|call| exec_transaction_with_role(ctx.roles, call, ctx.role_key, true))
+        .collect();
     let planned = Planned {
         chain_id: ctx.chain_id,
         inner: b.inner,
         batch,
         outer,
+        separate,
         bounds: b.bounds,
         allowances_after: b.allowances,
         burns_position,
@@ -667,6 +680,30 @@ pub fn verify(planned: &Planned, ctx: &PlanContext) -> Result<(), PlanError> {
             planned.inner.len() + 1,
             "the outer call is not the batch through the roles module".into(),
         ));
+    }
+    if planned.separate.len() != planned.inner.len() {
+        return Err(unexpected(
+            planned.inner.len() + 1,
+            "the separate transactions are not one for each inner call".into(),
+        ));
+    }
+    for (index, (each, inner)) in planned.separate.iter().zip(&planned.inner).enumerate() {
+        let roles = calls::decode_exec_transaction_with_role(&each.data)?;
+        if each.to != ctx.roles
+            || each.operation != Operation::Call
+            || !each.value.is_zero()
+            || roles.inner != *inner
+            || roles.inner.operation != Operation::Call
+            || roles.role_key != ctx.role_key
+            || !roles.should_revert
+        {
+            return Err(unexpected(
+                index,
+                "a separate transaction is not its inner call, as a plain call, through the \
+                 roles module"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1321,6 +1358,38 @@ mod tests {
         role.outer = exec_transaction_with_role(ROLES, &planned.batch, B256::ZERO, true);
         assert!(matches!(
             verify(&role, &ctx),
+            Err(PlanError::Unexpected { .. })
+        ));
+
+        // Each call on its own, with no delegate call: one transaction per
+        // inner call, each a plain call through the roles module.
+        assert_eq!(planned.separate.len(), planned.inner.len());
+        for (each, inner) in planned.separate.iter().zip(&planned.inner) {
+            let roles = decode_exec_transaction_with_role(&each.data).unwrap();
+            assert_eq!((each.to, each.operation), (ROLES, Operation::Call));
+            assert_eq!(&roles.inner, inner);
+            assert_eq!(roles.inner.operation, Operation::Call);
+        }
+        // Two of them swapped, one missing, or one made a delegate call:
+        // refused.
+        let mut swapped = planned.clone();
+        swapped.separate.swap(0, 1);
+        assert!(matches!(
+            verify(&swapped, &ctx),
+            Err(PlanError::Unexpected { .. })
+        ));
+        let mut short = planned.clone();
+        short.separate.pop();
+        assert!(matches!(
+            verify(&short, &ctx),
+            Err(PlanError::Unexpected { .. })
+        ));
+        let mut delegated = planned.clone();
+        let mut inner = planned.inner[0].clone();
+        inner.operation = Operation::DelegateCall;
+        delegated.separate[0] = exec_transaction_with_role(ROLES, &inner, ctx.role_key, true);
+        assert!(matches!(
+            verify(&delegated, &ctx),
             Err(PlanError::Unexpected { .. })
         ));
 

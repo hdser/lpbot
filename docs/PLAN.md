@@ -114,7 +114,15 @@ The design's roles table, written as code: a TypeScript script that builds the p
 - **Watchdog:** decrease and collect only, recipient pinned to the Safe.
 - **Not allowed, and tested as such:** the position manager's own `multicall` (it would carry calls past the conditions), transfers of tokens or NFTs, any other target, any other recipient, native ETH.
 
-The details of Roles v2 (the entry point's signature, how MultiSend is unwrapped, how allowances refill) are to be read from its documentation when M4 starts, not taken from this file.
+After the 2026 incidents (`docs/DESIGN.md`, "What 2026 taught about Roles"), M4's gate is stricter:
+
+- The modifier is a proxy of Roles v2.1.1 (`0xF2964CE6…`), the Safe's only module, with plain accounts as members: `lpbot_exec::custody` checks it (built, with real mainnet proxies as test vectors), and the fork test runs that check on the Safe it builds.
+- No delegate call is allowed by the policy: the keeper sends each call on its own, with operation `Call`.
+- The fork test tries, with the keeper's key, every refused call in the design's list and every pinned parameter set to an attacker's address (mint's NFT recipient, collect's and the swap's recipient, an approval's spender, a swap's fee tier through a thin pool), and each must revert in the modifier. It also tries a delegate call to MultiSend and to an attacker contract.
+- Allowances on swap amounts and mint amounts are set and a call over a day's allowance reverts.
+- The policy script's dependencies are pinned to exact versions and installed without running their install scripts.
+
+The Roles v2 entry point, `execTransactionWithRole(address,uint256,bytes,uint8,bytes32,bool)` (`0xc6fe8747`), is in the v2.1.1 mastercopy on mainnet. How allowances refill is to be read from the v2.1.1 source when M4 starts, not taken from this file.
 
 ### 7. Signer (`lpbot signer`, its own process)
 
@@ -130,7 +138,7 @@ Holds the keeper's encrypted keystore, listens on a local socket, and signs one 
 
 - Live and paper runs use the six result tables, so the existing dashboards show them.
 - Two tables proposed, not built without approval: `standings` (the ladder's last result: every candidate, its rung, what it needs, its share; replaced each run, as `agent_status` is) and `transactions` (the journal's on-chain steps: run, campaign, hash, block, gas, what moved), which is also the ledger export the design asks for.
-- Alerts, as Grafana rules like the others: a transaction stuck or reverted, a reconciliation difference, the heartbeat missed, an exit triggered, a candidate demoted.
+- Alerts, as Grafana rules like the others: a transaction stuck or reverted, a reconciliation difference, the heartbeat missed, an exit triggered, a candidate demoted; and, from the first funded day, any token leaving the Safe to an address other than the position manager, the router or a pool, and any change to the Safe's modules or owners or to the modifier's roles, scopes and members.
 
 ## Where the milestones stand
 
@@ -141,7 +149,7 @@ Updated 28 November 2026, on the branch `real-positions`.
 | M1 | Built | `lpbot select list` (every experiment file, forward or practice, with its agents and, given a plan, where its runs stand); `lpbot select approve` (the owner's yes, with the plan's SHA-256, beside the plan); `lpbot select check` and `select_ops::approved_plan`, which refuse a plan with no approval, changed since, or older than 36 hours; `deploy/selection/nightly.sh` (forward rules into `runs/forward-rules`, then the ladder) | The cron line on the node |
 | M2 | Built | `lpbot paper <experiment>`: the engine as a stream (`lpbot_sim::engine::Stream`), a base fed final blocks and a copy fed the rest at every step, the tables written as it goes, the final steps journaled under `data/paper/`, and every `--check-every` steps a replay of the whole history compared with it | Two weeks on the node with every check equal, a reorg and a restart in them |
 | M3 | Done | The seam: the engine records every change to its position as `lpbot_core::StepRecord` (mint, burn, swap), with no change to any result; the planner (`lpbot_exec::planner`) turns one action's records into the calls, bounded, and `verify` reads them back. On a fork of mainnet the planner's calls did on the deployed contracts what the engine counted, to the unit (`crates/exec/tests/fork.rs`) | Passed: 104 runs (the 78 of `regime-usd-usdc-weth-005`, the 14 of `forward-regime-usdc`, 12 agent runs of `agent-wording-a` and `-c`) rerun with the binary from before the split and after it wrote all six tables byte for byte the same |
-| M4 | Started | The fork harness (Anvil from the local node, `crates/exec/tests/fork.rs`); the Roles v2 entry point `execTransactionWithRole(address,uint256,bytes,uint8,bytes32,bool)` (`0xc6fe8747`) found in the three Roles v2 mastercopies most deployed through the Zodiac factory | The policy as code (TypeScript, Zodiac Roles SDK: needs the owner's yes to install it), a Safe and Roles modifier on the fork, every call outside the allowlist refused |
+| M4 | Started | The fork harness (Anvil from the local node, `crates/exec/tests/fork.rs`); the Roles v2 entry point `execTransactionWithRole(address,uint256,bytes,uint8,bytes32,bool)` (`0xc6fe8747`) found in the Roles v2 mastercopies on mainnet; the custody checks (`lpbot_exec::custody`: the modifier on patched Roles v2.1.1 only, the Safe's only module, plain-account members) | The policy as code (TypeScript, Zodiac Roles SDK: needs the owner's yes to install it), a Safe and Roles modifier on the fork, every call outside the allowlist and every pinned parameter set elsewhere refused, no delegate call allowed (see piece 6) |
 | M5 | Started | The signer (`crates/signer`, `lpbot signer`): EIP-1559 signing matched byte for byte against `cast`, Web3 keystores, a policy that signs only calls to the roles module, a 0600 Unix socket; the journal (`lpbot_exec::journal`: append-and-sync before each step, and what to do with an action a crash left open); the submitter (`lpbot_exec::submit`: one nonce, replacement of a stuck transaction within the cap, an exit's own ceiling); reconciliation (`lpbot_exec::reconcile`: the position read back from the position manager and adopted only if it is the range the plan made with at least the liquidity it bounded), run on the fork after the mint and the burn | The kill-at-every-step test on the fork through the Safe |
 | M6 | Started | The checks (`lpbot_risk::checks`: width, price against its average and its twin pool, swap impact, slippage bound, gas, actions per pool per day, node behind the public head, replica against the chain, sleeve caps); the pause flag (`lpbot_risk::pause`) and `lpbot pause`, `lpbot exit-all`, `lpbot resume` | The checks wired into the executor; the watchdog; the exit paths shown on the fork |
 | M7 to M9 | Not started | | The owner's Safe, keys and funds |
@@ -204,6 +212,7 @@ Before the milestone named, not all at once.
 | Dust trial of the pipes before any candidate passes, or wait | M7 | The trial settles fill costs and latency sooner; it also puts money on a strategy no evidence supports, so it should be sized as a cost |
 | Whether agents may hold live sleeves on the same gates as rules | M8 | An agent needs a session that wakes; the trader guards its position when it does not, but a missed look is a missed decision |
 | Watchdog: where it runs and its grace time | M6 | Short pulls ranges on any outage; long leaves them unattended |
+| Batches through MultiSend (one transaction a close, but a delegate call from the Safe), or each call on its own with no delegate call at all (recommended since the 2026 incidents) | M4 |
 | Telegram commands in (`exit-all`, approvals), or outbound only | M6, M9 | Inbound commands are a second way to move the bot and need their own check of who is asking |
 | Safe signers and threshold | M7 | One signer on a hardware wallet is the simplest; two of three survives a lost device |
 

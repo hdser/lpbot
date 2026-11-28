@@ -17,7 +17,7 @@ Do not reopen these without the owner asking.
 - **Ranking:** implied volatility from fee, volume and in-range liquidity (not total liquidity), at the price and per zone.
 - **Run inputs:** capital, loss limit (percent, in the value token) and autonomy (`auto` or `approve`). Capital and loss limit have no default; a run refuses to start without them. Backtests always run as `auto`.
 - **Adaptive settings:** zone choice, width, fee tier and the patience decision are calibrated walk-forward and must beat the fixed rules (always wait, always flip, always close) out of sample, or the fixed rule ships.
-- **Custody:** a Safe with the Zodiac Roles module. No custom contract.
+- **Custody:** a Safe with the Zodiac Roles module. No custom contract. Since the 2026 Zodiac incidents (`docs/DESIGN.md`, "What 2026 taught about Roles", added at the owner's request on 28 November 2026): Roles v2.1.1 only, the modifier as the Safe's only module, plain-account members, no delegate calls, every value-moving parameter pinned or refused, and `lpbot_exec::custody` checks the first three before anything is sent. Be very careful with anything that touches the policy.
 - **Chain access:** a local Reth node feeds every decision. Public RPC endpoints are for cross-checks, exit-only fallback and one-time backfill. No paid RPC.
 - **No arbitrage-loss theory in the decision logic.** It may appear only as an optional diagnostic in results.
 
