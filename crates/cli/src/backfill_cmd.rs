@@ -30,11 +30,21 @@ pub fn first_day(from: Option<Day>, days: u32, head_time: u64) -> Day {
     from.unwrap_or_else(|| Day::of_time(head_time).minus(days))
 }
 
+/// The day a backfill carries on from (`--resume`): the earliest of the
+/// pools' newest stored days, so that no pool is left with a gap however
+/// long ago the last backfill ran. Pools with nothing stored do not count;
+/// they start on that day too. `None` when no pool has a day stored.
+pub fn resume_day(newest: impl IntoIterator<Item = Option<Day>>) -> Option<Day> {
+    newest.into_iter().flatten().min()
+}
+
 pub struct BackfillArgs<'a> {
     /// Pools to backfill. Empty means every pool of the universe.
     pub pools: &'a [Address],
     pub from: Option<Day>,
     pub days: u32,
+    /// Carry on from where the store ends instead of `from` or `days`.
+    pub resume: bool,
     pub root: &'a Path,
     pub log_chunk: u64,
     /// Replay what is stored and compare it with the pool on the chain.
@@ -121,7 +131,6 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
         final_block: None,
     };
     let (head, head_time) = (head.block, head.time);
-    let from = first_day(args.from, args.days, head_time);
 
     let addresses: Vec<_> = chain.tokens.values().map(|(a, _)| *a).collect();
     let found = discover_pools(&chain.client, chain.factory, &addresses, head)?;
@@ -136,6 +145,22 @@ pub fn run(chain: &Chain, args: &BackfillArgs) -> Result<Stored> {
                 })
             })
             .collect::<Result<_>>()?
+    };
+    let from = if args.resume {
+        let store = lpbot_data::store::EventStore::new(args.root);
+        let newest = chosen
+            .iter()
+            .map(|pool| Ok(store.days(&chain.name, pool.address)?.last().map(|d| d.0)))
+            .collect::<Result<Vec<_>>>()?;
+        resume_day(newest).ok_or_else(|| {
+            anyhow!(
+                "nothing is stored under {} yet, so there is nothing to carry on from: \
+                 give --from <YYYY-MM-DD> for the first run",
+                args.root.display()
+            )
+        })?
+    } else {
+        first_day(args.from, args.days, head_time)
     };
     println!(
         "backfilling {} pool(s) on {} from {from} to block {head} ({kind}), into {}",
@@ -232,6 +257,21 @@ mod tests {
         assert_eq!(first_day(None, 0, head_time).to_string(), "2026-11-12");
         let explicit: Day = "2026-01-01".parse().unwrap();
         assert_eq!(first_day(Some(explicit), 90, head_time), explicit);
+    }
+
+    #[test]
+    fn a_resumed_backfill_starts_where_the_pool_furthest_behind_ends() {
+        let day = |text: &str| text.parse::<Day>().unwrap();
+        // One pool stopped earlier than the others, one has nothing stored.
+        let newest = [
+            Some(day("2026-11-19")),
+            Some(day("2026-11-12")),
+            None,
+            Some(day("2026-11-19")),
+        ];
+        assert_eq!(resume_day(newest), Some(day("2026-11-12")));
+        assert_eq!(resume_day([None, None]), None);
+        assert_eq!(resume_day([]), None);
     }
 
     #[test]

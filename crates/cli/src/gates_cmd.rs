@@ -600,6 +600,7 @@ impl Gates {
                 pools: &[],
                 from: Some(from),
                 days: 0,
+                resume: false,
                 root: &root,
                 log_chunk,
                 verify: true,

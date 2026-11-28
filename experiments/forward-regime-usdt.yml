@@ -1,0 +1,46 @@
+# The regime family forward, as rules: dollars after ETH fell 3% within four
+# hours, 600 ticks wide next to the price, out after three days, at a 5% loss
+# or on the first round trip, a day's wait after each campaign, under seven
+# long-timeframe regimes on the two USDT pools. The settings were fixed on
+# history up to 31 October 2026 (docs/RESEARCH.md, 27 November 2026) and the
+# window opens the day after, so every day in it is one no setting was chosen
+# on. The window is open at the end: each `lpbot run` replays it up to the
+# newest stored block, and `lpbot select ladder` holds each run against the
+# gates to real positions. Change nothing here once it runs. 14 runs.
+#
+#   cargo run --release -p lpbot -- run experiments/forward-regime-usdt.yml --results-dir runs/forward-regime
+#   cargo run --release -p lpbot -- select ladder selection/ladder.example.yml
+
+experiment: forward-regime-usdt
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-11-01, to: open }
+run: { capital_usd: 10000, loss_limit_pct: 20, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool:
+    - "0x11b815efB8f581194ae79006d24E0d814B7697F6"   # WETH/USDT 0.05%
+    - "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36"   # WETH/USDT 0.3%
+  value_token: [USDT]
+  capital_share: [1.0]
+  signal_step: [5m]
+  entry.check_every: [5m]
+  entry.min_gas_multiple: [100]
+  patience.mode: [wait]
+  entry.move_direction: [down]
+  entry.after_move_pct: [3]
+  entry.move_window: [4h]
+  entry.width_ticks: [600]
+  exit.max_hold: [3d]
+  exit.after_round_trips: [1]
+  exit.max_loss_pct: [5]
+  entry.cooldown: [1d]
+  entry.reposition: [false]
+  regime:
+    - {}                                                # no gate
+    - { trend_window: 30d, trend_min_pct: 10 }          # ETH up strongly on the month
+    - { trend_window: 30d, trend_min_pct: 0 }           # up on the month
+    - { trend_window: 30d, trend_min_pct: -10 }         # not deep in a fall
+    - { chop_window: 30d, max_efficiency: 0.2 }         # a month going sideways
+    - { band_window: 30d, band_min: 0.5 }               # in the upper half of the month's band
+    - { trend_window: 30d, trend_max_pct: 0 }           # down on the month: the check against the trend

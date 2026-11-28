@@ -2,6 +2,89 @@
 
 What backtests on real history have shown, newest first. Each entry names the experiment files, so every figure can be rerun: `cargo run --release -p lpbot -- run <file>`, then `lpbot load-results` to see the runs in Grafana. All results here are in-sample unless an entry says otherwise.
 
+## 27 November 2026: the long timeframe decides whether, the short one when
+
+**The question.** Round 4's one family that came near holding up waits for ETH to move 3% to 5% within four hours and provides on the side that bets on the move stalling. It knows nothing of the weeks before the move. Does asking the long timeframe first, and entering on the short one only when it agrees, help? The engine got three long-timeframe gates (`regime.*`: the trend over a window, how straight price went, where it sits in its band) and a trend exit, and `lpbot select walk-forward` now does the out-of-sample scoring that round 4 did by hand.
+
+**The regime grid** (`regime-usd-*`, `regime-eth-*`, 624 runs, `runs/regime`): the anchored family as it was (600 ticks next to the price, left in place, a 3% or 5% move within four hours on a five-minute look, out after one, three or seven days, at a 5% loss or on the first round trip, a day's wait after each campaign), on USDC/WETH and WETH/USDT at 0.05% and 0.3%, May 2025 to October 2026, gas at each block's price, under thirteen regimes: no gate; ETH up (or, for the ETH side, down) on the week, the month, the quarter; the month's move at least 10% the right way, or no worse than 10% the wrong way; the opposite trend as a check; a week or a month going sideways; price in the lower or upper half of the month's band; and two combinations.
+
+**Dollars after ETH fell, by regime, in sample.** The average of six runs a pool (two move sizes, three time limits), in dollars against holding them; in brackets the campaigns a run made.
+
+| Regime | USDC/WETH 0.05% | USDC/WETH 0.3% | WETH/USDT 0.05% | WETH/USDT 0.3% | All | Runs above zero |
+| --- | --- | --- | --- | --- | --- | --- |
+| No gate | −7.5% (21) | +2.6% (17) | +6.7% (22) | +6.4% (18) | +2.1% | 16 of 24 |
+| Up at least 10% on the month | +3.3% (7) | +4.4% (5) | +2.7% (8) | +5.4% (7) | +4.0% | 19 of 24 |
+| Upper half of the month's band | +2.3% (14) | +5.5% (11) | +1.5% (15) | +6.1% (12) | +3.8% | 13 of 24 |
+| No worse than −10% on the month | +1.2% (12) | +3.0% (9) | +0.4% (13) | +3.9% (11) | +2.1% | 15 of 24 |
+| Up on the quarter | +1.4% (8) | +2.7% (6) | −0.2% (9) | +4.0% (7) | +2.0% | 13 of 24 |
+| A month going sideways | +0.3% (9) | +1.9% (7) | +0.2% (9) | +3.0% (8) | +1.4% | 13 of 24 |
+| Up on the month | +0.2% (10) | +1.3% (7) | −0.2% (10) | +2.2% (9) | +0.9% | 14 of 24 |
+| Down on the month (the check) | −7.7% (12) | +1.4% (10) | +4.6% (12) | +4.0% (9) | +0.6% | 16 of 24 |
+| Up on the week | −2.3% (13) | +0.3% (10) | −0.3% (13) | +1.1% (11) | −0.3% | 11 of 24 |
+| Lower half of the month's band | −8.8% (9) | −1.1% (8) | +6.3% (8) | +1.5% (8) | −0.5% | 14 of 24 |
+
+Two gates were positive on all four pools, where the ungated family lost 7.5% on the busiest one: the month up at least 10%, and price in the upper half of the month's band. Both say the same thing: buy the dip of a market that is high and rising, not the dip of one already falling. They also trade a third to two thirds as often, five to fifteen campaigns in eighteen months, which is little to stand on. The lower half of the band, buying where price has already fallen, is the worst gate.
+
+**Out of sample** (`lpbot select walk-forward --results-dir runs/regime --experiment regime-usd`, months of 30 days, scored on the last twelve, the first six only fitted on):
+
+- *Picking a single setting* (78 a pool) by what made most over the last three months, the last six, or everything so far: 3 of 12 picks held up, all three on USDC/WETH 0.3%; the others lost 2% to 13% where the average setting made −2.5% to +1.5%. As in round 4.
+- *Picking a regime* (`--by regime`, each judged on the average of its six runs), pool by pool: 1 of 12 held up.
+- *Picking a regime for all four pools at once* (`--across-pools`, 24 runs a regime): the best of the last six months made +0.9% and the best so far +0.4% over the twelve months, against −0.1% for the average regime and +1.1% for the best with hindsight; the best of the last three made nothing. Over those twelve months the regimes ranked, out of sample: up 10% on the month +1.1%, no worse than −10% +1.0%, a rising month with a sideways week +0.9%, up on the month +0.7%, a month sideways +0.6%, upper half of the band +0.5%; no gate −0.8%; lower half of the band −1.1%, up on the week −1.2%, a week sideways −1.5%, and down on the month, the check against the thesis, last at −1.5%.
+
+So the order is what the thesis says: with the long trend at the top, against it at the bottom, no gate in between, in sample and in the twelve months no gate was fitted on. The size is small, about a point a year over holding dollars and two over the ungated family, in a year when ETH fell 24%. It is the first choice of settings in this log that held up at all out of sample, and only when the choice is among regimes, pooled over the pools; choosing among single runs is still noise.
+
+**ETH after it rose** (`regime-eth-*`): no. Over the last seventeen months the average regime lost 2.5% in ETH and the ungated family 6.1%. Two regimes ended above zero, both asking for a sideways week (+1.7%, and +2.4% with a falling month); a falling month alone lost 5.1%. Out of sample, picking a regime for all pools held up for one way of picking in three, at +0.2%. As in round 4, the ETH side does not work, with or without a long timeframe.
+
+**The frozen rules, forward** (`forward-regime-usdc`, `forward-regime-usdt`, 28 runs: a 3% fall, three days, seven regimes, four pools, settings fixed on history to 31 October). Over 1 to 19 November two runs made one campaign each, +0.9% on WETH/USDT 0.05% (no gate, and down on the month); the other 26 saw no entry. `lpbot select ladder` lists all 28 as needing more days and more campaigns. Nineteen days say nothing yet.
+
+**Agents on a mandate, practice** (`agent-mandates-practice`, USDC/WETH 0.05%, $10,000 in USDC, five days of October 2026, after the models' training data; each agent alone, about 40 looks at most). The three agents on the `trend` mandate:
+
+| Agent | Looks | Campaigns | Result | Fees | Edge over cash a decision, over a day | Decisions that were the best, over its next look |
+| --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 | 31 | 3 | −1.4% | $49 | −0.29% | 25 of 31 |
+| Sonnet 5.5 | 15 | 6 | −5.2% | $169 | −0.54% | 7 of 15 |
+| Opus 5.5 | 19 | 5 | −6.1% | $172 | −0.48% | 7 of 19 |
+
+All three lost to holding dollars. The quarter was up 30% to 40% and the month about flat, so the mandate allowed ranges below the price; ETH then fell by several percent twice within the five days, through the ranges, and each agent sold what the range had bought once the 30-day line turned, near the low, before the bounce. Sonnet and Opus kept ranges next to the price and earned 1.7% in fees against 7% to 8% lost that way; Haiku stayed out more and lost less. Their own reports name the same two faults: the range was too close to the price for a day's volatility of 3% to 4%, and one new 30-day low is not a turn of the trend. Three agents, five days and one market: this shows the panel, the scoring and the mandate text working end to end, not which model is better. The three Sonnet agents on the other mandates (none, range, fade) did not run: the model's safeguards stopped each session at its first message, so the comparison of mandates is still to do.
+
+**The `trend` mandate rewritten** (28 November 2026). The agents had read "the long timeframe turned" off the 30-day change, which sat near zero: a 4% day took it from +1% to −3%, and they sold. The mandate now says what clearly against the trend means, in figures a day's move cannot reach: the 90-day change against the agent's side, or the 30-day change against it by more than three times that line's daily volatility. A range is at least three times the day's volatility wide; one that price has moved into is held through the pullback and given up only on that test; the exit is the round trip; a resting range is not moved after the price. The same five days again:
+
+| Agent | Looks | Campaigns | Result | Largest drawdown | Fees | Edge over cash a decision, over a day | Decisions that were the best, over its next look |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 | 30 | 3 | +1.1% | 1.9% | $114 | +0.21% | 19 of 30 |
+| Opus 5.5 | 25 | 3 | +0.9% | 2.3% | $138 | +0.15% | 15 of 25 |
+
+Both now did what the mandate says: ranges 4% to 9% wide entered after a fall had slowed, no range moved after the price, every exit a round trip, and the position held through the 6% day that had made all three sell. Read this as the wording being followed, not as a result. These are the five days the wording was written on, and they ended with the bounce: holding through is exactly what pays when price comes back and what loses most when it does not, with only the test and the run's loss limit behind it (20% in the practice file). The 30-day change reached −6.1% against a line of −7.1% at the low. The Sonnet agent did not run this time either (the safeguards again), so there is no third row. The agents' own notes: closing after a round trip of a few hundredths of a percent is churn, and five days are too short for a 90-day test to mean anything.
+
+**Five wordings of the trend mandate, on four weeks they were not written on** (28 November 2026; `agent-wording-a` to `-d`, USDC/WETH 0.05%, $10,000 in USDC, Haiku 5.5, each agent alone, about 40 looks a week). The wordings are files in `crates/cli/mandates/`: `trend-v1` (the first text, "give a position up when the long timeframe turns"), `trend` (the rewrite above), `trend-stop` (the rewrite, plus giving a filled range up once price is beyond its far edge by more than the range's width), `trend-steps` (the rewrite as a numbered procedure) and `trend-why` (how a range earns and loses, with the agent naming its own two exit conditions before each entry), beside a model with no mandate. The weeks were fixed by rule before any run, from the Monday-to-Sunday weeks of September and October 2026 other than the one the rewrite was made on: the largest rise (14 September, +6.6%), the smallest distance between high and low (28 September), the largest fall (5 October, −7.1%, low −11.4%) and the most negative 30-day change at its start (26 October, −13.4%). Result against holding dollars, with the largest drawdown where there was one:
+
+| Setup | Rise | Quiet | Fall | Month down | Sum |
+| --- | --- | --- | --- | --- | --- |
+| No mandate | 0.00% | 0.00% | 0.00% | 0.00% | 0.0% |
+| `trend-v1` | +1.56% (3.1%) | +0.37% | −5.72% (8.0%) | 0.00% | −3.8% |
+| `trend` | +1.19% (1.5%) | +0.10% | −2.92% (8.1%) | 0.00% | −1.6% |
+| `trend-stop` | +0.88% (0.7%) | −0.01% | +0.97% (2.9%) | 0.00% | +1.8% |
+| `trend-steps` | +0.91% (1.1%) | +0.35% | −4.09% (9.2%) | 0.00% | −2.8% |
+| `trend-why` | +2.29% (2.2%) | −0.02% | −2.69% (6.1%) | 0.00% | −0.4% |
+
+One run a cell, one model: this screens wordings, it does not rank them. What it shows:
+
+- **Without a mandate the model never traded:** 137 looks over four weeks, every one `stay_out`. A wording is what makes it provide liquidity at all.
+- **The test for a falling month works as written.** In the week that began with the month down 13% every wording stayed out at every look, the first text included, and missed nothing: the week ended lower after a spike.
+- **The falling week is the one that tells them apart, and it is one week.** The first text sold three filled ranges once the 30-day change dipped under zero and lost most, as on the days it was rewritten for. The rewrite did not sell, and carried an 8% drawdown instead: its test for a falling month never fires in a week's slide inside a rising quarter, so it has no exit for the case that costs most. The procedure followed the same rule most literally and lost more. The agent that named its own conditions got out after the range was run through, a look late.
+- **`trend-stop` did not win by its stop.** It entered two days later than the others, after the fall, and its stop never fired. Its figure says something about waiting for a fall to slow and nothing about the stop.
+- **In the rising and the quiet week every wording that entered made a little**, more the longer it left a range alone: one range held all week made +2.3%, three round trips +0.9%.
+
+What the agents found unclear, in most reports: "a fall has slowed" has no measure; a range's edges are printed in percent from the price now, so a range left alone seems to move from look to look; nothing says what to do with a resting range that price has left far above; "round trip" covers a touch of a few hundredths of a percent. The second is the look's wording, not the mandate's. A typo in the procedure ("show no a fall") ran in all four weeks and is fixed since.
+
+### What follows
+
+- The regime gate that held up is slow: five to fifteen campaigns in eighteen months. The forward runs need months, not weeks, before the ladder's gates mean anything; earlier history would say more, sooner.
+- The next wording of the trend mandate: keep the test for a falling month, give a filled range that price has left an exit of its own (a distance or a time, in figures), say what "slowed" means, and say when a resting range is stale. Test it on weeks none of the five ran on, and on Opus as well as Haiku; do not tune it on these four. The other mandates (range, fade, patient) have not run at all.
+- Print a position's range in a frame that does not move with the price (how far price is from each edge, and which side it is on), since every wording was harder to follow for it.
+- The trend exit (`exit.trend_min_pct`) is built and tested and has not been swept on real history.
+- Regimes on other families: the wide one-sided ETH ranges of round 2, and the agents' own entries scored by the regime they were made in.
+
 ## 20 November 2026, last: selective entries the way a person trades them, scored out of sample
 
 **The question.** Trading by hand, in for hours or days, out with the value token back plus fees, makes money; can a rule do the same? Round 3 showed the entry decides it. This round builds the rule that way: one-sided in the value token, entered only after ETH moved, on the side that bets on the move stalling (dollars after a fall, ETH after a rise), looked for every five minutes, out after a time limit, at a stop, or (`exit.after_round_trips: 1`, new) as soon as a round trip brings it back wholly into the value token with its fees. Gas at each block's price. Every result is in the value token, against holding it; over May 2025 to October 2026 holding ETH made +25.6% in dollars and half and half +12.8%, and from February 2026 on ETH fell 24%.

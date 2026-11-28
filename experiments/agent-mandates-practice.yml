@@ -1,0 +1,35 @@
+# Mandates and models side by side (docs/DESIGN.md, "Agent setups"), on
+# USDC/WETH 0.05% over five days of stored history: one model on four mandates
+# (none, trend, range, fade), and the trend mandate on three models. One run
+# per agent, each deciding alone: every agent has a folder of its own under
+# data/agent/mandates-practice/ (not committed), so none reads another and
+# there is no board. The window is later than the models' training data, so
+# it is closer to a test than the 2025 panel, but it is still stored history
+# and short: practice for the forward panel, experiments/agent-mandates-forward.yml.
+# The experiment's name carries no date, because the run id is in the brief.
+#
+#   target/release/lpbot agent brief experiments/agent-mandates-practice.yml --agent s-trend
+#   target/release/lpbot agent next experiments/agent-mandates-practice.yml --agent s-trend
+#   target/release/lpbot agent evaluate experiments/agent-mandates-practice.yml --horizons next,1d
+#   target/release/lpbot run experiments/agent-mandates-practice.yml --results-dir runs/mandates-practice
+
+experiment: agent-mandates-practice
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-10-12, to: 2026-10-16 }
+run: { capital_usd: 10000, loss_limit_pct: 20, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"]   # USDC/WETH 0.05%
+  value_token: [USDC]
+  capital_share: [1.0]
+  signal_step: [5m]
+  agent:
+    - { name: s-open, model: claude-sonnet-5-5, decisions: data/agent/mandates-practice/s-open/s-open.jsonl }
+    - { name: s-trend, model: claude-sonnet-5-5, mandate: trend, decisions: data/agent/mandates-practice/s-trend/s-trend.jsonl }
+    - { name: s-range, model: claude-sonnet-5-5, mandate: range, decisions: data/agent/mandates-practice/s-range/s-range.jsonl }
+    - { name: s-fade, model: claude-sonnet-5-5, mandate: fade, decisions: data/agent/mandates-practice/s-fade/s-fade.jsonl }
+    - { name: h-trend, model: claude-haiku-5-5, mandate: trend, decisions: data/agent/mandates-practice/h-trend/h-trend.jsonl }
+    - { name: o-trend, model: claude-opus-5-5, mandate: trend, decisions: data/agent/mandates-practice/o-trend/o-trend.jsonl }

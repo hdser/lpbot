@@ -32,6 +32,7 @@ mod lp_positions_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
+mod select_cmd;
 mod supervisor_list;
 mod supervisor_procs;
 mod supervisor_status;
@@ -125,6 +126,62 @@ enum Command {
     /// anything will wake it for its next look.
     #[command(subcommand)]
     Supervisor(SupervisorCommand),
+    /// Choose what trades: score a rule's settings walk-forward, and hold
+    /// forward runs, rules and agents alike, against the gates to real
+    /// positions.
+    #[command(subcommand)]
+    Select(SelectCommand),
+}
+
+#[derive(Subcommand)]
+enum SelectCommand {
+    /// Over the runs of a results folder: each period trades the setting
+    /// that made most over the periods before it, and is scored on what
+    /// that setting then made, against cash, the average setting and the
+    /// best one chosen with hindsight.
+    WalkForward(WalkForwardArgs),
+    /// Hold every forward run of a ladder file against its gates and share
+    /// each track's capital among those that pass. Writes the plan; sends
+    /// nothing.
+    Ladder(LadderArgs),
+}
+
+#[derive(Args)]
+struct WalkForwardArgs {
+    /// Folder the runs were written to.
+    #[arg(long, default_value = "runs")]
+    results_dir: PathBuf,
+    /// Only experiments whose name starts with this.
+    #[arg(long)]
+    experiment: Option<String>,
+    /// Length of a period, such as 30d or 7d.
+    #[arg(long, default_value = "30d")]
+    fold: String,
+    /// What a pick is fitted on: numbers of periods before it, or `all`
+    /// for every period so far, separated by commas.
+    #[arg(long, default_value = "3,6,all")]
+    fit: String,
+    /// Periods `all` needs before its first pick.
+    #[arg(long, default_value_t = 3)]
+    min_fit: usize,
+    /// Choose among the values of a swept setting, such as `regime`, each
+    /// judged on the average of the runs that share it, instead of among
+    /// single runs.
+    #[arg(long)]
+    by: Option<String>,
+    /// Compare over every pool at once instead of pool by pool. Use it
+    /// with --experiment so only one value token is in.
+    #[arg(long)]
+    across_pools: bool,
+}
+
+#[derive(Args)]
+struct LadderArgs {
+    /// The ladder file, such as selection/ladder.example.yml.
+    file: PathBuf,
+    /// Folder the plan is written to, as <ladder>.json.
+    #[arg(long, default_value = "data/selection")]
+    out: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -305,6 +362,10 @@ struct BackfillArgs {
     /// Days of history to store, counted back from today.
     #[arg(long, default_value_t = 90)]
     days: u32,
+    /// Carry on from where the stored history ends: the earliest of the
+    /// pools' newest stored days. For a job that runs on a schedule.
+    #[arg(long, conflicts_with = "from")]
+    resume: bool,
     /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -614,9 +675,10 @@ struct EvaluateArgs {
 struct GasHistoryArgs {
     #[command(flatten)]
     chain: ChainArgs,
-    /// First day to store, as YYYY-MM-DD.
+    /// First day to store, as YYYY-MM-DD. Without it, carry on from the
+    /// newest chunk of blocks that is stored.
     #[arg(long)]
-    from: String,
+    from: Option<String>,
     /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -950,6 +1012,7 @@ fn real_main() -> Result<()> {
                     pools: &pools,
                     from,
                     days: args.days,
+                    resume: args.resume,
                     root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
                     log_chunk: args.log_chunk,
                     verify: args.verify,
@@ -1010,8 +1073,12 @@ fn real_main() -> Result<()> {
             )?;
             let from = args
                 .from
-                .parse::<lpbot_data::day::Day>()
-                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+                .as_deref()
+                .map(|text| {
+                    text.parse::<lpbot_data::day::Day>()
+                        .map_err(|e| anyhow::anyhow!("--from {text}: {e}"))
+                })
+                .transpose()?;
             let client = &chain.client;
             let source = lpbot_data::backfill::NodeSource {
                 client,
@@ -1023,9 +1090,21 @@ fn real_main() -> Result<()> {
                 Some((block, _)) => block,
                 None => client.block_number()?.saturating_sub(64),
             };
-            let first =
-                lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
             let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let first = match from {
+                Some(day) => {
+                    lpbot_data::backfill::first_block_at_or_after(&source, day.start(), 1, to)?
+                }
+                None => lpbot_data::gas::GasStore::new(&root)
+                    .newest_chunk(&args.chain.chain)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no gas prices are stored under {} yet, so there is nothing to \
+                             carry on from: give --from <YYYY-MM-DD> for the first run",
+                            root.display()
+                        )
+                    })?,
+            };
             println!(
                 "  gas prices of blocks {first} to {to} into {}",
                 root.display()
@@ -1308,6 +1387,34 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Command::Supervisor(SupervisorCommand::Status(args)) => supervisor_status::run(&args),
+        Command::Select(SelectCommand::WalkForward(args)) => {
+            let fold = run_cmd::parse_duration(&args.fold)
+                .filter(|seconds| *seconds >= 86_400)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--fold must be a duration of a day or more, such as 30d")
+                })?;
+            let fits = select_cmd::parse_fits(&args.fit)?;
+            print!(
+                "{}",
+                select_cmd::walk_forward_report(&select_cmd::WalkForwardArgs {
+                    results: &args.results_dir,
+                    experiment: args.experiment.as_deref(),
+                    fold,
+                    fits: &fits,
+                    min_fit: args.min_fit,
+                    by: args.by.as_deref(),
+                    across_pools: args.across_pools,
+                })?
+            );
+            Ok(())
+        }
+        Command::Select(SelectCommand::Ladder(args)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            print!("{}", select_cmd::run_ladder(&args.file, &args.out, now)?);
+            Ok(())
+        }
         Command::WatchPools(args) => {
             let config = chain_cmd::load_base_config(&args.chain.config)?;
             let chain =

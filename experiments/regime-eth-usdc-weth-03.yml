@@ -1,0 +1,49 @@
+# Long timeframe, short entry, on USDC/WETH 0.3%, May 2025 to October 2026:
+# ETH after it rose (betting the rise stalls), entered on a
+# five-minute look only once ETH moved 3% or 5% within four hours, and only
+# while the long timeframe allows it: thirteen regimes, from no gate at all to
+# that ETH is falling or going sideways on the week, month or quarter, or sits high in the month's band.
+# The range is 600 ticks wide next to the price and stays where it was placed;
+# out after one, three or seven days, at a 5% loss, or as soon as a round trip
+# brings it back wholly into the value token with its fees; a day's wait after
+# each campaign. Gas at each block's own price. Expands into 78 runs.
+#
+#   cargo run --release -p lpbot -- run experiments/regime-eth-usdc-weth-03.yml --results-dir runs/regime
+
+experiment: regime-eth-usdc-weth-03
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2025-05-01, to: 2026-10-31 }
+run: { capital_usd: 10000, loss_limit_pct: 50, autonomy: auto }
+strategy: eth-zone-roundtrip
+sweep:
+  pool: ["0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8"]   # USDC/WETH 0.3%
+  value_token: [WETH]
+  capital_share: [1.0]
+  signal_step: [5m]
+  entry.check_every: [5m]
+  entry.min_gas_multiple: [100]
+  patience.mode: [wait]
+  entry.move_direction: [up]
+  entry.after_move_pct: [3, 5]
+  entry.move_window: [4h]
+  entry.width_ticks: [600]
+  exit.max_hold: [1d, 3d, 7d]
+  exit.after_round_trips: [1]
+  exit.max_loss_pct: [5]
+  entry.cooldown: [1d]
+  entry.reposition: [false]
+  regime:
+    - {}                                                                        # no gate: the anchored family as it was
+    - { trend_window: 7d, trend_max_pct: 0 }                                    # ETH down on the week
+    - { trend_window: 30d, trend_max_pct: 0 }                                   # down on the month
+    - { trend_window: 30d, trend_max_pct: -10 }                                 # down strongly on the month
+    - { trend_window: 30d, trend_max_pct: 10 }                                  # not deep in a rise
+    - { trend_window: 90d, trend_max_pct: 0 }                                   # down on the quarter
+    - { trend_window: 30d, trend_min_pct: 0 }                                   # up on the month: the check against the trend
+    - { chop_window: 7d, max_efficiency: 0.2 }                                  # a week going sideways
+    - { chop_window: 30d, max_efficiency: 0.2 }                                 # a month going sideways
+    - { band_window: 30d, band_min: 0.5 }                                       # in the upper half of the month's band
+    - { band_window: 30d, band_max: 0.5 }                                       # in the lower half
+    - { trend_window: 90d, trend_max_pct: 0, band_window: 30d, band_min: 0.5 }  # a bounce in a falling quarter
+    - { trend_window: 30d, trend_max_pct: 0, chop_window: 7d, max_efficiency: 0.3 }   # a falling month, a sideways week

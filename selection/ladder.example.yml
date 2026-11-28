@@ -1,0 +1,34 @@
+# A ladder: which forward runs may hold real positions, and how a track's
+# capital is shared among them (docs/DESIGN.md, "From a backtest to real
+# positions"). Rules and agents stand on it alike: a candidate is a run
+# whose window is open at the end.
+#
+#   target/release/lpbot select ladder selection/ladder.example.yml
+#
+# It prints where every candidate stands and what it still needs, and writes
+# the plan to data/selection/<ladder>.json. Nothing is sent: the executor is
+# not built. Copy this file and set the gates: they are the owner's risk
+# limits, and the four without a default must be given.
+
+ladder: example
+
+gates:
+  min_days: 30                 # days a run must have been forward
+  min_campaigns: 5             # campaigns it must have opened
+  min_result_pct: 0            # its result over holding the value token, in percent
+  max_drawdown_pct: 5          # its worst fall from a peak, in percent
+  min_decisions: 20            # agents: decisions scored over the whole horizon
+  min_edge_vs_cash_pct: 0      # agents: mean edge over cash a decision, in percent of the capital
+  horizon: 1d                  # the horizon those decisions are judged over (lpbot agent evaluate --horizons next,1d)
+
+allocation:
+  min_share: 0.1               # the least a run that passed gets, so each keeps being measured
+  max_share: 0.5               # the most one run gets; what the caps leave over stays in cash
+
+tracks:
+  - name: dollars
+    value_tokens: [USDC, USDT]
+    capital_usd: 10000         # what the track shares out; leave it out for shares only
+    results:
+      - runs/forward-regime    # lpbot run experiments/forward-regime-usdc.yml and -usdt.yml
+      - runs/mandates-forward  # lpbot run experiments/agent-mandates-forward.yml

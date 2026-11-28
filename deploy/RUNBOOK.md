@@ -11,7 +11,7 @@ What to type on the node machine for the things that come up: starting a long jo
 | When your SSH connection drops | Keep running | Keep running if they were started inside `tmux`; stop otherwise |
 | When the machine restarts | Come back by themselves | Are gone. Start them again: each carries on from what it already stored |
 
-A third kind runs on a schedule from the user's crontab (`crontab -l` lists it) and comes back after a restart by itself: the refresh of the agents dashboard, "Keeping the agents dashboard current" below.
+A third kind runs on a schedule from the user's crontab (`crontab -l` lists it) and comes back after a restart by itself: the refresh of the agents dashboard, "Keeping the agents dashboard current" below, and the daily update of the stored history, "Keeping the stored history current".
 
 ## tmux
 
@@ -226,6 +226,50 @@ The agent list `data/agents/agents.yml` (copy `deploy/agents/agents.example.yml`
 Under each agent that needs someone, `make agents` prints what to do, with the commands; the `Agents` dashboard and the Overview's Needs attention show the same sentence. It comes from `agent_status.what_to_do`, which the status writes beside the detail.
 
 **A decision committed but not logged.** If a `decide` died between committing the decision and writing the logs (the Codex runner then stops with `committed_without_complete_audit`), `target/release/lpbot agent next <experiment> --agent <name>` finishes it: it writes the reasoning and the shared record from `<decisions>.committing.json`, once, and the look stops waiting. Then resume as usual. Leave the `.committing.json` file alone; the command removes it.
+
+## Forward rules and the ladder
+
+Rules frozen on history run forward too (`docs/DESIGN.md`, "From a backtest to real positions"): their window is open at the end, and each run replays it up to the newest stored block. The watcher does not store days; the daily job does ("Keeping the stored history current" below), so the runs reach as far as its last night. To bring the store to the head first:
+
+```sh
+cd ~/lpbot
+deploy/history/daily.sh
+target/release/lpbot run experiments/forward-regime-usdc.yml --results-dir runs/forward-regime
+target/release/lpbot run experiments/forward-regime-usdt.yml --results-dir runs/forward-regime
+target/release/lpbot select ladder selection/ladder.yml
+```
+
+`selection/ladder.yml` is a copy of `selection/ladder.example.yml` with the owner's gates. The last command prints where every forward run stands, rule or agent, what each still needs, and the plan; it writes `data/selection/<ladder>.json` and sends nothing. An agent panel is in the ladder once `deploy/agents/refresh.sh` has scored and replayed it into its results folder (hourly from cron); for the agents' gates it must score a day's horizon, `--horizons next,1d`. Once a day is often enough for the rules. Do not edit a forward experiment file once it runs: its commit is the proof of when the settings were fixed.
+
+## Keeping the stored history current
+
+The stored history (`DATA_DIR/lake`: every pool's events by day, and the gas prices) is what backtests, the forward rules, the ranking and the pool statistics read. Nothing fills it by itself: the watcher follows the pools live without storing days, and a forward agent brings only its own pool up to the head. One script fetches the rest, and two cron lines run it:
+
+```sh
+crontab -e     # then add these two lines
+23 3 * * *  $HOME/lpbot/deploy/history/daily.sh >> $HOME/lpbot/logs/history-daily.log 2>&1
+43 4 * * 0  $HOME/lpbot/deploy/history/daily.sh --verify >> $HOME/lpbot/logs/history-daily.log 2>&1
+```
+
+- Every day at 03:23 UTC it stores what is missing for every pool of the universe, up to the newest final block (`lpbot backfill --resume`), then the gas prices of the same blocks (`lpbot gas-history`). It starts from the store itself: the earliest of the pools' newest stored days. A night that was missed, or a week with the machine off, leaves no gap, since the next run fetches all of it.
+- On Sundays at 04:43 UTC it does the same and then replays the whole store and compares every pool with the chain (`--verify`), which is the proof that nothing is missing. Each pool is replayed from its newest stored snapshot, at low priority: the whole run took a minute on the laptop through the tunnel (28 November 2026, 24 pools, 0 differing); allow a few on the node.
+- While it runs it holds the store's lock, as every command on the store does. A look of a forward agent that falls in that time waits for it, and the server runner puts its job off to its next turn. Without the replay that is well under a minute for one day; ten missed days of all 24 pools are about 480,000 logs.
+- `make history-daily` runs it by hand; `make history-daily VERIFY=1` with the replay. Running it twice does no harm.
+- It needs the store to exist (`make history FROM=<day>` and `make gas-history FROM=<day>`, or `make gates`) and the binary built from a commit that has `backfill --resume`: `git pull`, then `CARGO_BUILD_JOBS=2 cargo build --release -p lpbot`.
+
+Its log, `logs/history-daily.log`, gets a line when a run starts and one when it ends; the commands' own output of the last run is in `logs/history-daily-last.log`.
+
+| It says | It means |
+| --- | --- |
+| `ok: 1 day(s) fetched` | The usual night: yesterday closed and today begun. `0 day(s)` right after another run |
+| `ok: ... 24 pool(s) replay to the chain, 0 differ` | The Sunday run: the store is whole |
+| `FAILED: the backfill ...` with `is the node running?` | The node did not answer: `make status`. The next run catches up |
+| `FAILED: ...` with `unexpected argument '--resume'` | The binary is older than the script: `git pull`, then `CARGO_BUILD_JOBS=2 cargo build --release -p lpbot` |
+| `FAILED: a pool differs from the chain` | A stored day does not replay to the pool's state. Read `logs/history-daily-last.log` for the pool and the block, and do not trust backtests on that pool until `lpbot backfill --from <day before> --pool <address> --verify` passes |
+| `the previous run is still going; skipped` | A run overlapped the next one, most likely the Sunday replay on a hot machine. Nothing to do |
+| Nothing for more than a day | Cron does not run it: `crontab -l`, and `tail logs/history-daily.log` |
+
+It does not refresh the pool dashboard's history (`make pool-stats`, then `make load`), which samples every pool over the whole store, and nothing alerts on it yet: look at the log.
 
 ## When something is red
 

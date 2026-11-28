@@ -5,11 +5,111 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use lpbot_core::config::StrategyConfig;
 use lpbot_core::experiment::ResolvedRun;
 
 use crate::agent_log::Identity;
 use crate::run_cmd::run_window;
+
+/// The mandates: ways of trading an agent is told to follow
+/// (`agent.mandate`), so that a panel can set the same model on different
+/// mandates, or different models on the same one. Each is a name and the
+/// text the agent reads, kept as a file in `crates/cli/mandates/` so that
+/// it can be read and changed without reading code; the binary carries the
+/// text it was built with, so a run's wording cannot change under it.
+/// `trend-*` are wordings of the same idea, to be compared.
+const MANDATE_TEXTS: [(&str, &str); 8] = [
+    ("trend", include_str!("../mandates/trend.md")),
+    ("trend-v1", include_str!("../mandates/trend-v1.md")),
+    ("trend-stop", include_str!("../mandates/trend-stop.md")),
+    ("trend-steps", include_str!("../mandates/trend-steps.md")),
+    ("trend-why", include_str!("../mandates/trend-why.md")),
+    ("range", include_str!("../mandates/range.md")),
+    ("fade", include_str!("../mandates/fade.md")),
+    ("patient", include_str!("../mandates/patient.md")),
+];
+
+/// The mandate that is none: the agent is left to itself.
+pub const OPEN: &str = "open";
+
+/// Every name `agent.mandate` takes, `open` first.
+pub fn mandates() -> Vec<&'static str> {
+    std::iter::once(OPEN)
+        .chain(MANDATE_TEXTS.iter().map(|(name, _)| *name))
+        .collect()
+}
+
+/// The mandate of a run's agent, checked against `mandates()`. `None` for
+/// `open` or none.
+pub fn mandate(strategy: &StrategyConfig) -> Result<Option<&'static str>> {
+    let value = strategy
+        .extra
+        .get("agent")
+        .and_then(|agent| agent.get("mandate"));
+    match value {
+        None | Some(serde_yaml::Value::Null) => Ok(None),
+        Some(value) => {
+            let name = value.as_str().unwrap_or_default().trim();
+            if name == OPEN {
+                return Ok(None);
+            }
+            match MANDATE_TEXTS.iter().find(|(known, _)| *known == name) {
+                Some((known, _)) => Ok(Some(known)),
+                None => bail!(
+                    "agent.mandate `{}` is not one of {}; each is a file in crates/cli/mandates/",
+                    value.as_str().unwrap_or("that"),
+                    mandates().join(", ")
+                ),
+            }
+        }
+    }
+}
+
+/// What a mandate tells the agent, in terms of what a look shows: its file,
+/// with the words in braces written for the side the value token trades.
+/// `dips` is whether the value token is the dollar: its one-sided ranges
+/// then sit below the price and buy the volatile token as it falls;
+/// otherwise they sit above and sell it as it rises.
+fn mandate_text(name: &str, value: &str, dips: bool) -> String {
+    let text = MANDATE_TEXTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, text)| *text)
+        .unwrap_or_default();
+    let words: [(&str, String); 7] = if dips {
+        [
+            ("{favoured}", "rising or holding".into()),
+            ("{against}", "falling".into()),
+            ("{beyond_zero}", "below zero".into()),
+            ("{entry_move}", "a fall".into()),
+            ("{side}", "below".into()),
+            (
+                "{one_sided}",
+                format!("below the price, buying the volatile token with {value} as it dips"),
+            ),
+            ("{value}", value.into()),
+        ]
+    } else {
+        [
+            ("{favoured}", "falling or holding".into()),
+            ("{against}", "rising".into()),
+            ("{beyond_zero}", "above zero".into()),
+            ("{entry_move}", "a rise".into()),
+            ("{side}", "above".into()),
+            (
+                "{one_sided}",
+                format!("above the price, selling {value} as it rises"),
+            ),
+            ("{value}", value.into()),
+        ]
+    };
+    let mut text = text.trim_end().to_string();
+    for (word, written) in words {
+        text = text.replace(word, &written);
+    }
+    text
+}
 
 /// The brief for agent `who` of the experiment at `experiment`; `others`
 /// are the panel's other agents, who share its board.
@@ -115,6 +215,16 @@ pub fn brief(
             others = others.join(", ")
         );
     }
+    let dips = ["USDC", "USDT"].contains(&strategy.value_token.as_str());
+    if let Some(name) = mandate(strategy)? {
+        let _ = writeln!(
+            text,
+            "## Your mandate: {name}\n\n{}\n\nThe mandate is how you trade this run. Staying \
+             out is always allowed under it; trading another way is not. It is part of what is \
+             being measured, so follow it even when you would do otherwise.\n",
+            mandate_text(name, &strategy.value_token, dips)
+        );
+    }
     let _ = writeln!(
         text,
         "## What a decision means\n\n\
@@ -133,11 +243,7 @@ pub fn brief(
          - Other agents read your records: write your reasoning so another trader can follow \
          it and disagree with it.\n",
         value = strategy.value_token,
-        side = if ["USDC", "USDT"].contains(&strategy.value_token.as_str()) {
-            "below"
-        } else {
-            "above"
-        }
+        side = if dips { "below" } else { "above" }
     );
     let _ = writeln!(
         text,
@@ -173,6 +279,124 @@ mod tests {
     use super::*;
     use crate::agent_log::Peer;
     use lpbot_core::experiment::{resolve_experiment, RunOverrides};
+
+    #[test]
+    fn a_mandate_is_told_in_the_brief_for_the_side_the_value_token_trades() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let experiment = repo.join("experiments/agent-mandates-practice.yml");
+        let runs = resolve_experiment(&experiment, &RunOverrides::default()).unwrap();
+        let mut seen = Vec::new();
+        for run in &runs {
+            let strategy = &run.config.strategies[0];
+            let who = crate::agent_log::identity(strategy).unwrap().unwrap();
+            let text = brief(Path::new("experiments/x.yml"), run, &who, &[]).unwrap();
+            // The first line is what start-agent.sh reads the model from.
+            assert!(
+                text.starts_with(&format!("# Brief for agent {} ({})\n", who.name, who.model)),
+                "{text}"
+            );
+            assert!(!text.contains("2026"), "no dates: {text}");
+            match mandate(strategy).unwrap() {
+                None => assert!(!text.contains("## Your mandate"), "{text}"),
+                Some(name) => {
+                    assert!(
+                        text.contains(&format!("## Your mandate: {name}\n")),
+                        "{text}"
+                    );
+                    // Dollars are the value token: ranges below the price.
+                    assert!(text.contains("below the price, buying the volatile token with USDC"));
+                    assert!(text.contains("Staying out is always allowed"), "{text}");
+                    seen.push(name);
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, ["fade", "range", "trend"]);
+
+        // With the volatile token as the value token the ranges sit above.
+        // Every mandate is written for both sides, with no word left in
+        // braces and no file empty or the same as another.
+        let mut texts = Vec::new();
+        for (name, _) in MANDATE_TEXTS {
+            let eth = mandate_text(name, "WETH", false);
+            assert!(
+                eth.contains("above the price, selling WETH"),
+                "{name}: {eth}"
+            );
+            assert!(!eth.contains("USDC"), "{name}");
+            let usd = mandate_text(name, "USDC", true);
+            assert!(usd.contains("--reasoning"), "{name}: {usd}");
+            for text in [eth, usd] {
+                assert!(!text.contains('{') && !text.contains('}'), "{name}: {text}");
+                assert!(!text.contains("2026"), "{name}: no dates");
+                assert!(!texts.contains(&text), "{name} repeats another mandate");
+                texts.push(text);
+            }
+        }
+        assert_eq!(mandates()[0], OPEN);
+        assert_eq!(mandates().len(), MANDATE_TEXTS.len() + 1);
+
+        // The wordings of the trend idea differ where they are meant to.
+        let usd = |name: &str| mandate_text(name, "USDC", true);
+        assert!(usd("trend-v1").contains("when the long timeframe turns"));
+        assert!(usd("trend-stop").contains("below the range's far edge by more than"));
+        assert!(!usd("trend").contains("far edge"));
+        assert!(usd("trend-steps").contains("C30 is below zero by more than 3 x V30"));
+        assert!(usd("trend-why").contains("the one that proves it wrong"));
+        assert!(mandate_text("trend-stop", "WETH", false).contains("above the range's far edge"));
+        assert!(mandate_text("trend", "WETH", false).contains("clearly rising, stay out"));
+        assert!(mandate_text("trend", "USDC", true).contains("clearly falling, stay out"));
+
+        // A turn of the long timeframe is a test a day's move cannot meet,
+        // and a filled range is held through a pullback.
+        for (value, dips, beyond_zero) in
+            [("USDC", true, "below zero"), ("WETH", false, "above zero")]
+        {
+            let text = mandate_text("trend", value, dips);
+            assert!(
+                text.contains(&format!("the 90-day change is {beyond_zero}, or")),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("is {beyond_zero} by more than three times")),
+                "{text}"
+            );
+            assert!(text.contains("Hold it through the pullback"), "{text}");
+            assert!(
+                text.contains(&format!("back wholly in {value} with its fees")),
+                "{text}"
+            );
+            assert!(text.contains("Do not move a resting range"), "{text}");
+            assert!(!text.contains("when the long timeframe turns"), "{text}");
+            assert!(!text.contains('{'), "{text}");
+        }
+
+        // `open` and none are no mandate; anything else is refused by name.
+        let strategy = |agent: &str| -> StrategyConfig {
+            serde_yaml::from_str(&format!(
+                "id: s\nkind: zone_round_trip\nvalue_token: USDC\nagent: {agent}\n"
+            ))
+            .unwrap()
+        };
+        assert_eq!(mandate(&strategy("{ mandate: open }")).unwrap(), None);
+        assert_eq!(mandate(&strategy("{ mandate: null }")).unwrap(), None);
+        assert_eq!(mandate(&strategy("{ name: a }")).unwrap(), None);
+        assert_eq!(
+            mandate(&strategy("{ mandate: patient }")).unwrap(),
+            Some("patient")
+        );
+        let refused = mandate(&strategy("{ mandate: scalper }"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("`scalper` is not one of open, trend"),
+            "{refused}"
+        );
+        assert!(mandate(&strategy("{ mandate: 3 }")).is_err());
+        let with_file = strategy("{ mandate: scalper, decisions: data/agent/x/a.jsonl }");
+        assert!(crate::agent_log::identity(&with_file).is_err());
+    }
 
     #[test]
     fn a_forward_run_is_briefed_as_one_at_the_head_with_no_dates() {

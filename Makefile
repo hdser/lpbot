@@ -10,7 +10,7 @@ COMPOSE = docker compose --env-file deploy/.env -f deploy/docker-compose.yml
 data_dir = $(strip $(subst ',,$(subst ",,$(DATA_DIR))))
 export LPBOT_DATA_DIR ?= $(if $(data_dir),$(data_dir),data)/lake
 
-.PHONY: up env viewer dashboards-preview dashboards-preview-stop snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history gas-history rank backtest calibrate agent-next agents load pool-stats watch watch-build watch-start watch-stop watch-logs
+.PHONY: up env viewer dashboards-preview dashboards-preview-stop snapshot tunnel grafana-password grafana-reset-password down restart status logs build test check demo gates history history-daily gas-history rank backtest calibrate agent-next agents load pool-stats watch watch-build watch-start watch-stop watch-logs
 
 ## Start the node, Postgres, Prometheus and Grafana. Safe to run again.
 up:
@@ -110,6 +110,13 @@ gates:
 FROM ?= 2026-01-31
 history:
 	cargo run --release -p lpbot -- backfill --from $(FROM) --verify
+
+## Bring the stored history and the gas prices up to the newest final block,
+## from where the store ends: what cron runs every night on the node
+## (deploy/RUNBOOK.md, "Keeping the stored history current"). VERIFY=1 also
+## replays the whole store against the chain.
+history-daily:
+	deploy/history/daily.sh $(if $(VERIFY),--verify)
 
 ## Store each block's base fee and priority fee from FROM on, for the
 ## backtests to charge gas at each block's price. Safe to run again; of the
