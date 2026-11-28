@@ -509,6 +509,9 @@ fn next_locked(
         } else {
             None
         };
+        if finish_committed(&who)? {
+            println!("The last decision had been committed but not logged; it is logged now.");
+        }
         let operations = crate::agent_lock::lake(root)?;
         let open = run_window(&run.config)?.1.is_none();
         let synced = if open && forward.sync {
@@ -794,6 +797,79 @@ pub fn decision_line(
     Ok(row.to_string())
 }
 
+/// A decision on its way in: what the reasoning log and the shared log get
+/// once it is committed. Kept beside the decisions file from just before
+/// the decision is written until both logs have it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Committing {
+    look: u64,
+    entry: String,
+    record: Option<serde_json::Value>,
+}
+
+fn committing_path(decisions: &Path) -> PathBuf {
+    crate::agent_lock::sibling(decisions, ".committing.json")
+}
+
+fn save_committing(decisions: &Path, committing: &Committing) -> Result<()> {
+    crate::agent_lock::atomic(
+        &committing_path(decisions),
+        serde_json::to_string(committing)?.as_bytes(),
+    )
+}
+
+/// Finishes a decision a crash left between its commit and its logs: if
+/// its look is in the decisions file, the reasoning log and the shared log
+/// get it unless they have it already, and the look stops waiting. If it is
+/// not, nothing was committed and the look still waits. Either way the
+/// saved state is removed. Runs under the agent's command lock, at every
+/// `next` and `decide`. Returns whether it finished a decision.
+pub(crate) fn finish_committed(who: &Identity) -> Result<bool> {
+    let path = committing_path(&who.decisions);
+    let text = crate::agent_lock::read_optional(&path)?;
+    if text.is_empty() {
+        return Ok(false);
+    }
+    let saved: Committing = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{} is not a decision on its way in; inspect it before deciding again",
+            path.display()
+        )
+    })?;
+    let decisions = crate::agent_lock::read_optional(&who.decisions)?;
+    let committed = crate::run_cmd::parse_decisions(&decisions)?
+        .iter()
+        .any(|d| d.look == saved.look);
+    if committed {
+        let log = log_path(&who.decisions);
+        if !crate::agent_lock::read_optional(&log)?.contains(&saved.entry) {
+            append_log(&log, who, &saved.entry)?;
+        }
+        if let Some(record) = &saved.record {
+            let records = agent_log::records_path(&who.decisions);
+            let logged = agent_log::read_records(&records)?.iter().any(|r| {
+                r["kind"] == "look"
+                    && r["look"] == record["look"]
+                    && r["as_of"] == record["as_of"]
+                    && r.get("decision").is_some_and(|d| !d.is_null())
+            });
+            if !logged {
+                agent_log::append_records(&records, std::slice::from_ref(record))?;
+            }
+        }
+        if read_pending(&who.decisions).is_ok_and(|p| p.look == saved.look) {
+            std::fs::remove_file(pending_path(&who.decisions)).ok();
+        }
+    }
+    std::fs::remove_file(&path)
+        .or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        })
+        .with_context(|| format!("removing {}", path.display()))?;
+    Ok(committed)
+}
+
 /// Writes the decision for the pending look, adds it to the reasoning log
 /// and shows the next look.
 pub fn decide(
@@ -805,7 +881,12 @@ pub fn decide(
 ) -> Result<()> {
     let who = identity_of(run)?;
     let decisions = who.decisions.clone();
-    let pending = pending_path(&decisions);
+    if finish_committed(&who)? {
+        bail!(
+            "the last decision had been committed but not logged; it is logged now. Run `lpbot \
+             agent next` for the look waiting now"
+        );
+    }
     let waiting = read_pending(&decisions)?;
     let look = waiting.look;
     // Everything is checked before anything is written.
@@ -829,31 +910,13 @@ pub fn decide(
     if let Some(parent) = decisions.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut content = crate::agent_lock::read_optional(&decisions)?;
-    if !content.is_empty() && !content.ends_with('\n') {
-        bail!("decisions have an unterminated final record; inspect it before deciding again");
-    }
-    let previous = crate::run_cmd::parse_decisions(&content)?;
-    if previous.iter().any(|d| d.look == look) {
-        bail!("this look already has a committed decision; run `lpbot agent next` to reconcile instead of deciding twice");
-    }
-    content.push_str(&line);
-    content.push('\n');
-    crate::agent_lock::atomic(&decisions, content.as_bytes())
-        .with_context(|| format!("writing {}", decisions.display()))?;
-    std::fs::remove_file(&pending).ok();
-    let log = log_path(&decisions);
+    // What the reasoning log and the shared log get, worked out before
+    // anything is written.
     let mut entry = log_entry(&waiting, decision, stance.as_ref());
     if !advice.is_empty() {
         entry.push_str(&agent_board::advice_markdown(&advice.json));
     }
-    append_log(&log, &who, &entry).with_context(|| {
-        format!(
-            "the decision is written to {}, but not to the reasoning log",
-            decisions.display()
-        )
-    })?;
-    if let Some(mut record) = waiting.record.clone() {
+    let record = waiting.record.clone().map(|mut record| {
         agent_log::complete(
             &mut record,
             &agent_log::Decided {
@@ -875,15 +938,38 @@ pub fn decide(
             record["as_of"] = serde_json::json!(at);
             record["at"] = serde_json::json!(at);
         }
-        let records = agent_log::records_path(&decisions);
-        agent_log::append_records(&records, &[record]).with_context(|| {
-            format!(
-                "the decision is written to {}, but not to the shared log {}",
-                decisions.display(),
-                records.display()
-            )
-        })?;
+        record
+    });
+    let mut content = crate::agent_lock::read_optional(&decisions)?;
+    if !content.is_empty() && !content.ends_with('\n') {
+        bail!("decisions have an unterminated final record; inspect it before deciding again");
     }
+    let previous = crate::run_cmd::parse_decisions(&content)?;
+    if previous.iter().any(|d| d.look == look) {
+        bail!("this look already has a committed decision; run `lpbot agent next` to reconcile instead of deciding twice");
+    }
+    // Saved before the decision is committed, so a crash between committing
+    // it and writing the logs is repaired by the next command: peers never
+    // miss a committed decision.
+    save_committing(
+        &decisions,
+        &Committing {
+            look,
+            entry: entry.clone(),
+            record: record.clone(),
+        },
+    )?;
+    content.push_str(&line);
+    content.push('\n');
+    crate::agent_lock::atomic(&decisions, content.as_bytes())
+        .with_context(|| format!("writing {}", decisions.display()))?;
+    finish_committed(&who).with_context(|| {
+        format!(
+            "the decision is written to {}, but not yet to the logs; `lpbot agent next` finishes \
+             it",
+            decisions.display()
+        )
+    })?;
     println!("{}: {}", waiting.label(), decision.action);
     if let (Some(acted), Some(shown)) = (at, waiting.at) {
         if acted > shown {
@@ -1007,6 +1093,117 @@ pub fn describe(o: &Observation, pool: &str, value_token: &str) -> String {
 mod tests {
     use super::*;
     use lpbot_sim::agent::{PositionView, ScaleView};
+
+    fn crash_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lpbot-commit-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An agent with a look waiting and the state `decide` saves just
+    /// before it commits.
+    fn about_to_commit(dir: &Path) -> (Identity, Committing, String) {
+        let who = Identity {
+            name: "a".into(),
+            model: "claude-opus-5-5".into(),
+            decisions: dir.join("a.jsonl"),
+            peers: Vec::new(),
+        };
+        let record = serde_json::json!({
+            "kind": "look", "agent": "a", "look": 1_000, "as_of": 1_000,
+            "decision": {"action": "stay_out", "next": "1h"}, "reasoning": "quiet",
+        });
+        write_pending(
+            &who.decisions,
+            &Pending {
+                look: 1_000,
+                at: Some(1_000),
+                number: Some(1),
+                day: Some(0.0),
+                seen: Some("the look".into()),
+                record: Some(serde_json::json!({"kind": "look", "look": 1_000, "as_of": 1_000})),
+            },
+        )
+        .unwrap();
+        let committing = Committing {
+            look: 1_000,
+            entry: "## Look 1, day 0.00: stay_out\n\nquiet\n".into(),
+            record: Some(record),
+        };
+        save_committing(&who.decisions, &committing).unwrap();
+        let line =
+            r#"{"look":1000,"action":"stay_out","next":"1h","note":"","decided":1001,"at":1000}"#;
+        (who, committing, line.to_string())
+    }
+
+    #[test]
+    fn a_crash_after_the_commit_is_finished_by_the_next_command_and_peers_get_the_record() {
+        let dir = crash_dir("after");
+        let (who, committing, line) = about_to_commit(&dir);
+        // The decision was committed; the process died before the logs.
+        std::fs::write(&who.decisions, format!("{line}\n")).unwrap();
+        assert!(finish_committed(&who).unwrap(), "finished");
+        let records = agent_log::read_records(&agent_log::records_path(&who.decisions)).unwrap();
+        assert_eq!(records, vec![committing.record.clone().unwrap()]);
+        let log = std::fs::read_to_string(log_path(&who.decisions)).unwrap();
+        assert!(log.contains(&committing.entry));
+        assert!(
+            read_pending(&who.decisions).is_err(),
+            "the look no longer waits"
+        );
+        assert!(!committing_path(&who.decisions).exists());
+        // Running again changes nothing.
+        assert!(!finish_committed(&who).unwrap());
+        assert_eq!(
+            agent_log::read_records(&agent_log::records_path(&who.decisions))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Died after the shared log too: nothing is written twice.
+        let dir = crash_dir("late");
+        let (who, committing, line) = about_to_commit(&dir);
+        std::fs::write(&who.decisions, format!("{line}\n")).unwrap();
+        append_log(&log_path(&who.decisions), &who, &committing.entry).unwrap();
+        agent_log::append_records(
+            &agent_log::records_path(&who.decisions),
+            std::slice::from_ref(committing.record.as_ref().unwrap()),
+        )
+        .unwrap();
+        assert!(finish_committed(&who).unwrap());
+        assert_eq!(
+            agent_log::read_records(&agent_log::records_path(&who.decisions))
+                .unwrap()
+                .len(),
+            1
+        );
+        let log = std::fs::read_to_string(log_path(&who.decisions)).unwrap();
+        assert_eq!(log.matches(&committing.entry).count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_crash_before_the_commit_leaves_the_look_waiting_and_writes_nothing() {
+        let dir = crash_dir("before");
+        let (who, _, _) = about_to_commit(&dir);
+        assert!(!finish_committed(&who).unwrap());
+        assert!(!agent_log::records_path(&who.decisions).exists());
+        assert!(!log_path(&who.decisions).exists());
+        assert_eq!(read_pending(&who.decisions).unwrap().look, 1_000);
+        assert!(!committing_path(&who.decisions).exists());
+        // A damaged saved state is refused, not guessed at.
+        std::fs::write(committing_path(&who.decisions), "{").unwrap();
+        assert!(finish_committed(&who).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_decision_line_reads_back_and_bad_ones_are_refused() {
