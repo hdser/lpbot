@@ -47,10 +47,19 @@ So the order is what the thesis says: with the long trend at the top, against it
 
 All three lost to holding dollars. The quarter was up 30% to 40% and the month about flat, so the mandate allowed ranges below the price; ETH then fell by several percent twice within the five days, through the ranges, and each agent sold what the range had bought once the 30-day line turned, near the low, before the bounce. Sonnet and Opus kept ranges next to the price and earned 1.7% in fees against 7% to 8% lost that way; Haiku stayed out more and lost less. Their own reports name the same two faults: the range was too close to the price for a day's volatility of 3% to 4%, and one new 30-day low is not a turn of the trend. Three agents, five days and one market: this shows the panel, the scoring and the mandate text working end to end, not which model is better. The three Sonnet agents on the other mandates (none, range, fade) did not run: the model's safeguards stopped each session at its first message, so the comparison of mandates is still to do.
 
+**The `trend` mandate rewritten** (28 November 2026). The agents had read "the long timeframe turned" off the 30-day change, which sat near zero: a 4% day took it from +1% to −3%, and they sold. The mandate now says what clearly against the trend means, in figures a day's move cannot reach: the 90-day change against the agent's side, or the 30-day change against it by more than three times that line's daily volatility. A range is at least three times the day's volatility wide; one that price has moved into is held through the pullback and given up only on that test; the exit is the round trip; a resting range is not moved after the price. The same five days again:
+
+| Agent | Looks | Campaigns | Result | Largest drawdown | Fees | Edge over cash a decision, over a day | Decisions that were the best, over its next look |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 | 30 | 3 | +1.1% | 1.9% | $114 | +0.21% | 19 of 30 |
+| Opus 5.5 | 25 | 3 | +0.9% | 2.3% | $138 | +0.15% | 15 of 25 |
+
+Both now did what the mandate says: ranges 4% to 9% wide entered after a fall had slowed, no range moved after the price, every exit a round trip, and the position held through the 6% day that had made all three sell. Read this as the wording being followed, not as a result. These are the five days the wording was written on, and they ended with the bounce: holding through is exactly what pays when price comes back and what loses most when it does not, with only the test and the run's loss limit behind it (20% in the practice file). The 30-day change reached −6.1% against a line of −7.1% at the low. The Sonnet agent did not run this time either (the safeguards again), so there is no third row. The agents' own notes: closing after a round trip of a few hundredths of a percent is churn, and five days are too short for a 90-day test to mean anything.
+
 ### What follows
 
 - The regime gate that held up is slow: five to fifteen campaigns in eighteen months. The forward runs need months, not weeks, before the ladder's gates mean anything; earlier history would say more, sooner.
-- The `trend` mandate's exit ("give the position up when the long timeframe turns") made agents sell lows. Rewrite it so that a turn takes more than one new low, and so that the range's distance and width follow the day's volatility, then run the practice panel again with every mandate.
+- The rewritten `trend` mandate holds a filled range through a pullback. Whether that pays is a forward question: run it in the forward panel beside the frozen rules, with a loss limit the owner is willing to see reached, and on practice days it was not written on. The other mandates (none, range, fade, patient) have not run at all.
 - The trend exit (`exit.trend_min_pct`) is built and tested and has not been swept on real history.
 - Regimes on other families: the wide one-sided ETH ranges of round 2, and the agents' own entries scored by the regime they were made in.
 

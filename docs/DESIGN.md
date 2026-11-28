@@ -506,7 +506,7 @@ Advice in a backtest would leak, because an answerer at a later look knows what 
 | Mandate | The agent is told to |
 | --- | --- |
 | `open`, or none | Trade as it sees fit |
-| `trend` | Read the look from the longest timeframe down: the 30- and 90-day lines say whether its side of the pool is favoured, the day and week whether price goes back and forth or runs, the 15-minute to 4-hour lines only time the entry. Stay out against a clear long trend; give a position up when the long timeframe turns, not for an hour's move |
+| `trend` | Read the look from the longest timeframe down: the 30- and 90-day lines say whether its side of the pool is favoured, the day and week whether price goes back and forth or runs, the 15-minute to 4-hour lines only time the entry. Stay out against a clear long trend, which is a test a day's move cannot meet: the 90-day change against its side, or the 30-day change against it by more than three times that line's daily volatility. A range at least three days of volatility wide; one that price has moved into is held through the pullback and given up only on that test; out on the round trip; a resting range is not moved after the price |
 | `range` | Provide only while the week and the month go sideways, inside the band the month held; out when price leaves it |
 | `fade` | Stay out by default; one entry after a fast move, on the side that bets on it stalling; out after about a day or on the round trip |
 | `patient` | Few, wide and slow: ranges several days of volatility wide where price has turned before, left for days |

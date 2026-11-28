@@ -46,10 +46,11 @@ pub fn mandate(strategy: &StrategyConfig) -> Result<Option<&'static str>> {
 /// below the price and buy the volatile token as it falls; otherwise they
 /// sit above and sell it as it rises.
 fn mandate_text(name: &str, value: &str, dips: bool) -> String {
-    let (favoured, against, entry_move, one_sided) = if dips {
+    let (favoured, against, beyond_zero, entry_move, one_sided) = if dips {
         (
             "rising or holding",
             "falling",
+            "below zero",
             "a fall",
             format!("below the price, buying the volatile token with {value} as it dips"),
         )
@@ -57,6 +58,7 @@ fn mandate_text(name: &str, value: &str, dips: bool) -> String {
         (
             "falling or holding",
             "rising",
+            "above zero",
             "a rise",
             format!("above the price, selling {value} as it rises"),
         )
@@ -72,11 +74,29 @@ fn mandate_text(name: &str, value: &str, dips: bool) -> String {
              2. The day and week lines say whether price is going back and forth or running. \
              Prefer a market that goes back and forth inside the long trend.\n\
              3. The 15-minute to 4-hour lines only time the entry: enter after {entry_move} \
-             against the long trend has slowed, not while it runs, in a range wide enough for \
-             the day's volatility.\n\n\
-             Give a position up when the long timeframe turns, not because of an hour's move. \
-             In every `--reasoning`, say what the long, the middle and the short timeframe each \
-             told you."
+             against the long trend has slowed, not while it runs. A range next to the price \
+             is filled by an ordinary day: make it at least three times the day line's \
+             `vol/day` wide.\n\n\
+             What clearly {against} means. A long line's `change` compares the price now with \
+             one price 30 or 90 days ago, so a single day's move shifts it by as much as that \
+             day moved: a 30-day change that crosses zero within a day is a day's move, not a \
+             turn, and so is one new 30-day high or low. The long timeframe is clearly \
+             {against} only when the 90-day change is {beyond_zero}, or the 30-day change is \
+             {beyond_zero} by more than three times the 30-day line's `vol/day`. Anything less \
+             is a pullback inside the trend, which is what your range is placed for.\n\n\
+             With a position open:\n\
+             - A range that price has moved into or through has traded {value} for the other \
+             token, as it was placed to do. Closing it there swaps back at a worse price than \
+             it traded at and leaves you to enter again after the price has come back. Hold \
+             it through the pullback. Give it up only when the long timeframe is clearly \
+             {against} by the test above, never for an hour's or a day's move; the run's own \
+             limits stop a loss that grows.\n\
+             - Exit when it has made its round trip: back wholly in {value} with its fees, \
+             after price went into the range and came out again.\n\
+             - Do not move a resting range after the price. Left behind, it costs nothing; a \
+             new range needs {entry_move} first.\n\n\
+             In every `--reasoning`, say what the long, the middle and the short timeframe \
+             each told you, and for the long one give the two figures of the test."
         ),
         "range" => format!(
             "Provide liquidity only in a market that is going sideways. The week and the 30-day \
@@ -322,6 +342,30 @@ mod tests {
         }
         assert!(mandate_text("trend", "WETH", false).contains("clearly rising, stay out"));
         assert!(mandate_text("trend", "USDC", true).contains("clearly falling, stay out"));
+
+        // A turn of the long timeframe is a test a day's move cannot meet,
+        // and a filled range is held through a pullback.
+        for (value, dips, beyond_zero) in
+            [("USDC", true, "below zero"), ("WETH", false, "above zero")]
+        {
+            let text = mandate_text("trend", value, dips);
+            assert!(
+                text.contains(&format!("the 90-day change is {beyond_zero}, or")),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("is {beyond_zero} by more than three times")),
+                "{text}"
+            );
+            assert!(text.contains("Hold it through the pullback"), "{text}");
+            assert!(
+                text.contains(&format!("back wholly in {value} with its fees")),
+                "{text}"
+            );
+            assert!(text.contains("Do not move a resting range"), "{text}");
+            assert!(!text.contains("when the long timeframe turns"), "{text}");
+            assert!(!text.contains('{'), "{text}");
+        }
 
         // `open` and none are no mandate; anything else is refused by name.
         let strategy = |agent: &str| -> StrategyConfig {
