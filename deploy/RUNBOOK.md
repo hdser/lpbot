@@ -279,6 +279,18 @@ Its log, `logs/history-daily.log`, gets a line when a run starts and one when it
 
 It does not refresh the pool dashboard's history (`make pool-stats`, then `make load`), which samples every pool over the whole store, and nothing alerts on it yet: look at the log.
 
+## Rebuilding the binary while agents run
+
+The Codex runner and the Claude agents share `target/release/lpbot`. After a rebuild the runner defers every look ("an older lpbot history/agent job is still running") until no `agent next`, `agent decide`, `agent evaluate`, `run`, `backfill` or `gas-history` process of the old binary is left, and a Claude agent's `agent next --wait` can run for hours (it ends at its look). On 28 November 2026 a rebuild at 11:35 held the Codex agents' looks until a's wait ended at about 14:13. Before rebuilding:
+
+```sh
+ps -eo pid,lstart,args | grep "lpbot agent next" | grep -v grep
+```
+
+and rebuild just after the Claude agents' looks, when their new waits start on the new binary, or accept that the Codex looks run late until the last old wait ends. Never stop a Claude session's wait to hurry it. After the build, `systemctl --user restart codex-panel.service` is not needed: the service restarts by itself every 30 s while it defers, and takes the new binary.
+
+A pull that changes `config/mainnet.yml` can change a live run's identity; `cargo test -p lpbot-core the_live_forward_runs_keep_their_identity` on the pulled checkout says whether it does, before anything is rebuilt.
+
 ## Paper mode
 
 `lpbot paper <experiment>` follows a forward experiment at the head with virtual positions: the same engine as the backtests, fed each block as it comes. It is a job, in `tmux`, and does not come back after a restart by itself:
