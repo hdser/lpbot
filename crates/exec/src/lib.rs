@@ -17,9 +17,11 @@ pub mod abi;
 pub mod calls;
 pub mod custody;
 pub mod journal;
+pub mod monitor;
 pub mod planner;
 pub mod reconcile;
 pub mod submit;
+pub mod trader;
 
 /// Where the funds are held and how position changes reach the chain.
 pub trait Custody: Send + Sync {

@@ -51,7 +51,14 @@ pub struct PaperArgs<'a> {
     /// Stop after this many steps; `None` runs until stopped.
     pub steps: Option<u32>,
     pub pause: &'a PauseFlag,
+    /// Called with each run and its head at every step, before the head is
+    /// finished: what `lpbot live` carries out.
+    pub on_head: Option<&'a mut OnHead<'a>>,
 }
+
+/// What `lpbot live` does with each run's head: the run's setup and the
+/// engine at the head, whose steps it carries out.
+pub type OnHead<'a> = dyn FnMut(&RunSetup, &Stream<'_>) -> Result<()> + 'a;
 
 /// A run followed at the head.
 struct Paper<'a> {
@@ -244,7 +251,7 @@ fn catch_up(args: &PaperArgs<'_>) -> Result<u64> {
 }
 
 /// Follows the runs at the head until stopped, or for `args.steps` steps.
-pub fn follow(args: &PaperArgs<'_>) -> Result<()> {
+pub fn follow(args: &mut PaperArgs<'_>) -> Result<()> {
     let mut steps_done = 0u32;
     loop {
         // Set up: the stored history as it is, every run from its start.
@@ -286,6 +293,9 @@ pub fn follow(args: &PaperArgs<'_>) -> Result<()> {
             }
             for paper in &mut papers {
                 let head = paper.head()?;
+                if let Some(hook) = args.on_head.as_mut() {
+                    hook(paper.setup, &head)?;
+                }
                 let (time, block) = head.last();
                 let out = head.finish()?;
                 let mut info = paper.setup.info.clone();

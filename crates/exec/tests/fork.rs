@@ -52,6 +52,7 @@ fn address_word(a: Address) -> U256 {
 }
 
 struct Fork<'a> {
+    chain_id: u64,
     node: RpcNode<'a>,
     key: Key,
     me: Address,
@@ -80,7 +81,7 @@ impl Fork<'_> {
         self.sent += 1;
         let order = Order {
             id: format!("fork-{}", self.sent),
-            chain_id: 1,
+            chain_id: self.chain_id,
             from: self.me,
             to: call.to,
             data: Bytes::from(call.data.clone()),
@@ -111,6 +112,11 @@ impl Fork<'_> {
     }
 }
 
+fn chain_id_of(client: &lpbot_chain::RpcClient) -> u64 {
+    let id = client.call("eth_chainId", serde_json::json!([])).unwrap();
+    u64::from_str_radix(id.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+}
+
 #[test]
 #[ignore = "needs an Anvil fork of mainnet: LPBOT_FORK_RPC"]
 fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
@@ -121,7 +127,9 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
     let journal = Journal::new(
         std::env::temp_dir().join(format!("lpbot-fork-journal-{}.jsonl", std::process::id())),
     );
+    let chain_id = chain_id_of(&client);
     let mut fork = Fork {
+        chain_id,
         node: RpcNode { client: &client },
         key,
         me,
@@ -153,7 +161,7 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
 
     // 2 WETH to work with.
     let wrap = Eip1559Tx {
-        chain_id: 1,
+        chain_id: fork.chain_id,
         nonce: fork.node.next_nonce(me).unwrap(),
         max_priority_fee_per_gas: 1_000_000_000,
         max_fee_per_gas: 500_000_000_000,
@@ -189,7 +197,7 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
     };
     let deadline = u64::MAX / 2;
     let mut ctx = PlanContext {
-        chain_id: 1,
+        chain_id: fork.chain_id,
         safe: me,
         position_manager: POSITION_MANAGER,
         router: ROUTER,
@@ -362,4 +370,204 @@ fn the_planners_calls_do_on_the_deployed_contracts_what_the_engine_counted() {
         "USDC out of the swap"
     );
     let _ = std::fs::remove_file(fork.journal.path());
+}
+
+/// The trader carries out an engine's entry and its close on the deployed
+/// contracts, with a test account standing in for the Safe. Needs the fork
+/// to answer chain id 31337 (`anvil --fork-url ... --chain-id 31337`).
+#[test]
+#[ignore = "needs an Anvil fork of mainnet with --chain-id 31337: LPBOT_FORK_RPC"]
+fn the_trader_carries_out_an_entry_and_its_close_and_reads_each_back() {
+    use lpbot_exec::trader::{Contracts, Custody, Limits, PoolInfo, Trader, LOCAL_CHAIN_ID};
+    use lpbot_risk::checks::ActionLog;
+    use lpbot_risk::pause::State;
+
+    let url = std::env::var("LPBOT_FORK_RPC").expect("LPBOT_FORK_RPC");
+    let client = lpbot_chain::RpcClient::new(url);
+    let chain_id = chain_id_of(&client);
+    assert_eq!(
+        chain_id, LOCAL_CHAIN_ID,
+        "start anvil with --chain-id 31337"
+    );
+    let key = Key::from_secret(&hex::decode(DEV_KEY).unwrap()).unwrap();
+    let me = key.address();
+    let node = RpcNode { client: &client };
+    let journal_path =
+        std::env::temp_dir().join(format!("lpbot-trader-journal-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&journal_path);
+    let mut trader = Trader {
+        node: &node,
+        chain_id,
+        custody: Custody::TestAccount { account: me },
+        contracts: Contracts {
+            position_manager: POSITION_MANAGER,
+            router: ROUTER,
+            multisend: MULTISEND_CALL_ONLY,
+        },
+        pool: PoolInfo {
+            address: POOL,
+            token0: USDC,
+            token1: WETH,
+            fee: 500,
+            tick_spacing: 10,
+            zero_first: Vec::new(),
+        },
+        limits: Limits {
+            min_width_ticks: 60,
+            slippage_ppm: 3_000,
+            max_slippage_ppm: 10_000,
+            price_limit_ppm: 10_000,
+            max_swap_impact_ppm: 10_000,
+            exit_max_swap_impact_ppm: 50_000,
+            max_actions_per_day: 10,
+        },
+        fees: FeePolicy {
+            priority_wei: 1_000_000_000,
+            cap_wei: 500_000_000_000,
+            exit_cap_wei: 500_000_000_000,
+            bump_ppm: 125_000,
+            wait_blocks: 2,
+            gas_margin_ppm: 300_000,
+        },
+        gas_cap: 500_000_000_000,
+        journal: Journal::new(&journal_path),
+        actions: ActionLog::new(),
+    };
+    trader.check_custody().unwrap();
+    let mut sign = |tx: &Eip1559Tx| key.sign(tx).map_err(anyhow::Error::from);
+    let mut wait = || std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 2 WETH to work with.
+    let wrap = Eip1559Tx {
+        chain_id,
+        nonce: node.next_nonce(me).unwrap(),
+        max_priority_fee_per_gas: 1_000_000_000,
+        max_fee_per_gas: 500_000_000_000,
+        gas_limit: 100_000,
+        to: WETH,
+        value: U256::from(2u128 * 10u128.pow(18)),
+        data: Bytes::from(lpbot_exec::abi::selector("deposit()").to_vec()),
+    };
+    node.send_raw(&key.sign(&wrap).unwrap().raw).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // The engine's entry: 1 WETH in a range just below the price.
+    let market = trader.market().unwrap();
+    let upper = market.tick.div_euclid(10) * 10 - 10;
+    let lower = upper - 600;
+    let record = |action: &str, step: Step| StepRecord {
+        block: 1,
+        time: 1,
+        campaign: 1,
+        action: action.into(),
+        sqrt_price_x96: market.sqrt_price_x96,
+        step,
+    };
+    let entry = [record(
+        "open",
+        Step::Mint {
+            tick_lower: lower,
+            tick_upper: upper,
+            liquidity: 1,
+            amount0: U256::ZERO,
+            amount1: U256::from(10u128.pow(18)),
+        },
+    )];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Paused: nothing is sent.
+    let held = trader
+        .act(
+            "e0",
+            "run",
+            "open",
+            &entry,
+            &State::Paused("test".into()),
+            now,
+            &mut sign,
+            &mut wait,
+        )
+        .unwrap();
+    assert!(
+        matches!(held, Err(lpbot_exec::trader::Refusal::Check(ref why)) if why.contains("pause")),
+        "{held:?}"
+    );
+    assert!(trader.book().unwrap().position.is_none());
+
+    // Running: entered, and read back as planned.
+    let acted = trader
+        .act(
+            "e1",
+            "run",
+            "open",
+            &entry,
+            &State::Running,
+            now,
+            &mut sign,
+            &mut wait,
+        )
+        .unwrap()
+        .unwrap();
+    let reconcile::Outcome::Adopt(Some(position)) = acted.outcome else {
+        panic!("not adopted: {:?}", acted.outcome)
+    };
+    assert_eq!((position.tick_lower, position.tick_upper), (lower, upper));
+    let Step::Mint { liquidity, .. } = acted.live[0].step else {
+        panic!()
+    };
+    assert_eq!(
+        position.liquidity, liquidity,
+        "the liquidity the trader worked out"
+    );
+    assert!(!acted.landed.is_empty());
+
+    // The engine's close: the trader takes out what the chain holds.
+    let close = [record(
+        "close",
+        Step::Burn {
+            tick_lower: lower,
+            tick_upper: upper,
+            liquidity: 1,
+            amount0: U256::ZERO,
+            amount1: U256::ZERO,
+            fees0: U256::ZERO,
+            fees1: U256::ZERO,
+        },
+    )];
+    let before = reconcile::balance(&node, WETH, me).unwrap();
+    let acted = trader
+        .act(
+            "e2",
+            "run",
+            "close",
+            &close,
+            &State::Exiting("test".into()),
+            now,
+            &mut sign,
+            &mut wait,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(acted.outcome, reconcile::Outcome::Adopt(None));
+    assert!(trader.book().unwrap().position.is_none());
+    let Step::Burn { amount1, .. } = acted.live[0].step else {
+        panic!()
+    };
+    assert_eq!(
+        reconcile::balance(&node, WETH, me).unwrap() - before,
+        amount1
+    );
+
+    // Every step is in the journal, each action read back.
+    let entries = Journal::new(&journal_path).read().unwrap();
+    let reconciled = entries
+        .iter()
+        .filter(|e| matches!(e, lpbot_exec::journal::Entry::Reconciled { .. }))
+        .count();
+    assert_eq!(reconciled, 2);
+    assert_eq!(lpbot_exec::journal::open_action(&entries), None);
+    let _ = std::fs::remove_file(&journal_path);
 }
