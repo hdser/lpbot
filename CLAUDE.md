@@ -39,6 +39,7 @@ All four must pass before a commit. Clippy runs with warnings as errors.
 - **Strategies declare, they do not act.** A strategy returns `Intent`s. Sizing limits, transaction building and safety live outside it.
 - **Same code in every mode.** Anything that would behave differently in backtest and live is a bug unless it is the clock, the data source or the executor.
 - **Tests come with the code.** Every public function gets unit tests. Pool math additionally gets differential tests against the deployed contracts on a fork.
+- **Never change a live run's identity.** A run's id hashes its resolved settings; the Codex runner refuses a forward run whose settings changed. A new setting with a default goes in `OPTIONAL_SETTINGS` (`crates/core/src/experiment.rs`), not in the base config, and `the_live_forward_runs_keep_their_identity` must keep passing. On 28 November 2026 adding defaults to `config/mainnet.yml` stopped the runner until the node's base config was put back.
 - **Typed config, tolerant parsing.** Type the settings the code uses; carry the rest through `extra` maps so the YAML can grow ahead of the code.
 - **Errors say what to do.** A refusal to start names the missing input.
 - **Never commit** data, results, keystores, `.env` files or real addresses of the owner's Safe. Config uses `"0x..."` placeholders.

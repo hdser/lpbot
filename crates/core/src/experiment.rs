@@ -146,8 +146,11 @@ pub fn resolve(
         .and_then(Value::as_sequence)
         .and_then(|s| s.first())
     {
-        for path in exp.sweep.keys() {
-            check_sweep_path(strategy, &exp.strategy, path)?;
+        for (path, values) in &exp.sweep {
+            match check_optional(path, values) {
+                Some(checked) => checked?,
+                None => check_sweep_path(strategy, &exp.strategy, path)?,
+            }
         }
     }
 
@@ -275,6 +278,89 @@ fn check_base_path(base: &Value, dotted: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Settings the code reads with a default when they are left out, so the
+/// base config leaves them out, and a sweep may set them all the same. Kept
+/// out of the base config so that a run which does not set them resolves,
+/// and so hashes, exactly as it did before they existed: a run's identity is
+/// its resolved settings, and a forward run must keep it (the Codex runner
+/// refuses to decide one whose resolved settings changed, which happened on
+/// 28 November 2026 when these were added to the base config). Each is a
+/// path and, for a group of settings, the keys a swept group may hold.
+pub const OPTIONAL_SETTINGS: &[(&str, &[&str])] = &[
+    (
+        "regime",
+        &[
+            "trend_window",
+            "trend_min_pct",
+            "trend_max_pct",
+            "chop_window",
+            "min_efficiency",
+            "max_efficiency",
+            "band_window",
+            "band_min",
+            "band_max",
+        ],
+    ),
+    ("exit.trend_min_pct", &[]),
+    ("exit.trend_max_pct", &[]),
+    ("agent.mandate", &[]),
+];
+
+/// Whether `dotted` is an optional setting, or one key of an optional group;
+/// for a whole group, its swept values must be groups of its known keys.
+fn check_optional(dotted: &str, values: &[Value]) -> Option<Result<()>> {
+    for (path, keys) in OPTIONAL_SETTINGS {
+        if dotted == *path {
+            if keys.is_empty() {
+                return Some(Ok(()));
+            }
+            for value in values {
+                if value.is_null() {
+                    continue;
+                }
+                let Some(map) = value.as_mapping() else {
+                    return Some(Err(anyhow!(
+                        "sweep setting `{dotted}` is a group of settings; give each value as \
+                         {{key: value}} with keys among {}",
+                        keys.join(", ")
+                    )));
+                };
+                for key in map.keys() {
+                    let key = key.as_str().unwrap_or_default();
+                    if !keys.contains(&key) {
+                        let nearest = nearest(key, keys);
+                        return Some(Err(anyhow!(
+                            "sweep setting `{dotted}` has no `{key}`{}; its settings are {}",
+                            if nearest.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (nearest: {})", nearest.join(", "))
+                            },
+                            keys.join(", ")
+                        )));
+                    }
+                }
+            }
+            return Some(Ok(()));
+        }
+        if let Some(key) = dotted
+            .strip_prefix(path)
+            .and_then(|rest| rest.strip_prefix('.'))
+        {
+            if keys.contains(&key) {
+                return Some(Ok(()));
+            }
+            if !keys.is_empty() {
+                return Some(Err(anyhow!(
+                    "sweep setting `{dotted}`: `{path}` has no `{key}`; its settings are {}",
+                    keys.join(", ")
+                )));
+            }
+        }
+    }
+    None
 }
 
 /// Refuses a sweep path the strategy does not have. Setting it would add a
@@ -412,6 +498,75 @@ fn display_value(v: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo_runs(name: &str) -> Vec<ResolvedRun> {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        resolve_experiment(
+            &repo.join("experiments").join(name),
+            &RunOverrides::default(),
+        )
+        .unwrap()
+    }
+
+    /// The forward runs live on the node keep their identity whatever is
+    /// added to the code: the Codex runner refuses to decide a run whose
+    /// resolved settings changed, and a Claude panel's results are kept by
+    /// run id. A change here is a decision to restart those runs, not a
+    /// test to update.
+    #[test]
+    fn the_live_forward_runs_keep_their_identity() {
+        let codex = repo_runs("agent-codex-panel-forward.yml");
+        assert_eq!(
+            codex[0].config_hash,
+            "9244dc0d430e86ee228ba7f1523e1c8abfc9d7e266b4647f7bf9982773f4f742",
+            "solo"
+        );
+        assert_eq!(
+            codex[1].config_hash,
+            "05854153a50049cf0eba94d3a4cdf86b373030726e19a32df1901417426693a5",
+            "reader"
+        );
+        let claude: Vec<String> = repo_runs("agent-panel-forward.yml")
+            .into_iter()
+            .map(|r| r.run_id)
+            .collect();
+        assert_eq!(
+            claude,
+            [
+                "agent-panel-forward-000-ee379e87",
+                "agent-panel-forward-001-efb9a7b4"
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_settings_may_be_swept_though_the_base_config_leaves_them_out() {
+        // The regime family sweeps whole groups of them.
+        let runs = repo_runs("forward-regime-usdc.yml");
+        assert_eq!(runs.len(), 14);
+        assert!(runs[1].config_yaml.contains("trend_min_pct: 10"));
+        // Each key of a group, or the group whole with known keys.
+        assert!(check_optional("regime.trend_min_pct", &[]).unwrap().is_ok());
+        assert!(check_optional("exit.trend_max_pct", &[]).unwrap().is_ok());
+        assert!(check_optional("agent.mandate", &[]).unwrap().is_ok());
+        let group: Value = serde_yaml::from_str("{trend_window: 30d, band_min: 0.5}").unwrap();
+        assert!(check_optional("regime", &[group, Value::Null])
+            .unwrap()
+            .is_ok());
+        // A misspelt key is refused with what it may have meant.
+        let typo: Value = serde_yaml::from_str("{trend_min_pc: 10}").unwrap();
+        let refused = check_optional("regime", &[typo])
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("nearest: trend_min_pct"), "{refused}");
+        assert!(check_optional("regime.trend_min_pc", &[]).unwrap().is_err());
+        assert!(check_optional("regime", &[Value::from(3)])
+            .unwrap()
+            .is_err());
+        // Anything else is checked against the base config as before.
+        assert!(check_optional("entry.width_ticks", &[]).is_none());
+    }
     use crate::config::PatienceMode;
 
     const BASE: &str = r#"
