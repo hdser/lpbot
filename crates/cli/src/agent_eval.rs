@@ -693,9 +693,10 @@ pub fn evaluate(
             }));
         }
     }
+    // Replaced whole: a peer reading the scores now sees the old ones or
+    // the new ones, never a file that is missing for a moment.
     let written = agent_log::scores_path(&who.decisions);
-    let _ = std::fs::remove_file(&written);
-    agent_log::append_records(&written, &records)?;
+    agent_log::write_records(&written, &records)?;
     Ok(Report {
         name: who.name.clone(),
         model: who.model.clone(),

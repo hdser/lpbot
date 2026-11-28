@@ -873,8 +873,156 @@ pub fn summary(panel: &[Identity]) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::process::{Child, Command, Stdio};
+
+    /// Runs one ignored test of this binary as a separate process: the way
+    /// a Claude session and the Codex runner share the board on the node.
+    pub(crate) fn child(test: &str, envs: &[(&str, String)]) -> Child {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([test, "--exact", "--ignored", "--test-threads", "1"]);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "a writer process of many_processes_writing_one_board_lose_nothing"]
+    fn board_writer_child() {
+        let Ok(path) = std::env::var("LPBOT_STRESS_BOARD") else {
+            return;
+        };
+        let writer: u64 = std::env::var("LPBOT_STRESS_WRITER")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let count: u64 = std::env::var("LPBOT_STRESS_COUNT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        for i in 0..count {
+            append(Path::new(&path), |board| {
+                Ok(
+                    json!({"kind": "ask", "writer": writer, "i": i, "n": board.len() + 1,
+                          "pad": "x".repeat(2_000)}),
+                )
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "a writer that dies holding the lock, for a_writer_killed_mid_line"]
+    fn board_dying_child() {
+        let Ok(path) = std::env::var("LPBOT_STRESS_BOARD") else {
+            return;
+        };
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.lock().unwrap();
+        file.write_all(br#"{"kind":"ask","half":"#).unwrap();
+        file.sync_data().unwrap();
+        std::fs::write(format!("{path}.ready"), "").unwrap();
+        // Holds the lock, mid-line, until it is killed.
+        std::thread::sleep(Duration::from_secs(600));
+    }
+
+    #[test]
+    fn many_processes_writing_one_board_lose_nothing_and_never_interleave() {
+        let dir = temp("stress");
+        let path = dir.join("board.jsonl");
+        let (writers, count) = (6u64, 30u64);
+        let mut children: Vec<Child> = (0..writers)
+            .map(|w| {
+                child(
+                    "agent_board::tests::board_writer_child",
+                    &[
+                        ("LPBOT_STRESS_BOARD", path.display().to_string()),
+                        ("LPBOT_STRESS_WRITER", w.to_string()),
+                        ("LPBOT_STRESS_COUNT", count.to_string()),
+                    ],
+                )
+            })
+            .collect();
+        // Read while they write: every read is whole and numbered in order,
+        // so no record was half-written or numbered by two writers at once.
+        let mut reads = 0;
+        loop {
+            let board = read_board(&path).unwrap();
+            for (k, record) in board.iter().enumerate() {
+                assert_eq!(record["n"].as_u64(), Some(k as u64 + 1), "read {reads}");
+            }
+            reads += 1;
+            if children.iter_mut().all(|c| c.try_wait().unwrap().is_some()) {
+                break;
+            }
+        }
+        for mut c in children {
+            assert!(c.wait().unwrap().success(), "a writer failed");
+        }
+        let board = read_board(&path).unwrap();
+        assert_eq!(board.len() as u64, writers * count, "nothing lost");
+        for w in 0..writers {
+            let mine: Vec<u64> = board
+                .iter()
+                .filter(|r| r["writer"] == w)
+                .map(|r| r["i"].as_u64().unwrap())
+                .collect();
+            assert_eq!(mine, (0..count).collect::<Vec<_>>(), "writer {w} in order");
+        }
+        assert!(reads > 1, "the board was read while it was written");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_writer_killed_mid_line_releases_the_lock_and_its_half_line_is_dropped() {
+        let dir = temp("killed");
+        let path = dir.join("board.jsonl");
+        append(&path, |_| Ok(json!({"kind": "ask", "n": 1}))).unwrap();
+        let mut dying = child(
+            "agent_board::tests::board_dying_child",
+            &[("LPBOT_STRESS_BOARD", path.display().to_string())],
+        );
+        let ready = format!("{}.ready", path.display());
+        for _ in 0..200 {
+            if Path::new(&ready).exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            Path::new(&ready).exists(),
+            "the dying writer never got the lock"
+        );
+        dying.kill().unwrap();
+        dying.wait().unwrap();
+        // The half line is not a record, and the next writer is not blocked.
+        assert_eq!(read_board(&path).unwrap().len(), 1);
+        let (sent, got) = std::sync::mpsc::channel();
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let written = append(&target, |board| {
+                Ok(json!({"kind": "ask", "n": board.len() + 1}))
+            });
+            sent.send(written.is_ok()).unwrap();
+        });
+        assert_eq!(
+            got.recv_timeout(Duration::from_secs(20)),
+            Ok(true),
+            "the lock of a killed writer was released"
+        );
+        let board = read_board(&path).unwrap();
+        assert_eq!(board.len(), 2);
+        assert_eq!(board[1]["n"], 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("half"), "{text}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn temp(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lpbot-board-{label}-{}", std::process::id()));

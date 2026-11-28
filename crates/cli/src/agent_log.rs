@@ -451,8 +451,13 @@ pub fn read_records(path: &Path) -> Result<Vec<Value>> {
         .collect()
 }
 
-/// Appends records to a shared log file, one JSON object a line.
+/// Appends records to a shared log file, one JSON object a line. The file
+/// is replaced whole (written aside, synced, renamed), so a reader in
+/// another process sees it before or after, never in between; and the
+/// read-modify-write holds an exclusive lock on `<file>.lock`, so two
+/// writers never lose each other's records.
 pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
+    let _writer = crate::agent_lock::exclusive(&crate::agent_lock::sibling(path, ".lock"), false)?;
     let mut content = crate::agent_lock::read_optional(path)?;
     if !content.is_empty() && !content.ends_with('\n') {
         anyhow::bail!("shared log has an unterminated final record; inspect it before appending");
@@ -463,6 +468,18 @@ pub fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    crate::agent_lock::atomic(path, content.as_bytes())
+}
+
+/// Replaces a shared log file with `records`, whole: a reader sees the old
+/// records or the new ones, never none in between.
+pub fn write_records(path: &Path, records: &[Value]) -> Result<()> {
+    let _writer = crate::agent_lock::exclusive(&crate::agent_lock::sibling(path, ".lock"), false)?;
+    let mut content = String::new();
+    for record in records {
+        content.push_str(&record.to_string());
+        content.push('\n');
     }
     crate::agent_lock::atomic(path, content.as_bytes())
 }
@@ -478,6 +495,98 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stress_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lpbot-records-{label}-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    #[ignore = "a writer process of records_written_by_many_processes_are_all_kept"]
+    fn records_writer_child() {
+        let Ok(path) = std::env::var("LPBOT_STRESS_RECORDS") else {
+            return;
+        };
+        let writer: u64 = std::env::var("LPBOT_STRESS_WRITER")
+            .unwrap()
+            .parse()
+            .unwrap();
+        for i in 0..25u64 {
+            append_records(
+                Path::new(&path),
+                &[json!({"kind": "look", "writer": writer, "i": i, "as_of": i})],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn records_written_by_many_processes_are_all_kept_and_reads_are_always_whole() {
+        let dir = stress_dir("many");
+        let path = dir.join("a.log.jsonl");
+        let mut children: Vec<_> = (0..5u64)
+            .map(|w| {
+                crate::agent_board::tests::child(
+                    "agent_log::tests::records_writer_child",
+                    &[
+                        ("LPBOT_STRESS_RECORDS", path.display().to_string()),
+                        ("LPBOT_STRESS_WRITER", w.to_string()),
+                    ],
+                )
+            })
+            .collect();
+        let mut seen = 0;
+        loop {
+            // Never a half file and never fewer records than before.
+            let now = read_records(&path).unwrap().len();
+            assert!(now >= seen, "records went from {seen} to {now}");
+            seen = now;
+            if children.iter_mut().all(|c| c.try_wait().unwrap().is_some()) {
+                break;
+            }
+        }
+        for mut c in children {
+            assert!(c.wait().unwrap().success());
+        }
+        assert_eq!(read_records(&path).unwrap().len(), 5 * 25, "no record lost");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scores_replaced_while_a_peer_reads_are_never_missing() {
+        let dir = stress_dir("scores");
+        let path = dir.join("a.eval.jsonl");
+        let scores = |n: u64| -> Vec<Value> {
+            (0..20)
+                .map(|i| json!({"kind": "eval", "n": n, "i": i}))
+                .collect()
+        };
+        write_records(&path, &scores(0)).unwrap();
+        let reader_path = path.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let reader = std::thread::spawn(move || {
+            let mut reads = 0;
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                let read = read_records(&reader_path).unwrap();
+                assert_eq!(read.len(), 20, "a peer saw {} scores", read.len());
+                reads += 1;
+            }
+            reads
+        });
+        for n in 1..300 {
+            write_records(&path, &scores(n)).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.join().unwrap() > 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use lpbot_sim::agent::{PositionView, ScaleView};
 
     fn strategy(agent: &str) -> StrategyConfig {

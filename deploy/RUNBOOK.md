@@ -225,6 +225,8 @@ The agent list `data/agents/agents.yml` (copy `deploy/agents/agents.example.yml`
 
 Under each agent that needs someone, `make agents` prints what to do, with the commands; the `Agents` dashboard and the Overview's Needs attention show the same sentence. It comes from `agent_status.what_to_do`, which the status writes beside the detail.
 
+**A decision committed but not logged.** If a `decide` died between committing the decision and writing the logs (the Codex runner then stops with `committed_without_complete_audit`), `target/release/lpbot agent next <experiment> --agent <name>` finishes it: it writes the reasoning and the shared record from `<decisions>.committing.json`, once, and the look stops waiting. Then resume as usual. Leave the `.committing.json` file alone; the command removes it.
+
 ## When something is red
 
 The Overview, the first page Grafana opens, shows the node, the watcher and the agents. Each row here is one thing it can show red, what it means and what to do, on the node machine in `~/lpbot`. Sudo is the owner's.
