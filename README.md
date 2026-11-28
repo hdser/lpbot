@@ -12,7 +12,7 @@ Backtests, and the pools followed live. The bot reads pools from a node, replays
 | --- | --- |
 | One-command setup of the node and services (`make up`) | Paper mode |
 | Experiment files: base config, overrides, sweeps, config hashing | Differential test of the pool math against a mainnet fork |
-| Run-input checks (capital and loss limit are required) | Live trading (`lpbot live`) |
+| Run-input checks (capital and loss limit are required) | Live trading through the owner's Safe (`lpbot live` runs on a local fork only) |
 | Uniswap v3 pool math, checked against the reference test vectors | The Safe roles policy as code, and its fork test |
 | Pool-state replica: mints, burns, swaps and exact replay of swap events | Watchdog |
 | Chain access: JSON-RPC client, chunked log fetching, pool snapshots, discovery | Scoring decisions against the options not taken |
@@ -23,6 +23,7 @@ Backtests, and the pools followed live. The bot reads pools from a node, replays
 | The keeper's signer (`lpbot signer`), the executor's journal, its submitter (nonce, replacement of a stuck transaction within the gas cap) and reconciliation (the position read back after a transaction) | |
 | Risk checks (width, price gaps, swap impact, slippage, gas, actions per day, node lag, replica against the chain, sleeve caps) and the pause flag (`lpbot pause`, `exit-all`, `resume`) | |
 | `lpbot select list`, `approve` and `check`, and the ladder every night (`deploy/selection/nightly.sh`) | |
+| `lpbot live` on a local fork: the engine's actions carried out on the chain, checked, journaled and read back; `lpbot watch-safe`: alerts on value leaving the Safe or its permissions changing | |
 | Backfill: pool history into Parquet, one file per pool and day, with a replay check (`lpbot backfill --verify`) | |
 | Daily update of the stored history and gas prices from where the store ends (`lpbot backfill --resume`, `deploy/history/daily.sh` from cron); run from the laptop against the node, not yet in the node's crontab | |
 | Fee check: the replica's fees against what real positions collected, confirmed with the node's position records (`lpbot verify-fees`) | |

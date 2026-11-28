@@ -26,6 +26,7 @@ mod demo_cmd;
 mod fees_cmd;
 mod gas_history_cmd;
 mod gates_cmd;
+mod live_cmd;
 mod load_cmd;
 mod load_looks_cmd;
 mod lp_positions_cmd;
@@ -39,6 +40,7 @@ mod supervisor_list;
 mod supervisor_procs;
 mod supervisor_status;
 mod watch_cmd;
+mod watch_safe_cmd;
 mod zones_cmd;
 
 use std::path::PathBuf;
@@ -137,6 +139,14 @@ enum Command {
     /// positions: the same engine as a backtest, fed each block as it comes,
     /// checked against a replay of the same blocks. Runs until stopped.
     Paper(PaperArgs),
+    /// Watch the Safe from the node: any token leaving it except into a
+    /// pool it trades, any approval to a stranger, the position NFT leaving,
+    /// and any change to the Safe or its roles modifier.
+    WatchSafe(WatchSafeArgs),
+    /// Follow a forward experiment at the head as paper mode does, and carry
+    /// out each of the engine's actions on the chain: on a local fork with
+    /// --test-account, or through the owner's Safe and roles modifier.
+    Live(LiveArgs),
     /// Hold new entries: set the pause flag. Open positions stay under their
     /// own rules.
     Pause(PauseArgs),
@@ -856,6 +866,103 @@ struct PaperArgs {
 }
 
 #[derive(Args)]
+struct WatchSafeArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// The owner's Safe.
+    #[arg(long)]
+    safe: String,
+    /// Its Zodiac Roles modifier.
+    #[arg(long)]
+    roles: String,
+    /// First block to read. Defaults to the head.
+    #[arg(long)]
+    from_block: Option<u64>,
+    /// Data folder whose stored pools are the ones tokens may go to.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    #[arg(long, default_value = "30s")]
+    every: String,
+    #[arg(long)]
+    steps: Option<u32>,
+    /// Where the alerts are appended, one JSON line each.
+    #[arg(long, default_value = "logs/safe-alerts.jsonl")]
+    alerts: PathBuf,
+}
+
+#[derive(Args)]
+struct LiveArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    /// Only this run of the experiment.
+    #[arg(long)]
+    run: Option<String>,
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder with the stored history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// The node the transactions go to, and the chain is read back from.
+    #[arg(long)]
+    rpc: String,
+    /// The node the run's history is caught up from. Defaults to LPBOT_RPC,
+    /// then the config's local node.
+    #[arg(long)]
+    data_rpc: Option<String>,
+    /// Anvil's development account stands in for the Safe: a local fork
+    /// (chain id 31337) only.
+    #[arg(long)]
+    test_account: bool,
+    /// The owner's Safe.
+    #[arg(long)]
+    safe: Option<String>,
+    /// The Safe's Zodiac Roles v2.1.1 modifier.
+    #[arg(long)]
+    roles: Option<String>,
+    /// The keeper's role key, 32 bytes in hex.
+    #[arg(long)]
+    role_key: Option<String>,
+    /// The keeper's address.
+    #[arg(long)]
+    keeper: Option<String>,
+    /// The signer's socket (`lpbot signer`).
+    #[arg(long, default_value = "data/signer/keeper.sock")]
+    signer: PathBuf,
+    /// Blocks on top of an action's block before it is carried out.
+    #[arg(long, default_value_t = 2)]
+    confirmations: u64,
+    #[arg(long, default_value = "30s")]
+    every: String,
+    #[arg(long)]
+    steps: Option<u32>,
+    #[arg(long, default_value = "data/pause.json")]
+    pause_flag: PathBuf,
+    /// The live run's journal and state. Defaults to data/live/<experiment>.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// The simulated twin's tables. Defaults to runs/live/<experiment>.
+    #[arg(long)]
+    results_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 60)]
+    min_width_ticks: i32,
+    #[arg(long, default_value_t = 3_000)]
+    slippage_ppm: u32,
+    #[arg(long, default_value_t = 10_000)]
+    max_slippage_ppm: u32,
+    #[arg(long, default_value_t = 10_000)]
+    price_limit_ppm: u32,
+    #[arg(long, default_value_t = 5_000)]
+    max_swap_impact_ppm: u32,
+    #[arg(long, default_value_t = 30_000)]
+    exit_max_swap_impact_ppm: u32,
+    #[arg(long, default_value_t = 6)]
+    max_actions_per_day: usize,
+    /// The highest fee a gas an entry pays, in gwei; exits pay up to five times it.
+    #[arg(long, default_value_t = 30.0)]
+    max_gas_gwei: f64,
+}
+
+#[derive(Args)]
 struct PauseArgs {
     /// Why, for the record.
     #[arg(long)]
@@ -1007,7 +1114,7 @@ fn real_main() -> Result<()> {
                 .rpc
                 .clone()
                 .or_else(|| std::env::var("LPBOT_RPC").ok().filter(|v| !v.is_empty()));
-            paper_cmd::follow(&paper_cmd::PaperArgs {
+            paper_cmd::follow(&mut paper_cmd::PaperArgs {
                 runs: &runs,
                 root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
                 results: &results,
@@ -1018,6 +1125,117 @@ fn real_main() -> Result<()> {
                 check_every: args.check_every,
                 steps: args.steps,
                 pause: &pause,
+                on_head: None,
+            })
+        }
+        Command::WatchSafe(args) => {
+            let chain = chain_cmd::connect(
+                &args.chain.config,
+                &args.chain.chain,
+                args.chain.rpc.as_deref(),
+            )?;
+            let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let pools = lpbot_data::lake::stored_pools(&root, &chain.name)?;
+            if pools.is_empty() {
+                anyhow::bail!(
+                    "no pools are stored under {}; give --data-dir the stored history, whose \
+                     pools are the ones the Safe may pay",
+                    root.display()
+                );
+            }
+            let every = run_cmd::parse_duration(&args.every)
+                .filter(|s| *s > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--every {}: give a duration such as 30s", args.every)
+                })?;
+            let allowed = lpbot_exec::monitor::Allowed {
+                safe: chain_cmd::checked_address("safe", &args.safe)?,
+                roles: chain_cmd::checked_address("roles", &args.roles)?,
+                position_manager: live_cmd::MAINNET.position_manager,
+                spenders: vec![live_cmd::MAINNET.position_manager, live_cmd::MAINNET.router],
+                recipients: pools,
+                tokens: chain.tokens.values().map(|(a, _)| *a).collect(),
+            };
+            watch_safe_cmd::watch(
+                &chain.client,
+                &allowed,
+                args.from_block,
+                std::time::Duration::from_secs(every),
+                args.steps,
+                &args.alerts,
+            )
+        }
+        Command::Live(args) => {
+            let mut runs = resolve(&args.experiment)?;
+            if let Some(id) = &args.run {
+                runs.retain(|r| &r.run_id == id);
+                if runs.is_empty() {
+                    anyhow::bail!("the experiment has no run {id}; `lpbot plan` lists them");
+                }
+            }
+            print_runs(&runs, args.experiment.show_config);
+            let experiment = runs
+                .first()
+                .map(|r| r.experiment.clone())
+                .ok_or_else(|| anyhow::anyhow!("the experiment has no runs"))?;
+            let every = run_cmd::parse_duration(&args.every)
+                .filter(|s| *s > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--every {}: give a duration such as 30s", args.every)
+                })?;
+            let custody = if args.test_account {
+                live_cmd::CustodyArg::TestAccount
+            } else {
+                let need = |value: &Option<String>, flag: &str| {
+                    value.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--{flag} is needed for the Safe; or --test-account on a local fork"
+                        )
+                    })
+                };
+                live_cmd::CustodyArg::Roles {
+                    safe: chain_cmd::checked_address("safe", &need(&args.safe, "safe")?)?,
+                    roles: chain_cmd::checked_address("roles", &need(&args.roles, "roles")?)?,
+                    role_key: need(&args.role_key, "role-key")?
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("--role-key: {e}"))?,
+                    keeper: chain_cmd::checked_address("keeper", &need(&args.keeper, "keeper")?)?,
+                    socket: args.signer.clone(),
+                }
+            };
+            let pause = lpbot_risk::pause::PauseFlag::new(&args.pause_flag);
+            live_cmd::live(&live_cmd::LiveArgs {
+                runs: &runs,
+                root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                results: &args
+                    .results_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("runs/live").join(&experiment)),
+                chain: &args.chain,
+                rpc: &args.rpc,
+                data_rpc: args.data_rpc.as_deref().or(std::env::var("LPBOT_RPC")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .as_deref()),
+                custody,
+                confirmations: args.confirmations,
+                every: std::time::Duration::from_secs(every),
+                steps: args.steps,
+                pause: &pause,
+                state_dir: args
+                    .state_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("data/live").join(&experiment)),
+                limits: lpbot_exec::trader::Limits {
+                    min_width_ticks: args.min_width_ticks,
+                    slippage_ppm: args.slippage_ppm,
+                    max_slippage_ppm: args.max_slippage_ppm,
+                    price_limit_ppm: args.price_limit_ppm,
+                    max_swap_impact_ppm: args.max_swap_impact_ppm,
+                    exit_max_swap_impact_ppm: args.exit_max_swap_impact_ppm,
+                    max_actions_per_day: args.max_actions_per_day,
+                },
+                gas_cap_wei: (args.max_gas_gwei * 1e9) as u128,
             })
         }
         Command::Pause(args) => pause(&args, false),

@@ -304,6 +304,14 @@ target/release/lpbot resume
 
 `pause` holds new entries; `exit-all` also asks every position to be taken out; both write `data/pause.json`, and `resume` clears it. A flag that cannot be read counts as paused. Paper mode only reports it; the live executor, when it is built, acts on it at its next step.
 
+## Live mode, on a fork only for now
+
+`lpbot live <experiment> --run <id> --rpc <where transactions go> --data-rpc <the node> --test-account` follows the run as paper mode does and carries out each of the engine's new actions on the chain: on a local fork only (`anvil --fork-url http://127.0.0.1:8545 --chain-id 31337`), with Anvil's public development account standing in for the Safe. Its journal and state are in `data/live/<experiment>/`; it refuses to start while the journal holds an action left open. With the owner's Safe (`--safe`, `--roles`, `--role-key`, `--keeper`, `--signer`) it first checks that the roles modifier runs Roles v2.1.1, is the Safe's only module and has only plain accounts as members. Not to be run against mainnet before M7 (`docs/PLAN.md`).
+
+## Watching the Safe
+
+`lpbot watch-safe --safe <Safe> --roles <modifier>` reads the node's logs every 30 s and writes an alert to `logs/safe-alerts.jsonl` and its output for any token leaving the Safe except into a pool it trades, any approval to anyone but the position manager or router, the position NFT leaving, and any change to the Safe's owners, modules or guards or to the roles modifier. A `CRITICAL` line is the November 2026 pattern: pause (`lpbot pause`), and the owners remove the keeper's role at once. It runs from the first funded day, in `tmux`; where its alerts go beyond the file is still the owner's choice.
+
 ## The signer
 
 `lpbot signer --keystore <file> --roles-module <address>` is the keeper's signer: it asks for the keystore's password at its own terminal, holds the key in memory only, and on `data/signer/keeper.sock` (mode 0600) signs only calls to the roles module on chain 1, with no value, within `--max-gas` and `--max-fee-gwei`; every request is a line on its output, never key material. It is the owner's to start, in `tmux`, and only from M7 (`docs/PLAN.md`): nothing sends through it before then. Creating the keystore and typing its password are the owner's steps; a session never does either.

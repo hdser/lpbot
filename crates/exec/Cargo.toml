@@ -11,6 +11,7 @@ lpbot-core.workspace = true
 lpbot-venues.workspace = true
 lpbot-chain.workspace = true
 lpbot-signer.workspace = true
+lpbot-risk.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
