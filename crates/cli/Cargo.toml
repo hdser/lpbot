@@ -15,7 +15,6 @@ lpbot-core.workspace = true
 lpbot-chain.workspace = true
 lpbot-data.workspace = true
 lpbot-risk.workspace = true
-lpbot-exec.workspace = true
 lpbot-signer.workspace = true
 lpbot-sim.workspace = true
 lpbot-strategy.workspace = true
