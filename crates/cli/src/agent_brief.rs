@@ -12,12 +12,35 @@ use lpbot_core::experiment::ResolvedRun;
 use crate::agent_log::Identity;
 use crate::run_cmd::run_window;
 
-/// A way of trading an agent is told to follow (`agent.mandate`), so that
-/// a panel can set the same model on different mandates, or different
-/// models on the same one. `open`, or none, leaves the agent to itself.
-pub const MANDATES: [&str; 5] = ["open", "trend", "range", "fade", "patient"];
+/// The mandates: ways of trading an agent is told to follow
+/// (`agent.mandate`), so that a panel can set the same model on different
+/// mandates, or different models on the same one. Each is a name and the
+/// text the agent reads, kept as a file in `crates/cli/mandates/` so that
+/// it can be read and changed without reading code; the binary carries the
+/// text it was built with, so a run's wording cannot change under it.
+/// `trend-*` are wordings of the same idea, to be compared.
+const MANDATE_TEXTS: [(&str, &str); 8] = [
+    ("trend", include_str!("../mandates/trend.md")),
+    ("trend-v1", include_str!("../mandates/trend-v1.md")),
+    ("trend-stop", include_str!("../mandates/trend-stop.md")),
+    ("trend-steps", include_str!("../mandates/trend-steps.md")),
+    ("trend-why", include_str!("../mandates/trend-why.md")),
+    ("range", include_str!("../mandates/range.md")),
+    ("fade", include_str!("../mandates/fade.md")),
+    ("patient", include_str!("../mandates/patient.md")),
+];
 
-/// The mandate of a run's agent, checked against `MANDATES`. `None` for
+/// The mandate that is none: the agent is left to itself.
+pub const OPEN: &str = "open";
+
+/// Every name `agent.mandate` takes, `open` first.
+pub fn mandates() -> Vec<&'static str> {
+    std::iter::once(OPEN)
+        .chain(MANDATE_TEXTS.iter().map(|(name, _)| *name))
+        .collect()
+}
+
+/// The mandate of a run's agent, checked against `mandates()`. `None` for
 /// `open` or none.
 pub fn mandate(strategy: &StrategyConfig) -> Result<Option<&'static str>> {
     let value = strategy
@@ -28,104 +51,64 @@ pub fn mandate(strategy: &StrategyConfig) -> Result<Option<&'static str>> {
         None | Some(serde_yaml::Value::Null) => Ok(None),
         Some(value) => {
             let name = value.as_str().unwrap_or_default().trim();
-            match MANDATES.iter().find(|known| **known == name) {
-                Some(&"open") => Ok(None),
-                Some(known) => Ok(Some(known)),
+            if name == OPEN {
+                return Ok(None);
+            }
+            match MANDATE_TEXTS.iter().find(|(known, _)| *known == name) {
+                Some((known, _)) => Ok(Some(known)),
                 None => bail!(
-                    "agent.mandate `{}` is not one of {}",
+                    "agent.mandate `{}` is not one of {}; each is a file in crates/cli/mandates/",
                     value.as_str().unwrap_or("that"),
-                    MANDATES.join(", ")
+                    mandates().join(", ")
                 ),
             }
         }
     }
 }
 
-/// What a mandate tells the agent, in terms of what a look shows. `dips`
-/// is whether the value token is the dollar: its one-sided ranges then sit
-/// below the price and buy the volatile token as it falls; otherwise they
-/// sit above and sell it as it rises.
+/// What a mandate tells the agent, in terms of what a look shows: its file,
+/// with the words in braces written for the side the value token trades.
+/// `dips` is whether the value token is the dollar: its one-sided ranges
+/// then sit below the price and buy the volatile token as it falls;
+/// otherwise they sit above and sell it as it rises.
 fn mandate_text(name: &str, value: &str, dips: bool) -> String {
-    let (favoured, against, beyond_zero, entry_move, one_sided) = if dips {
-        (
-            "rising or holding",
-            "falling",
-            "below zero",
-            "a fall",
-            format!("below the price, buying the volatile token with {value} as it dips"),
-        )
+    let text = MANDATE_TEXTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, text)| *text)
+        .unwrap_or_default();
+    let words: [(&str, String); 7] = if dips {
+        [
+            ("{favoured}", "rising or holding".into()),
+            ("{against}", "falling".into()),
+            ("{beyond_zero}", "below zero".into()),
+            ("{entry_move}", "a fall".into()),
+            ("{side}", "below".into()),
+            (
+                "{one_sided}",
+                format!("below the price, buying the volatile token with {value} as it dips"),
+            ),
+            ("{value}", value.into()),
+        ]
     } else {
-        (
-            "falling or holding",
-            "rising",
-            "above zero",
-            "a rise",
-            format!("above the price, selling {value} as it rises"),
-        )
+        [
+            ("{favoured}", "falling or holding".into()),
+            ("{against}", "rising".into()),
+            ("{beyond_zero}", "above zero".into()),
+            ("{entry_move}", "a rise".into()),
+            ("{side}", "above".into()),
+            (
+                "{one_sided}",
+                format!("above the price, selling {value} as it rises"),
+            ),
+            ("{value}", value.into()),
+        ]
     };
-    match name {
-        "trend" => format!(
-            "Long timeframe first, then the short one. Read every look from the bottom of the \
-             table up.\n\n\
-             1. The 30- and 90-day lines are the trend: how far price moved over them and where \
-             it sits between their highs and lows. Your ranges sit {one_sided}, so they are \
-             paid when the long timeframe is {favoured}, and left holding the wrong token when \
-             it is {against}. While the 30- and 90-day lines are clearly {against}, stay out.\n\
-             2. The day and week lines say whether price is going back and forth or running. \
-             Prefer a market that goes back and forth inside the long trend.\n\
-             3. The 15-minute to 4-hour lines only time the entry: enter after {entry_move} \
-             against the long trend has slowed, not while it runs. A range next to the price \
-             is filled by an ordinary day: make it at least three times the day line's \
-             `vol/day` wide.\n\n\
-             What clearly {against} means. A long line's `change` compares the price now with \
-             one price 30 or 90 days ago, so a single day's move shifts it by as much as that \
-             day moved: a 30-day change that crosses zero within a day is a day's move, not a \
-             turn, and so is one new 30-day high or low. The long timeframe is clearly \
-             {against} only when the 90-day change is {beyond_zero}, or the 30-day change is \
-             {beyond_zero} by more than three times the 30-day line's `vol/day`. Anything less \
-             is a pullback inside the trend, which is what your range is placed for.\n\n\
-             With a position open:\n\
-             - A range that price has moved into or through has traded {value} for the other \
-             token, as it was placed to do. Closing it there swaps back at a worse price than \
-             it traded at and leaves you to enter again after the price has come back. Hold \
-             it through the pullback. Give it up only when the long timeframe is clearly \
-             {against} by the test above, never for an hour's or a day's move; the run's own \
-             limits stop a loss that grows.\n\
-             - Exit when it has made its round trip: back wholly in {value} with its fees, \
-             after price went into the range and came out again.\n\
-             - Do not move a resting range after the price. Left behind, it costs nothing; a \
-             new range needs {entry_move} first.\n\n\
-             In every `--reasoning`, say what the long, the middle and the short timeframe \
-             each told you, and for the long one give the two figures of the test."
-        ),
-        "range" => format!(
-            "Provide liquidity only in a market that is going sideways. The week and the 30-day \
-             lines must show price going back and forth: a small change over them against the \
-             distance between their high and their low, with both visited. Place the range \
-             inside the band the 30 days held, {one_sided}, wide enough for the day's \
-             volatility, and leave it in place while price stays in that band. When price \
-             leaves the band, or the week turns into a run, exit and stay out until it is \
-             sideways again. Most looks in a running market should end in `stay_out`. In every \
-             `--reasoning`, give the band you see and why the market is or is not sideways."
-        ),
-        "fade" => format!(
-            "Stay out by default. Enter only after price has moved fast, several percent within \
-             hours on the 1-hour and 4-hour lines, and only as {entry_move}: a range \
-             {one_sided}, next to the price, a bet that the move stalls and comes back. One \
-             entry a move: after an exit, wait for a new one. Leave after about a day, or as \
-             soon as the position is back wholly in {value} with its fees. Look often enough \
-             to see a fast move, and expect most looks to end in `stay_out`. In every \
-             `--reasoning`, say how fast price moved and why you think it stalls."
-        ),
-        _ => format!(
-            "Few, wide and slow. Look once or twice a day. Enter rarely, in a range several \
-             days of volatility wide, {one_sided}, where the 30- and 90-day lines say price has \
-             turned before, and leave it for days. Do not move a range because price moved; \
-             exit only when the reason you entered no longer holds. Gas and swaps are paid on \
-             every change, so count them in. In every `--reasoning`, say what would make you \
-             exit."
-        ),
+    let mut text = text.trim_end().to_string();
+    for (word, written) in words {
+        text = text.replace(word, &written);
     }
+    text
 }
 
 /// The brief for agent `who` of the experiment at `experiment`; `others`
@@ -332,14 +315,36 @@ mod tests {
         assert_eq!(seen, ["fade", "range", "trend"]);
 
         // With the volatile token as the value token the ranges sit above.
-        for name in MANDATES {
+        // Every mandate is written for both sides, with no word left in
+        // braces and no file empty or the same as another.
+        let mut texts = Vec::new();
+        for (name, _) in MANDATE_TEXTS {
             let eth = mandate_text(name, "WETH", false);
             assert!(
                 eth.contains("above the price, selling WETH"),
                 "{name}: {eth}"
             );
             assert!(!eth.contains("USDC"), "{name}");
+            let usd = mandate_text(name, "USDC", true);
+            assert!(usd.contains("--reasoning"), "{name}: {usd}");
+            for text in [eth, usd] {
+                assert!(!text.contains('{') && !text.contains('}'), "{name}: {text}");
+                assert!(!text.contains("2026"), "{name}: no dates");
+                assert!(!texts.contains(&text), "{name} repeats another mandate");
+                texts.push(text);
+            }
         }
+        assert_eq!(mandates()[0], OPEN);
+        assert_eq!(mandates().len(), MANDATE_TEXTS.len() + 1);
+
+        // The wordings of the trend idea differ where they are meant to.
+        let usd = |name: &str| mandate_text(name, "USDC", true);
+        assert!(usd("trend-v1").contains("when the long timeframe turns"));
+        assert!(usd("trend-stop").contains("below the range's far edge by more than"));
+        assert!(!usd("trend").contains("far edge"));
+        assert!(usd("trend-steps").contains("C30 is below zero by more than 3 x V30"));
+        assert!(usd("trend-why").contains("the one that proves it wrong"));
+        assert!(mandate_text("trend-stop", "WETH", false).contains("above the range's far edge"));
         assert!(mandate_text("trend", "WETH", false).contains("clearly rising, stay out"));
         assert!(mandate_text("trend", "USDC", true).contains("clearly falling, stay out"));
 

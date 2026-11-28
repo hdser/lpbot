@@ -56,10 +56,32 @@ All three lost to holding dollars. The quarter was up 30% to 40% and the month a
 
 Both now did what the mandate says: ranges 4% to 9% wide entered after a fall had slowed, no range moved after the price, every exit a round trip, and the position held through the 6% day that had made all three sell. Read this as the wording being followed, not as a result. These are the five days the wording was written on, and they ended with the bounce: holding through is exactly what pays when price comes back and what loses most when it does not, with only the test and the run's loss limit behind it (20% in the practice file). The 30-day change reached −6.1% against a line of −7.1% at the low. The Sonnet agent did not run this time either (the safeguards again), so there is no third row. The agents' own notes: closing after a round trip of a few hundredths of a percent is churn, and five days are too short for a 90-day test to mean anything.
 
+**Five wordings of the trend mandate, on four weeks they were not written on** (28 November 2026; `agent-wording-a` to `-d`, USDC/WETH 0.05%, $10,000 in USDC, Haiku 5.5, each agent alone, about 40 looks a week). The wordings are files in `crates/cli/mandates/`: `trend-v1` (the first text, "give a position up when the long timeframe turns"), `trend` (the rewrite above), `trend-stop` (the rewrite, plus giving a filled range up once price is beyond its far edge by more than the range's width), `trend-steps` (the rewrite as a numbered procedure) and `trend-why` (how a range earns and loses, with the agent naming its own two exit conditions before each entry), beside a model with no mandate. The weeks were fixed by rule before any run, from the Monday-to-Sunday weeks of September and October 2026 other than the one the rewrite was made on: the largest rise (14 September, +6.6%), the smallest distance between high and low (28 September), the largest fall (5 October, −7.1%, low −11.4%) and the most negative 30-day change at its start (26 October, −13.4%). Result against holding dollars, with the largest drawdown where there was one:
+
+| Setup | Rise | Quiet | Fall | Month down | Sum |
+| --- | --- | --- | --- | --- | --- |
+| No mandate | 0.00% | 0.00% | 0.00% | 0.00% | 0.0% |
+| `trend-v1` | +1.56% (3.1%) | +0.37% | −5.72% (8.0%) | 0.00% | −3.8% |
+| `trend` | +1.19% (1.5%) | +0.10% | −2.92% (8.1%) | 0.00% | −1.6% |
+| `trend-stop` | +0.88% (0.7%) | −0.01% | +0.97% (2.9%) | 0.00% | +1.8% |
+| `trend-steps` | +0.91% (1.1%) | +0.35% | −4.09% (9.2%) | 0.00% | −2.8% |
+| `trend-why` | +2.29% (2.2%) | −0.02% | −2.69% (6.1%) | 0.00% | −0.4% |
+
+One run a cell, one model: this screens wordings, it does not rank them. What it shows:
+
+- **Without a mandate the model never traded:** 137 looks over four weeks, every one `stay_out`. A wording is what makes it provide liquidity at all.
+- **The test for a falling month works as written.** In the week that began with the month down 13% every wording stayed out at every look, the first text included, and missed nothing: the week ended lower after a spike.
+- **The falling week is the one that tells them apart, and it is one week.** The first text sold three filled ranges once the 30-day change dipped under zero and lost most, as on the days it was rewritten for. The rewrite did not sell, and carried an 8% drawdown instead: its test for a falling month never fires in a week's slide inside a rising quarter, so it has no exit for the case that costs most. The procedure followed the same rule most literally and lost more. The agent that named its own conditions got out after the range was run through, a look late.
+- **`trend-stop` did not win by its stop.** It entered two days later than the others, after the fall, and its stop never fired. Its figure says something about waiting for a fall to slow and nothing about the stop.
+- **In the rising and the quiet week every wording that entered made a little**, more the longer it left a range alone: one range held all week made +2.3%, three round trips +0.9%.
+
+What the agents found unclear, in most reports: "a fall has slowed" has no measure; a range's edges are printed in percent from the price now, so a range left alone seems to move from look to look; nothing says what to do with a resting range that price has left far above; "round trip" covers a touch of a few hundredths of a percent. The second is the look's wording, not the mandate's. A typo in the procedure ("show no a fall") ran in all four weeks and is fixed since.
+
 ### What follows
 
 - The regime gate that held up is slow: five to fifteen campaigns in eighteen months. The forward runs need months, not weeks, before the ladder's gates mean anything; earlier history would say more, sooner.
-- The rewritten `trend` mandate holds a filled range through a pullback. Whether that pays is a forward question: run it in the forward panel beside the frozen rules, with a loss limit the owner is willing to see reached, and on practice days it was not written on. The other mandates (none, range, fade, patient) have not run at all.
+- The next wording of the trend mandate: keep the test for a falling month, give a filled range that price has left an exit of its own (a distance or a time, in figures), say what "slowed" means, and say when a resting range is stale. Test it on weeks none of the five ran on, and on Opus as well as Haiku; do not tune it on these four. The other mandates (range, fade, patient) have not run at all.
+- Print a position's range in a frame that does not move with the price (how far price is from each edge, and which side it is on), since every wording was harder to follow for it.
 - The trend exit (`exit.trend_min_pct`) is built and tested and has not been swept on real history.
 - Regimes on other families: the wide one-sided ETH ranges of round 2, and the agents' own entries scored by the regime they were made in.
 

@@ -1,0 +1,38 @@
+# Wordings of the trend mandate side by side (docs/DESIGN.md, "Agent
+# setups"; the texts are the files in crates/cli/mandates/): one model, no
+# mandate and five wordings of the same idea, each agent deciding alone in a
+# folder of its own under data/agent/wording-b/ (not committed). One of four
+# files, a to d, each a week of stored history picked before any of them ran,
+# by rule, from the Monday-to-Sunday weeks of September and October 2026
+# other than the one the wording was written on (12 October): the largest
+# rise (a), the smallest distance between high and low (b), the largest fall
+# (c) and the most negative 30-day change at its start (d). This one is
+# the smallest distance between high and low. Stored history and one week: it screens
+# wordings a model misreads; it does not rank what makes money. The
+# experiment's name carries no date, because the run id is in the brief.
+#
+#   target/release/lpbot agent brief experiments/agent-wording-b.yml --agent w-trend
+#   target/release/lpbot agent next experiments/agent-wording-b.yml --agent w-trend
+#   target/release/lpbot agent evaluate experiments/agent-wording-b.yml --horizons next,1d
+#   target/release/lpbot run experiments/agent-wording-b.yml --results-dir runs/wording
+
+experiment: agent-wording-b
+base: config/mainnet.yml
+mode: backtest
+window: { from: 2026-09-28, to: 2026-10-04 }
+run: { capital_usd: 10000, loss_limit_pct: 20, autonomy: auto }
+strategy: eth-zone-roundtrip
+set:
+  sim.series_every: 15m
+sweep:
+  pool: ["0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"]   # USDC/WETH 0.05%
+  value_token: [USDC]
+  capital_share: [1.0]
+  signal_step: [5m]
+  agent:
+    - { name: w-open, model: claude-haiku-5-5, decisions: data/agent/wording-b/w-open/w-open.jsonl }
+    - { name: w-v1, model: claude-haiku-5-5, mandate: trend-v1, decisions: data/agent/wording-b/w-v1/w-v1.jsonl }
+    - { name: w-trend, model: claude-haiku-5-5, mandate: trend, decisions: data/agent/wording-b/w-trend/w-trend.jsonl }
+    - { name: w-stop, model: claude-haiku-5-5, mandate: trend-stop, decisions: data/agent/wording-b/w-stop/w-stop.jsonl }
+    - { name: w-steps, model: claude-haiku-5-5, mandate: trend-steps, decisions: data/agent/wording-b/w-steps/w-steps.jsonl }
+    - { name: w-why, model: claude-haiku-5-5, mandate: trend-why, decisions: data/agent/wording-b/w-why/w-why.jsonl }
