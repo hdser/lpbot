@@ -2449,3 +2449,173 @@ fn the_longest_regime_window_counts_only_gates_that_are_set() {
     };
     assert_eq!(band.longest_window(), 14 * DAY);
 }
+
+// --- the stream and the steps: the seam to the executor --------------------
+
+use crate::engine::Stream;
+
+/// The synthetic month of `a_simulated_month_runs_under_every_rule_and_adds_up`
+/// with every patience rule, as settings and history.
+fn month() -> (lpbot_data::synth::SynthHistory, Vec<Settings>) {
+    let config = SynthConfig {
+        days: 6,
+        swaps_per_day: 240,
+        ..Default::default()
+    };
+    let pool = lpbot_data::backfill::PoolRef {
+        address: alloy_primitives::Address::repeat_byte(1),
+        token0: alloy_primitives::Address::repeat_byte(2),
+        token1: alloy_primitives::Address::repeat_byte(3),
+    };
+    let history = generate(&config, pool).unwrap();
+    let base = Settings {
+        decimals0: 6,
+        capital: U256::from(5u128 * 10u128.pow(18)),
+        trade_from: config.start.start() + 2 * 86_400,
+        trade_to: config.start.start() + 6 * 86_400,
+        lookbacks: vec![DAY, 2 * DAY],
+        ..settings(FixedRule::Wait)
+    };
+    let all = [FixedRule::Wait, FixedRule::Flip, FixedRule::Close]
+        .into_iter()
+        .map(|rule| Settings {
+            policy: Policy::Fixed(rule),
+            ..base.clone()
+        })
+        .collect();
+    (history, all)
+}
+
+/// Feeds `events` to a stream, ending each block as a follower that knows
+/// the block is complete would, and stopping where the replay stops.
+fn feed(stream: &mut Stream<'_>, events: &[TimedEvent], trade_to: u64) {
+    for (i, event) in events.iter().enumerate() {
+        if event.time >= trade_to || stream.stopped() {
+            break;
+        }
+        stream.push(event).unwrap();
+        if events
+            .get(i + 1)
+            .is_none_or(|next| next.block != event.block)
+        {
+            stream.end_block().unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_stream_fed_block_by_block_decides_exactly_as_the_replay_does() {
+    let (history, all) = month();
+    for s in &all {
+        let replay = run(history.snapshot.state.clone(), &history.events, s).unwrap();
+        assert!(!replay.campaigns.is_empty() && !replay.steps.is_empty());
+
+        // Every block ended as it completes.
+        let mut stream = Stream::start(history.snapshot.state.clone(), s).unwrap();
+        feed(&mut stream, &history.events, s.trade_to);
+        assert_eq!(stream.finish().unwrap(), replay, "{:?}", s.policy);
+
+        // Half the history, then a copy fed the rest: the original kept
+        // only what was final, the copy went on, and both decide alike.
+        let half = history.events.len() / 2;
+        let cut = history.events[half].block;
+        let split = history.events.partition_point(|e| e.block < cut);
+        let mut base = Stream::start(history.snapshot.state.clone(), s).unwrap();
+        feed(&mut base, &history.events[..split], s.trade_to);
+        let mut head = base.clone();
+        feed(&mut head, &history.events[split..], s.trade_to);
+        assert_eq!(head.finish().unwrap(), replay, "{:?}", s.policy);
+        feed(&mut base, &history.events[split..], s.trade_to);
+        assert_eq!(base.finish().unwrap(), replay, "{:?}", s.policy);
+    }
+}
+
+#[test]
+fn a_stream_stops_where_the_replay_stops_for_an_agent() {
+    let (snapshot, events) = history(&THERE_AND_BACK);
+    // One decision, then a look without one: the run stops there.
+    let s = agent(vec![decision(T0, AgentAction::StayOut, 2 * HOUR)]);
+    let replay = run(snapshot.clone(), &events, &s).unwrap();
+    assert!(replay.pending.is_some());
+    let mut stream = Stream::start(snapshot, &s).unwrap();
+    for event in &events {
+        stream.push(event).unwrap();
+    }
+    assert!(stream.stopped());
+    assert_eq!(stream.finish().unwrap(), replay);
+}
+
+#[test]
+fn every_change_to_the_position_is_recorded_as_a_step() {
+    let (history, all) = month();
+    for s in &all {
+        let out = run(history.snapshot.state.clone(), &history.events, s).unwrap();
+        let unit = 10f64.powi(i32::from(s.decimals1));
+        let mut open: Option<(i32, i32, u128)> = None;
+        for campaign in &out.campaigns {
+            let steps: Vec<_> = out
+                .steps
+                .iter()
+                .filter(|r| r.campaign == campaign.id)
+                .collect();
+            // A campaign starts with a mint of the value token alone, in
+            // its own range, for what it put in.
+            let first = steps.first().expect("a campaign has steps");
+            assert_eq!(first.action, "open");
+            assert_eq!(first.block, campaign.opened_block);
+            let lpbot_core::Step::Mint {
+                tick_lower,
+                tick_upper,
+                amount0,
+                amount1,
+                ..
+            } = first.step
+            else {
+                panic!("a campaign opens with a mint: {first:?}");
+            };
+            assert_eq!(
+                (tick_lower, tick_upper),
+                (campaign.tick_lower, campaign.tick_upper)
+            );
+            let value = match s.value {
+                Token::Zero => (amount0, amount1),
+                Token::One => (amount1, amount0),
+            };
+            assert!(value.1.is_zero(), "one-sided: {first:?}");
+            assert!((to_f64(value.0) / unit - campaign.amount_in).abs() < 1e-9);
+            // Every burn takes out exactly what the mint before it put in,
+            // and the last step is at the campaign's close.
+            for record in &steps {
+                assert!(record.block >= campaign.opened_block);
+                assert!(record.block <= campaign.closed_block);
+                match record.step {
+                    lpbot_core::Step::Mint {
+                        tick_lower,
+                        tick_upper,
+                        liquidity,
+                        ..
+                    } => {
+                        assert!(open.is_none(), "one position at a time");
+                        assert!(liquidity > 0);
+                        open = Some((tick_lower, tick_upper, liquidity));
+                    }
+                    lpbot_core::Step::Burn {
+                        tick_lower,
+                        tick_upper,
+                        liquidity,
+                        ..
+                    } => {
+                        assert_eq!(open.take(), Some((tick_lower, tick_upper, liquidity)));
+                    }
+                    lpbot_core::Step::Swap { amount_in, .. } => {
+                        assert!(!amount_in.is_zero());
+                    }
+                }
+            }
+            assert_eq!(steps.last().unwrap().block, campaign.closed_block);
+        }
+        assert!(open.is_none(), "every position is taken out by the end");
+        // Steps are in chain order.
+        assert!(out.steps.windows(2).all(|w| w[0].block <= w[1].block));
+    }
+}

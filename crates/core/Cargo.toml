@@ -13,3 +13,7 @@ serde.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 hex.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -22,7 +22,7 @@ use crate::agent::{
     ScaleView, SCALES,
 };
 use alloy_primitives::{I256, U256};
-use lpbot_core::{Campaign, EntrySide, PoolId, Tick};
+use lpbot_core::{Campaign, EntrySide, PoolId, Step, StepRecord, Tick};
 use lpbot_data::gas::BlockFees;
 use lpbot_data::lake::TimedEvent;
 use lpbot_data::odds::TickBuckets;
@@ -645,6 +645,9 @@ pub struct Output {
     /// In the agent mode, when the history ended before the next look was
     /// due (a forward run waiting for blocks): the time it is due.
     pub next_look: Option<u64>,
+    /// Every change made to the position, in order: what the executor
+    /// carries out on the chain. Not one of the result tables.
+    pub steps: Vec<StepRecord>,
 }
 
 /// What may hold a new leg back: the cap on its share of the liquidity in
@@ -874,6 +877,7 @@ pub(crate) fn to_f64(value: U256) -> f64 {
     value.to_string().parse().unwrap_or(f64::INFINITY)
 }
 
+#[derive(Clone)]
 struct Engine<'a> {
     s: &'a Settings,
     pool: Pool,
@@ -901,6 +905,10 @@ struct Engine<'a> {
     gas_wei: f64,
     /// The block being handled: the one an action lands in.
     block: u64,
+    /// Each block's gas price, when the run has them.
+    fees: Option<Arc<BlockFees>>,
+    /// The action being carried out and its time, for the steps it takes.
+    acting: (&'static str, u64),
     /// The capital share in parts per million.
     capital_ppm: u32,
     share_cap: Option<LiquidityShareCap>,
@@ -1181,7 +1189,7 @@ impl<'a> Engine<'a> {
 
     /// Wei per gas in the block being handled.
     fn wei_per_gas(&self) -> U256 {
-        match self.s.block_fees.as_deref().and_then(|f| f.at(self.block)) {
+        match self.fees.as_deref().and_then(|f| f.at(self.block)) {
             Some((base, tip)) => U256::from(base) + self.gas.tip_wei.unwrap_or(U256::from(tip)),
             None => self.gas.fixed_wei_per_gas,
         }
@@ -1284,6 +1292,17 @@ impl<'a> Engine<'a> {
             growth0: U256::ZERO,
             growth1: U256::ZERO,
         });
+        let (amount0, amount1) = match token {
+            Token::Zero => (used, U256::ZERO),
+            Token::One => (U256::ZERO, used),
+        };
+        self.record(Step::Mint {
+            tick_lower: lower,
+            tick_upper: upper,
+            liquidity,
+            amount0,
+            amount1,
+        });
         Ok(Some(Opened { used, capped }))
     }
 
@@ -1348,12 +1367,15 @@ impl<'a> Engine<'a> {
         let target_other = mul_div(total_in, ref_other, ref_total)?;
         let (mut value_have, mut other_have) = (value_in, other_in);
         let mut swapped = false;
+        // The swap made, as (token sold, amount in, amount out).
+        let mut swap = None;
         if held_other < target_other {
             let sell = (target_other - held_other).min(value_have);
             let got = self.swap_from(self.s.value, sell)?;
             value_have -= sell;
             other_have += got;
             swapped = !sell.is_zero();
+            swap = Some((self.s.value, sell, got));
         } else if held_other > target_other {
             let sell = self
                 .value_in_other(held_other - target_other)?
@@ -1362,6 +1384,7 @@ impl<'a> Engine<'a> {
             other_have -= sell;
             value_have += got;
             swapped = !sell.is_zero();
+            swap = Some((self.s.value.other(), sell, got));
         }
 
         // The liquidity both amounts buy at the pool price. The pool rounds
@@ -1417,6 +1440,20 @@ impl<'a> Engine<'a> {
             growth0: U256::ZERO,
             growth1: U256::ZERO,
         });
+        if let Some((sold, amount_in, amount_out)) = swap.filter(|(_, sell, _)| !sell.is_zero()) {
+            self.record(Step::Swap {
+                zero_for_one: sold == Token::Zero,
+                amount_in,
+                amount_out,
+            });
+        }
+        self.record(Step::Mint {
+            tick_lower: lower,
+            tick_upper: upper,
+            liquidity,
+            amount0: take0,
+            amount1: take1,
+        });
         let (took_value, took_other) = self.split(take0, take1);
         Ok(Some(Mixed {
             value_left: (value - value_in) + (value_have - took_value),
@@ -1431,6 +1468,22 @@ impl<'a> Engine<'a> {
         let Some(leg) = self.leg.take() else {
             return Ok((U256::ZERO, U256::ZERO));
         };
+        let (amount0, amount1) = get_amounts_for_liquidity(
+            self.pool.sqrt_price_x96(),
+            leg.sqrt_lower,
+            leg.sqrt_upper,
+            leg.liquidity,
+        )?;
+        let (fees0, fees1) = leg.fees();
+        self.record(Step::Burn {
+            tick_lower: leg.lower,
+            tick_upper: leg.upper,
+            liquidity: leg.liquidity,
+            amount0,
+            amount1,
+            fees0,
+            fees1,
+        });
         let (value, other) = self.holdings(&leg)?;
         let (fee_value, fee_other) = self.leg_fees(&leg);
         self.pool.unwatch_tick(leg.lower);
@@ -1512,8 +1565,34 @@ impl<'a> Engine<'a> {
         });
     }
 
+    /// Keeps a change made to the position, for the executor.
+    fn record(&mut self, step: Step) {
+        let campaign = self
+            .campaign
+            .as_ref()
+            .map_or(self.campaigns_opened + 1, |c| c.id);
+        self.out.steps.push(StepRecord {
+            block: self.block,
+            time: self.acting.1,
+            campaign,
+            action: self.acting.0.to_string(),
+            sqrt_price_x96: self.pool.sqrt_price_x96(),
+            step,
+        });
+    }
+
     fn execute(&mut self, action: Action, time: u64, block: u64) -> Result<(), SimError> {
         self.block = block;
+        self.acting = (
+            match action {
+                Action::Open { .. } => "open",
+                Action::Close { .. } => "close",
+                Action::Flip { .. } => "flip",
+                Action::Withdraw { .. } => "withdraw",
+                Action::Recenter { .. } => "recenter",
+            },
+            time,
+        );
         match action {
             Action::Open {
                 lower,
@@ -1786,7 +1865,13 @@ impl<'a> Engine<'a> {
     fn swap_loose_to_value(&mut self) -> Result<(), SimError> {
         let other = std::mem::take(&mut self.loose_other);
         if !other.is_zero() {
-            self.cash += self.swap_to_value(other)?;
+            let got = self.swap_to_value(other)?;
+            self.record(Step::Swap {
+                zero_for_one: self.s.value.other() == Token::Zero,
+                amount_in: other,
+                amount_out: got,
+            });
+            self.cash += got;
             self.charge_gas(self.s.gas.swap_units);
         }
         Ok(())
@@ -2734,147 +2819,7 @@ pub fn run(
     events: &[TimedEvent],
     settings: &Settings,
 ) -> Result<Output, SimError> {
-    let spacing = snapshot.tick_spacing;
-    if settings.width <= 0 || spacing <= 0 || settings.width % spacing != 0 {
-        return Err(SimError::Settings(format!(
-            "the range width of {} ticks is not a positive multiple of the pool's tick spacing of {spacing}",
-            settings.width
-        )));
-    }
-    if settings.capital.is_zero() {
-        return Err(SimError::Settings("the run has no capital".into()));
-    }
-    if settings.lookbacks.is_empty() || settings.lookbacks.contains(&0) {
-        return Err(SimError::Settings(
-            "the zone lookbacks are empty or hold a zero; set zone.lookbacks to durations such \
-             as [6h, 7d]"
-                .into(),
-        ));
-    }
-    if settings.signal_step == 0 || settings.vol_window == 0 {
-        return Err(SimError::Settings(
-            "signal_step and entry.vol_window must be durations above 0, such as 1m and 1d".into(),
-        ));
-    }
-    let positive = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v > 0.0);
-    for (value, key) in [
-        (settings.max_loss_pct, "exit.max_loss_pct"),
-        (settings.max_drawdown_pct, "exit.max_drawdown_pct"),
-        (settings.width_vol_multiple, "entry.width_vol_multiple"),
-    ] {
-        if !positive(value) {
-            return Err(SimError::Settings(format!(
-                "{key} is {}; set it to a number above 0, or leave it out",
-                value.unwrap_or_default()
-            )));
-        }
-    }
-    if settings.after_move_ticks.is_some_and(|ticks| ticks <= 0) || settings.move_window == 0 {
-        return Err(SimError::Settings(
-            "entry.after_move_pct needs a move above 0 and entry.move_window a duration above 0"
-                .into(),
-        ));
-    }
-    let regime = &settings.regime;
-    if regime.windows_in_use().any(|window| window == 0) {
-        return Err(SimError::Settings(
-            "regime.trend_window, regime.chop_window and regime.band_window must be durations \
-             above 0, such as 30d and 7d"
-                .into(),
-        ));
-    }
-    let share = |value: Option<f64>| value.is_none_or(|v| (0.0..=1.0).contains(&v));
-    for (value, key) in [
-        (regime.min_efficiency, "regime.min_efficiency"),
-        (regime.max_efficiency, "regime.max_efficiency"),
-        (regime.band_min, "regime.band_min"),
-        (regime.band_max, "regime.band_max"),
-    ] {
-        if !share(value) {
-            return Err(SimError::Settings(format!(
-                "{key} is {}; set it between 0 and 1, or leave it out",
-                value.unwrap_or_default()
-            )));
-        }
-    }
-    let ordered = |low: Option<f64>, high: Option<f64>| {
-        low.zip(high).is_none_or(|(low, high)| low <= high)
-            && low.is_none_or(f64::is_finite)
-            && high.is_none_or(f64::is_finite)
-    };
-    for (low, high, keys) in [
-        (
-            regime.trend_min_ticks,
-            regime.trend_max_ticks,
-            "regime.trend_min_pct and regime.trend_max_pct",
-        ),
-        (
-            regime.min_efficiency,
-            regime.max_efficiency,
-            "regime.min_efficiency and regime.max_efficiency",
-        ),
-        (
-            regime.band_min,
-            regime.band_max,
-            "regime.band_min and regime.band_max",
-        ),
-    ] {
-        if !ordered(low, high) {
-            return Err(SimError::Settings(format!(
-                "{keys} leave nothing between them; set the first at or below the second, \
-                 above -100 percent, or leave one out"
-            )));
-        }
-    }
-    if settings.agent.is_some() && settings.follow.is_some() {
-        return Err(SimError::Settings(
-            "a run follows a provider or an agent's decisions, not both; remove strategy.follow \
-             or strategy.agent.decisions"
-                .into(),
-        ));
-    }
-    if settings.after_round_trips == Some(0) {
-        return Err(SimError::Settings(
-            "exit.after_round_trips must be at least 1, or left out".into(),
-        ));
-    }
-    if settings
-        .exit_on_return_ticks
-        .is_some_and(|ticks| ticks <= 0)
-    {
-        return Err(SimError::Settings(
-            "exit.exit_on_return_pct must be above 0, or left out".into(),
-        ));
-    }
-    if settings.recenter_after.is_some() && settings.shape != Shape::AroundPrice {
-        return Err(SimError::Settings(
-            "exit.recenter_after moves a position to the range around the price, so it needs \
-             entry.shape: around_price; one-sided positions move with entry.move_margin and the \
-             patience rule. Set entry.shape: around_price or remove exit.recenter_after"
-                .into(),
-        ));
-    }
-    let value_decimals = match settings.value {
-        Token::Zero => settings.decimals0,
-        Token::One => settings.decimals1,
-    };
-    // The decimals that decide amounts become integers here, once.
-    let capital_ppm =
-        parts_per_million(settings.capital_share.clamp(0.0, 1.0)).ok_or_else(|| {
-            SimError::Settings(
-                "the strategy's capital_share is not a number; set it between 0 and 1".into(),
-            )
-        })?;
-    let share_cap = match settings.max_share_of_in_range_liquidity {
-        None => None,
-        Some(share) => Some(LiquidityShareCap::new(share).ok_or_else(|| {
-            SimError::Settings(format!(
-                "universe.max_share_of_in_range_liquidity is {share}; set it above 0 and at \
-                 most 1"
-            ))
-        })?),
-    };
-    let gas = GasPrice::new(&settings.gas, settings.value)?;
+    let mut stream = Stream::start(snapshot, settings)?;
     if let Some(fees) = settings.block_fees.as_deref() {
         let mut traded = events
             .iter()
@@ -2894,52 +2839,243 @@ pub fn run(
         }
     }
 
-    let mut engine = Engine {
-        s: settings,
-        pool: Pool::from_snapshot(snapshot),
-        path: Vec::new(),
-        cash: settings.capital,
-        leg: None,
-        campaign: None,
-        pending: None,
-        next_check: settings.trade_from,
-        next_decide: settings.trade_from,
-        next_series: settings.trade_from,
-        halted: false,
-        scores: HashMap::new(),
-        buckets: TickBuckets::new(settings.signal_step),
-        out: Output::default(),
-        campaigns_opened: 0,
-        fees_total: 0.0,
-        gas,
-        gas_total: U256::ZERO,
-        gas_owed: U256::ZERO,
-        gas_units: 0.0,
-        gas_wei: 0.0,
-        block: 0,
-        capital_ppm,
-        share_cap,
-        loose_other: U256::ZERO,
-        following: None,
-        follow_next: 0,
-        peak: to_f64(settings.capital),
-        value_unit: 10f64.powi(i32::from(value_decimals)),
-        start_price: None,
-        last_closed: None,
-        agent_next: settings.trade_from,
-        agent_used: 0,
-        agent_reenter: None,
-        stopped: false,
-        agent_due: false,
-        last_end: None,
-    };
-
-    let mut last = (settings.trade_from, 0u64);
-    for (i, event) in events.iter().enumerate() {
+    for event in events {
         if event.time >= settings.trade_to {
             break;
         }
-        last = (event.time, event.block);
+        stream.push(event)?;
+        if stream.stopped() {
+            break;
+        }
+    }
+    stream.finish()
+}
+
+/// The engine fed one event at a time, as a run at the chain's head is:
+/// [`run`] is a stream fed the stored history. A block ends when the first
+/// event of the next one arrives, or when [`Stream::end_block`] says it is
+/// complete, so a stream fed the same events decides exactly as a replay
+/// does. A copy ([`Clone`]) can be fed blocks that may still be replaced
+/// while the original keeps only final ones.
+#[derive(Clone)]
+pub struct Stream<'a> {
+    engine: Engine<'a>,
+    /// The newest event fed, as time and block.
+    last: (u64, u64),
+    /// The block being fed, as time and block, until it ends.
+    open: Option<(u64, u64)>,
+}
+
+impl<'a> Stream<'a> {
+    /// Checks the settings and sets the engine up on the pool's snapshot.
+    pub fn start(snapshot: PoolSnapshot, settings: &'a Settings) -> Result<Self, SimError> {
+        let spacing = snapshot.tick_spacing;
+        if settings.width <= 0 || spacing <= 0 || settings.width % spacing != 0 {
+            return Err(SimError::Settings(format!(
+                "the range width of {} ticks is not a positive multiple of the pool's tick spacing of {spacing}",
+                settings.width
+            )));
+        }
+        if settings.capital.is_zero() {
+            return Err(SimError::Settings("the run has no capital".into()));
+        }
+        if settings.lookbacks.is_empty() || settings.lookbacks.contains(&0) {
+            return Err(SimError::Settings(
+                "the zone lookbacks are empty or hold a zero; set zone.lookbacks to durations such \
+                 as [6h, 7d]"
+                    .into(),
+            ));
+        }
+        if settings.signal_step == 0 || settings.vol_window == 0 {
+            return Err(SimError::Settings(
+                "signal_step and entry.vol_window must be durations above 0, such as 1m and 1d"
+                    .into(),
+            ));
+        }
+        let positive = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v > 0.0);
+        for (value, key) in [
+            (settings.max_loss_pct, "exit.max_loss_pct"),
+            (settings.max_drawdown_pct, "exit.max_drawdown_pct"),
+            (settings.width_vol_multiple, "entry.width_vol_multiple"),
+        ] {
+            if !positive(value) {
+                return Err(SimError::Settings(format!(
+                    "{key} is {}; set it to a number above 0, or leave it out",
+                    value.unwrap_or_default()
+                )));
+            }
+        }
+        if settings.after_move_ticks.is_some_and(|ticks| ticks <= 0) || settings.move_window == 0 {
+            return Err(SimError::Settings(
+                "entry.after_move_pct needs a move above 0 and entry.move_window a duration above 0"
+                    .into(),
+            ));
+        }
+        let regime = &settings.regime;
+        if regime.windows_in_use().any(|window| window == 0) {
+            return Err(SimError::Settings(
+                "regime.trend_window, regime.chop_window and regime.band_window must be durations \
+                 above 0, such as 30d and 7d"
+                    .into(),
+            ));
+        }
+        let share = |value: Option<f64>| value.is_none_or(|v| (0.0..=1.0).contains(&v));
+        for (value, key) in [
+            (regime.min_efficiency, "regime.min_efficiency"),
+            (regime.max_efficiency, "regime.max_efficiency"),
+            (regime.band_min, "regime.band_min"),
+            (regime.band_max, "regime.band_max"),
+        ] {
+            if !share(value) {
+                return Err(SimError::Settings(format!(
+                    "{key} is {}; set it between 0 and 1, or leave it out",
+                    value.unwrap_or_default()
+                )));
+            }
+        }
+        let ordered = |low: Option<f64>, high: Option<f64>| {
+            low.zip(high).is_none_or(|(low, high)| low <= high)
+                && low.is_none_or(f64::is_finite)
+                && high.is_none_or(f64::is_finite)
+        };
+        for (low, high, keys) in [
+            (
+                regime.trend_min_ticks,
+                regime.trend_max_ticks,
+                "regime.trend_min_pct and regime.trend_max_pct",
+            ),
+            (
+                regime.min_efficiency,
+                regime.max_efficiency,
+                "regime.min_efficiency and regime.max_efficiency",
+            ),
+            (
+                regime.band_min,
+                regime.band_max,
+                "regime.band_min and regime.band_max",
+            ),
+        ] {
+            if !ordered(low, high) {
+                return Err(SimError::Settings(format!(
+                    "{keys} leave nothing between them; set the first at or below the second, \
+                     above -100 percent, or leave one out"
+                )));
+            }
+        }
+        if settings.agent.is_some() && settings.follow.is_some() {
+            return Err(SimError::Settings(
+                "a run follows a provider or an agent's decisions, not both; remove strategy.follow \
+                 or strategy.agent.decisions"
+                    .into(),
+            ));
+        }
+        if settings.after_round_trips == Some(0) {
+            return Err(SimError::Settings(
+                "exit.after_round_trips must be at least 1, or left out".into(),
+            ));
+        }
+        if settings
+            .exit_on_return_ticks
+            .is_some_and(|ticks| ticks <= 0)
+        {
+            return Err(SimError::Settings(
+                "exit.exit_on_return_pct must be above 0, or left out".into(),
+            ));
+        }
+        if settings.recenter_after.is_some() && settings.shape != Shape::AroundPrice {
+            return Err(SimError::Settings(
+                "exit.recenter_after moves a position to the range around the price, so it needs \
+                 entry.shape: around_price; one-sided positions move with entry.move_margin and the \
+                 patience rule. Set entry.shape: around_price or remove exit.recenter_after"
+                    .into(),
+            ));
+        }
+        let value_decimals = match settings.value {
+            Token::Zero => settings.decimals0,
+            Token::One => settings.decimals1,
+        };
+        // The decimals that decide amounts become integers here, once.
+        let capital_ppm =
+            parts_per_million(settings.capital_share.clamp(0.0, 1.0)).ok_or_else(|| {
+                SimError::Settings(
+                    "the strategy's capital_share is not a number; set it between 0 and 1".into(),
+                )
+            })?;
+        let share_cap = match settings.max_share_of_in_range_liquidity {
+            None => None,
+            Some(share) => Some(LiquidityShareCap::new(share).ok_or_else(|| {
+                SimError::Settings(format!(
+                    "universe.max_share_of_in_range_liquidity is {share}; set it above 0 and at \
+                     most 1"
+                ))
+            })?),
+        };
+        let gas = GasPrice::new(&settings.gas, settings.value)?;
+        let engine = Engine {
+            s: settings,
+            pool: Pool::from_snapshot(snapshot),
+            path: Vec::new(),
+            cash: settings.capital,
+            leg: None,
+            campaign: None,
+            pending: None,
+            next_check: settings.trade_from,
+            next_decide: settings.trade_from,
+            next_series: settings.trade_from,
+            halted: false,
+            scores: HashMap::new(),
+            buckets: TickBuckets::new(settings.signal_step),
+            out: Output::default(),
+            campaigns_opened: 0,
+            fees_total: 0.0,
+            gas,
+            gas_total: U256::ZERO,
+            gas_owed: U256::ZERO,
+            gas_units: 0.0,
+            gas_wei: 0.0,
+            block: 0,
+            fees: settings.block_fees.clone(),
+            acting: ("", 0),
+            capital_ppm,
+            share_cap,
+            loose_other: U256::ZERO,
+            following: None,
+            follow_next: 0,
+            peak: to_f64(settings.capital),
+            value_unit: 10f64.powi(i32::from(value_decimals)),
+            start_price: None,
+            last_closed: None,
+            agent_next: settings.trade_from,
+            agent_used: 0,
+            agent_reenter: None,
+            stopped: false,
+            agent_due: false,
+            last_end: None,
+        };
+        Ok(Self {
+            engine,
+            last: (settings.trade_from, 0),
+            open: None,
+        })
+    }
+
+    /// Feeds the next event, in chain order. An event of a new block first
+    /// ends the block before it. Nothing is fed once the run has stopped.
+    pub fn push(&mut self, event: &TimedEvent) -> Result<(), SimError> {
+        if self.engine.stopped {
+            return Ok(());
+        }
+        if let Some((time, block)) = self.open {
+            if block != event.block {
+                self.open = None;
+                self.engine.on_block_end(time, block)?;
+                if self.engine.stopped {
+                    return Ok(());
+                }
+            }
+        }
+        self.last = (event.time, event.block);
+        let engine = &mut self.engine;
         engine.out.summary.events += 1;
 
         // An action decided earlier is carried out on the state before
@@ -3015,95 +3151,130 @@ pub fn run(
                 liquidity: swap.liquidity as f64,
             });
         }
+        self.open = Some((event.time, event.block));
+        Ok(())
+    }
 
-        let block_ends = events
-            .get(i + 1)
-            .is_none_or(|next| next.block != event.block);
-        if block_ends {
-            engine.on_block_end(event.time, event.block)?;
-            if engine.stopped {
-                break;
+    /// Ends the block being fed, once it is known to hold no more events.
+    pub fn end_block(&mut self) -> Result<(), SimError> {
+        if let Some((time, block)) = self.open.take() {
+            if !self.engine.stopped {
+                self.engine.on_block_end(time, block)?;
             }
         }
+        Ok(())
     }
 
-    // A forward run shows a look that came due at the newest block.
-    if engine.agent_due && !engine.halted && !engine.stopped {
-        if let Some((time, block, equity, state)) = engine.last_end {
-            engine.out.pending =
-                Some(engine.observe(engine.agent_next, time, block, equity, state)?);
-            engine.stopped = true;
-        }
+    /// Whether the run stopped: an agent's look without a decision.
+    pub fn stopped(&self) -> bool {
+        self.engine.stopped
     }
-    // The run is over: whatever is open is closed on the last state.
-    engine.pending = None;
-    if let Some(plan) = &settings.agent {
-        engine.out.unused_decisions = plan.decisions.len().saturating_sub(engine.agent_used);
-        if engine.out.pending.is_none() && !engine.halted {
-            engine.out.next_look = Some(engine.agent_next);
-        }
+
+    /// Whether the loss limit stopped the run.
+    pub fn halted(&self) -> bool {
+        self.engine.halted
     }
-    if engine.leg.is_some() {
-        engine.execute(
-            Action::Close {
-                reason: if engine.stopped {
-                    "agent_pending"
-                } else {
-                    "window_end"
+
+    /// The newest event fed, as time and block.
+    pub fn last(&self) -> (u64, u64) {
+        self.last
+    }
+
+    /// The changes made to the position so far.
+    pub fn steps(&self) -> &[StepRecord] {
+        &self.engine.out.steps
+    }
+
+    /// The gas prices of the blocks, as they are stored further.
+    pub fn set_block_fees(&mut self, fees: Arc<BlockFees>) {
+        self.engine.fees = Some(fees);
+    }
+
+    /// Ends the run: whatever is open is closed on the last state.
+    pub fn finish(mut self) -> Result<Output, SimError> {
+        self.end_block()?;
+        let last = self.last;
+        let mut engine = self.engine;
+        let settings = engine.s;
+        // A forward run shows a look that came due at the newest block.
+        if engine.agent_due && !engine.halted && !engine.stopped {
+            if let Some((time, block, equity, state)) = engine.last_end {
+                engine.out.pending =
+                    Some(engine.observe(engine.agent_next, time, block, equity, state)?);
+                engine.stopped = true;
+            }
+        }
+        // The run is over: whatever is open is closed on the last state.
+        engine.pending = None;
+        if let Some(plan) = &settings.agent {
+            engine.out.unused_decisions = plan.decisions.len().saturating_sub(engine.agent_used);
+            if engine.out.pending.is_none() && !engine.halted {
+                engine.out.next_look = Some(engine.agent_next);
+            }
+        }
+        if engine.leg.is_some() {
+            engine.execute(
+                Action::Close {
+                    reason: if engine.stopped {
+                        "agent_pending"
+                    } else {
+                        "window_end"
+                    },
                 },
-            },
-            last.0,
-            last.1,
-        )?;
-    }
+                last.0,
+                last.1,
+            )?;
+        }
 
-    let unit = engine.value_unit;
-    let start = to_f64(settings.capital);
-    let end = to_f64(engine.cash);
-    let passes = engine.out.campaigns.iter().map(|c| c.passes).sum();
-    let seconds_in_range = engine
-        .out
-        .campaigns
-        .iter()
-        .map(|c| c.seconds_in_range)
-        .sum();
-    let in_campaigns: u64 = engine
-        .out
-        .campaigns
-        .iter()
-        .map(|c| c.closed_time.saturating_sub(c.opened_time))
-        .sum();
-    let traded = last.0.saturating_sub(settings.trade_from);
-    // A run that never reached its window starts and ends at the same price.
-    let end_price = engine.price();
-    let start_price = engine.start_price.unwrap_or(end_price);
-    let start_usd = start / unit * engine.usd_per_value(start_price);
-    let end_usd = end / unit * engine.usd_per_value(end_price);
-    engine.out.summary = Summary {
-        start_capital: start / unit,
-        end_capital: end / unit,
-        result_pct: (end - start) / start * 100.0,
-        start_price,
-        end_price,
-        start_usd,
-        end_usd,
-        result_pct_usd: (end_usd - start_usd) / start_usd * 100.0,
-        hold_value_pct_usd: (engine.usd_per_value(end_price) / engine.usd_per_value(start_price)
-            - 1.0)
-            * 100.0,
-        fees: engine.fees_total / unit,
-        gas: to_f64(engine.gas_total) / unit,
-        gas_gwei: if engine.gas_units > 0.0 {
-            engine.gas_wei / engine.gas_units / WEI_PER_GWEI
-        } else {
-            0.0
-        },
-        campaigns: engine.out.campaigns.len() as u32,
-        passes,
-        seconds_in_range,
-        seconds_out_of_range: in_campaigns.saturating_sub(seconds_in_range),
-        seconds_flat: traded.saturating_sub(in_campaigns),
-        ..engine.out.summary
-    };
-    Ok(engine.out)
+        let unit = engine.value_unit;
+        let start = to_f64(settings.capital);
+        let end = to_f64(engine.cash);
+        let passes = engine.out.campaigns.iter().map(|c| c.passes).sum();
+        let seconds_in_range = engine
+            .out
+            .campaigns
+            .iter()
+            .map(|c| c.seconds_in_range)
+            .sum();
+        let in_campaigns: u64 = engine
+            .out
+            .campaigns
+            .iter()
+            .map(|c| c.closed_time.saturating_sub(c.opened_time))
+            .sum();
+        let traded = last.0.saturating_sub(settings.trade_from);
+        // A run that never reached its window starts and ends at the same price.
+        let end_price = engine.price();
+        let start_price = engine.start_price.unwrap_or(end_price);
+        let start_usd = start / unit * engine.usd_per_value(start_price);
+        let end_usd = end / unit * engine.usd_per_value(end_price);
+        engine.out.summary = Summary {
+            start_capital: start / unit,
+            end_capital: end / unit,
+            result_pct: (end - start) / start * 100.0,
+            start_price,
+            end_price,
+            start_usd,
+            end_usd,
+            result_pct_usd: (end_usd - start_usd) / start_usd * 100.0,
+            hold_value_pct_usd: (engine.usd_per_value(end_price)
+                / engine.usd_per_value(start_price)
+                - 1.0)
+                * 100.0,
+            fees: engine.fees_total / unit,
+            gas: to_f64(engine.gas_total) / unit,
+            gas_gwei: if engine.gas_units > 0.0 {
+                engine.gas_wei / engine.gas_units / WEI_PER_GWEI
+            } else {
+                0.0
+            },
+            campaigns: engine.out.campaigns.len() as u32,
+            passes,
+            seconds_in_range,
+            seconds_out_of_range: in_campaigns.saturating_sub(seconds_in_range),
+            seconds_flat: traded.saturating_sub(in_campaigns),
+            ..engine.out.summary
+        };
+        Ok(engine.out)
+    }
 }
