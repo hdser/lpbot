@@ -362,6 +362,10 @@ struct BackfillArgs {
     /// Days of history to store, counted back from today.
     #[arg(long, default_value_t = 90)]
     days: u32,
+    /// Carry on from where the stored history ends: the earliest of the
+    /// pools' newest stored days. For a job that runs on a schedule.
+    #[arg(long, conflicts_with = "from")]
+    resume: bool,
     /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -671,9 +675,10 @@ struct EvaluateArgs {
 struct GasHistoryArgs {
     #[command(flatten)]
     chain: ChainArgs,
-    /// First day to store, as YYYY-MM-DD.
+    /// First day to store, as YYYY-MM-DD. Without it, carry on from the
+    /// newest chunk of blocks that is stored.
     #[arg(long)]
-    from: String,
+    from: Option<String>,
     /// Data folder. Defaults to LPBOT_DATA_DIR, then data/lake.
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -1007,6 +1012,7 @@ fn real_main() -> Result<()> {
                     pools: &pools,
                     from,
                     days: args.days,
+                    resume: args.resume,
                     root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
                     log_chunk: args.log_chunk,
                     verify: args.verify,
@@ -1067,8 +1073,12 @@ fn real_main() -> Result<()> {
             )?;
             let from = args
                 .from
-                .parse::<lpbot_data::day::Day>()
-                .map_err(|e| anyhow::anyhow!("--from {}: {e}", args.from))?;
+                .as_deref()
+                .map(|text| {
+                    text.parse::<lpbot_data::day::Day>()
+                        .map_err(|e| anyhow::anyhow!("--from {text}: {e}"))
+                })
+                .transpose()?;
             let client = &chain.client;
             let source = lpbot_data::backfill::NodeSource {
                 client,
@@ -1080,9 +1090,21 @@ fn real_main() -> Result<()> {
                 Some((block, _)) => block,
                 None => client.block_number()?.saturating_sub(64),
             };
-            let first =
-                lpbot_data::backfill::first_block_at_or_after(&source, from.start(), 1, to)?;
             let root = backfill_cmd::data_dir(args.data_dir.as_deref());
+            let first = match from {
+                Some(day) => {
+                    lpbot_data::backfill::first_block_at_or_after(&source, day.start(), 1, to)?
+                }
+                None => lpbot_data::gas::GasStore::new(&root)
+                    .newest_chunk(&args.chain.chain)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no gas prices are stored under {} yet, so there is nothing to \
+                             carry on from: give --from <YYYY-MM-DD> for the first run",
+                            root.display()
+                        )
+                    })?,
+            };
             println!(
                 "  gas prices of blocks {first} to {to} into {}",
                 root.display()

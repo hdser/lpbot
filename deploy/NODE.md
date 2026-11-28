@@ -175,7 +175,7 @@ The lake, `/data/lpbot/lake`:
 
 | Path | Holds |
 | --- | --- |
-| `events/chain=ethereum/pool=<address>/day=<YYYY-MM-DD>/` | Every universe pool's events, one Parquet file per pool and day: 24 pools from 31 January 2025, about 15,800 files, 2.9 GB. `make history` and the forward runs' catch-up add to it |
+| `events/chain=ethereum/pool=<address>/day=<YYYY-MM-DD>/` | Every universe pool's events, one Parquet file per pool and day: 24 pools from 31 January 2025, about 15,800 files, 2.9 GB. `make history`, the forward runs' catch-up and, every night once its cron line is in, `deploy/history/daily.sh` add to it |
 | `snapshots/chain=ethereum/pool=<address>/day=<day>.json` | Each pool's state before its first stored day (2025-01-31 and 2026-01-31) |
 | `gas/chain=ethereum/blocks=<first block>[.partial].parquet` | Each block's base fee and priority fee, in chunks of 100,000 blocks. Only the newest chunk is stored here (`blocks=26400000.partial.parquet`, from the forward runs' catch-up); `make gas-history FROM=<day>` stores earlier blocks |
 | `manager/events/chain=ethereum/pool=<position manager>/` | The NFT position manager's logs by day, for the watcher, 177 MB |

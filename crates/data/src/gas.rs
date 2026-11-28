@@ -206,6 +206,34 @@ impl GasStore {
         Ok(chunks)
     }
 
+    /// The first block of the newest chunk stored, whole or in part: where
+    /// a job that runs on a schedule carries on from. `None` when nothing
+    /// is stored.
+    pub fn newest_chunk(&self, chain: &str) -> StoreResult<Option<u64>> {
+        let dir = self.dir(chain);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(StoreError::Io { path: dir, source }),
+        };
+        let mut newest = None;
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let first = name
+                .strip_prefix("blocks=")
+                .and_then(|rest| rest.strip_suffix(".parquet"))
+                .map(|rest| rest.strip_suffix(".partial").unwrap_or(rest))
+                .and_then(|n| n.parse::<u64>().ok());
+            newest = newest.max(first);
+        }
+        Ok(newest)
+    }
+
     /// Stores one chunk's fees, starting at its first block, every one of
     /// them final. A chunk with all its blocks is written whole and replaces
     /// the partial file; fewer is written as the partial file.
@@ -582,5 +610,24 @@ mod tests {
         assert_eq!(across, fees(2 * CHUNK - 2, 4));
         assert_eq!(store.read("ethereum", 0, 5).unwrap(), None);
         assert!(store.write_chunk("ethereum", &fees(5, 3)).is_err());
+    }
+
+    #[test]
+    fn the_newest_chunk_is_the_last_one_stored_whole_or_in_part() {
+        let dir = TempDir::new("gas-newest");
+        let store = GasStore::new(dir.path());
+        assert_eq!(store.newest_chunk("ethereum").unwrap(), None);
+        // Only a part of a chunk, as the forward runs' catch-up leaves.
+        store.write_chunk("ethereum", &fees(3 * CHUNK, 10)).unwrap();
+        assert_eq!(store.newest_chunk("ethereum").unwrap(), Some(3 * CHUNK));
+        // An earlier whole chunk does not move it; a later part does.
+        store.write_chunk("ethereum", &fees(CHUNK, CHUNK)).unwrap();
+        assert_eq!(store.newest_chunk("ethereum").unwrap(), Some(3 * CHUNK));
+        store
+            .write_chunk("ethereum", &fees(3 * CHUNK, CHUNK))
+            .unwrap();
+        store.write_chunk("ethereum", &fees(4 * CHUNK, 2)).unwrap();
+        assert_eq!(store.newest_chunk("ethereum").unwrap(), Some(4 * CHUNK));
+        assert_eq!(store.newest_chunk("other").unwrap(), None);
     }
 }
