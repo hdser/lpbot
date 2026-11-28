@@ -122,13 +122,14 @@ From `~/lpbot`, with `C="docker compose --env-file deploy/.env -f deploy/docker-
 
 ### The `tmux` sessions
 
-On 25 November 2026:
+On 25 November 2026, with the paper sessions of 28 November:
 
 | Session | Holds |
 | --- | --- |
 | `agent` | Claude Code deciding the two-agent forward panel `experiments/agent-panel-forward.yml`, one window an agent (`a`, `b`), each started with `deploy/agents/start-agent.sh`. Leave it alone |
 | `gates` | The shell `make gates` ran in on 19 November 2026; idle |
 | `history` | The shell `make history` ran in on 19 November 2026; idle |
+| `paper-usdc`, `paper-usdt` | `lpbot paper` on `experiments/forward-regime-usdc.yml` and `-usdt.yml`, started 28 November 2026 at 11:51 and 11:55 UTC; output also in `logs/paper-forward-regime-<pool>.log`. M2's gate: two weeks with every hourly check `equals the replay` ([RUNBOOK.md](RUNBOOK.md), "Paper mode"). Not a job the Codex runner waits for |
 
 `tmux ls` lists them; `tmux list-panes -a -F '#{session_name} #{pane_current_command}'` shows what runs in each without attaching. A session without a terminal of its own starts and reads a job like this:
 
@@ -190,7 +191,7 @@ Database and user `lpbot`. Sixteen tables, created empty by the start-up script 
 | The six run tables: `runs`, `campaigns`, `decisions`, `series`, `pool_rank`, `zone_map` | `make load` (`lpbot load-results`), from `runs/` |
 | The two pool tables: `pool_series`, `pool_liquidity` | `make pool-stats`, then `make load` |
 | The five live tables: `live_pools`, `live_pool_series`, `live_liquidity`, `live_swaps`, `live_positions` | The watcher, continuously |
-| The two agent tables: `agent_looks`, `agent_scores` | `lpbot run` on an agent experiment, then `make load RESULTS=runs/<name>`. For the forward panels, cron does it (`crontab -l`): `deploy/agents/refresh.sh --looks` every minute (the looks, from the logs) and `deploy/agents/refresh.sh` hourly (scores and results); its log is `logs/agent-refresh.log` |
+| The two agent tables: `agent_looks`, `agent_scores` | `lpbot run` on an agent experiment, then `make load RESULTS=runs/<name>`. For the forward panels, cron does it (`crontab -l`): `deploy/agents/refresh.sh --looks` every minute (the looks, from the logs) and `deploy/agents/refresh.sh` hourly (scores and results); its log is `logs/agent-refresh.log`. Cron also runs `deploy/history/daily.sh` at 03:23 UTC (and with `--verify` on Sundays at 04:43), which keeps every pool's stored history current; its log is `logs/history-daily.log` |
 | The supervisor table: `agent_status` | `lpbot supervisor status --load`, at the end of every per-minute `deploy/agents/refresh.sh --looks`: every forward agent's state now, all rows replaced each time |
 
 ### Grafana
