@@ -289,8 +289,8 @@ cd ~/lpbot
 target/release/lpbot paper experiments/forward-regime-usdc.yml
 ```
 
-- Each step (every 15 s, `--every`) it brings the run's pool and the gas to the head under the store's lock, so a forward agent's look and the nightly jobs wait for it a moment, and writes the tables to `runs/paper/<experiment>`; `make load RESULTS=runs/paper/<experiment>` puts them on the dashboards.
-- Every 240 steps (about an hour, `--check-every`) it replays the whole history it has seen and prints `equals the replay`, or `DIFFERS from the replay of the same blocks`. A difference is a bug: stop it and keep the output. M2's gate is two weeks of `equals`, with a reorg and a restart in them.
+- Each step (every minute, `--every`) it brings each pool its runs trade, once, and the gas to the head under the store's lock, so a forward agent's look and the nightly jobs wait for it a moment, and the Codex runner puts a look off to its next turn if it finds the lock held; and writes the tables to `runs/paper/<experiment>`; `make load RESULTS=runs/paper/<experiment>` puts them on the dashboards.
+- Every 60 steps (about an hour, `--check-every`) it replays the whole history it has seen and prints `equals the replay`, or `DIFFERS from the replay of the same blocks`. A difference is a bug: stop it and keep the output. M2's gate is two weeks of `equals`, with a reorg and a restart in them.
 - The changes it made on final blocks are in `data/paper/<experiment>/<run>.steps.jsonl`: what a live run would have sent.
 - To carry on after a restart: the same command. It sets every run up again from the stored history.
 

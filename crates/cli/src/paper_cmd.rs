@@ -211,12 +211,31 @@ fn decisions_stamp(setups: &[RunSetup]) -> Vec<Option<(SystemTime, u64)>> {
         .collect()
 }
 
-/// Brings every run's pool to the head under the store's lock, and returns
-/// the finalized block.
+/// One run for each pool the runs trade, in order: what has to be caught
+/// up. Runs that name no pool are each their own.
+fn one_per_pool(runs: &[ResolvedRun]) -> Result<Vec<&ResolvedRun>> {
+    let mut seen = Vec::new();
+    let mut chosen = Vec::new();
+    for run in runs {
+        let pool = match run.config.strategies.first() {
+            Some(strategy) => run_cmd::named_pool(strategy)?,
+            None => None,
+        };
+        if pool.is_none() || !seen.contains(&pool) {
+            seen.push(pool);
+            chosen.push(run);
+        }
+    }
+    Ok(chosen)
+}
+
+/// Brings every pool the runs trade to the head under the store's lock,
+/// once each, and returns the finalized block. The lock is shared with
+/// the agents' catch-up and the nightly jobs, so it is held only for this.
 fn catch_up(args: &PaperArgs<'_>) -> Result<u64> {
     let _operations = agent_lock::lake(args.root)?;
     let mut final_block = u64::MAX;
-    for run in args.runs {
+    for run in one_per_pool(args.runs)? {
         let synced = sync(run, args.root, args.chain, args.rpc)
             .with_context(|| format!("catching up {}", run.run_id))?;
         final_block = final_block.min(synced.final_block);
@@ -415,6 +434,24 @@ mod tests {
             serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(first, replay.steps[0]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_pool_is_caught_up_once_however_many_runs_trade_it() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let runs = lpbot_core::resolve_experiment(
+            &repo.join("experiments/forward-regime-usdc.yml"),
+            &lpbot_core::RunOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(runs.len(), 14);
+        let chosen = one_per_pool(&runs).unwrap();
+        assert_eq!(chosen.len(), 2, "two pools, seven regimes each");
+        let pools: Vec<_> = chosen
+            .iter()
+            .map(|r| run_cmd::named_pool(&r.config.strategies[0]).unwrap())
+            .collect();
+        assert_ne!(pools[0], pools[1]);
     }
 
     #[test]

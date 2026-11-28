@@ -840,11 +840,12 @@ struct PaperArgs {
     /// Folder the result tables are written to. Defaults to runs/paper/<experiment>.
     #[arg(long)]
     results_dir: Option<PathBuf>,
-    /// How long to wait between steps.
-    #[arg(long, default_value = "15s")]
+    /// How long to wait between steps. Each step holds the store's lock
+    /// while it catches up, which the agents and the nightly jobs share.
+    #[arg(long, default_value = "1m")]
     every: String,
     /// Steps between replays of the whole history against the paper run.
-    #[arg(long, default_value_t = 240)]
+    #[arg(long, default_value_t = 60)]
     check_every: u32,
     /// Stop after this many steps instead of running until stopped.
     #[arg(long)]
