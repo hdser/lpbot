@@ -11,7 +11,7 @@ What to type on the node machine for the things that come up: starting a long jo
 | When your SSH connection drops | Keep running | Keep running if they were started inside `tmux`; stop otherwise |
 | When the machine restarts | Come back by themselves | Are gone. Start them again: each carries on from what it already stored |
 
-A third kind runs on a schedule from the user's crontab (`crontab -l` lists it) and comes back after a restart by itself: the refresh of the agents dashboard, "Keeping the agents dashboard current" below, and the daily update of the stored history, "Keeping the stored history current".
+A third kind runs on a schedule from the user's crontab (`crontab -l` lists it) and comes back after a restart by itself: the refresh of the agents dashboard, "Keeping the agents dashboard current" below, the daily update of the stored history, "Keeping the stored history current", and the ladder every night, "Forward rules and the ladder".
 
 ## tmux
 
@@ -234,10 +234,18 @@ Rules frozen on history run forward too (`docs/DESIGN.md`, "From a backtest to r
 ```sh
 cd ~/lpbot
 deploy/history/daily.sh
-target/release/lpbot run experiments/forward-regime-usdc.yml --results-dir runs/forward-regime
-target/release/lpbot run experiments/forward-regime-usdt.yml --results-dir runs/forward-regime
-target/release/lpbot select ladder selection/ladder.yml
+deploy/selection/nightly.sh
 ```
+
+`deploy/selection/nightly.sh` replays every frozen forward rule (a file under `experiments/` with `to: open` and no decisions file) into `runs/forward-rules`, then runs `lpbot select ladder selection/ladder.yml`. **The ladder every night:** one cron line, after the history job:
+
+```sh
+13 5 * * *  $HOME/lpbot/deploy/selection/nightly.sh >> $HOME/lpbot/logs/select-nightly.log 2>&1
+```
+
+Its log gets a start and an end line (`ok: ...` naming the plan written, or `FAILED: ...`); the output of the last run is in `logs/select-nightly-last.log`. It needs `selection/ladder.yml`, and says so if it is missing.
+
+**What could trade, and whether a plan may.** `lpbot select list --plan data/selection/<ladder>.json` lists every experiment file, forward first, with its agents and where its runs stand. A plan moves nothing by itself: `lpbot select approve data/selection/<ladder>.json --by <name>` records the owner's yes with the plan's SHA-256 beside it (`<plan>.approved.json`), and `lpbot select check <plan>` says whether the trader would take it (approved, unchanged since, at most 36 hours old). Approving is the owner's step; a session never runs it.
 
 `selection/ladder.yml` is a copy of `selection/ladder.example.yml` with the owner's gates. The last command prints where every forward run stands, rule or agent, what each still needs, and the plan; it writes `data/selection/<ladder>.json` and sends nothing. An agent panel is in the ladder once `deploy/agents/refresh.sh` has scored and replayed it into its results folder (hourly from cron); for the agents' gates it must score a day's horizon, `--horizons next,1d`. Once a day is often enough for the rules. Do not edit a forward experiment file once it runs: its commit is the proof of when the settings were fixed.
 
@@ -270,6 +278,35 @@ Its log, `logs/history-daily.log`, gets a line when a run starts and one when it
 | Nothing for more than a day | Cron does not run it: `crontab -l`, and `tail logs/history-daily.log` |
 
 It does not refresh the pool dashboard's history (`make pool-stats`, then `make load`), which samples every pool over the whole store, and nothing alerts on it yet: look at the log.
+
+## Paper mode
+
+`lpbot paper <experiment>` follows a forward experiment at the head with virtual positions: the same engine as the backtests, fed each block as it comes. It is a job, in `tmux`, and does not come back after a restart by itself:
+
+```sh
+tmux new -s paper
+cd ~/lpbot
+target/release/lpbot paper experiments/forward-regime-usdc.yml
+```
+
+- Each step (every minute, `--every`) it brings each pool its runs trade, once, and the gas to the head under the store's lock, so a forward agent's look and the nightly jobs wait for it a moment, and the Codex runner puts a look off to its next turn if it finds the lock held; and writes the tables to `runs/paper/<experiment>`; `make load RESULTS=runs/paper/<experiment>` puts them on the dashboards.
+- Every 60 steps (about an hour, `--check-every`) it replays the whole history it has seen and prints `equals the replay`, or `DIFFERS from the replay of the same blocks`. A difference is a bug: stop it and keep the output. M2's gate is two weeks of `equals`, with a reorg and a restart in them.
+- The changes it made on final blocks are in `data/paper/<experiment>/<run>.steps.jsonl`: what a live run would have sent.
+- To carry on after a restart: the same command. It sets every run up again from the stored history.
+
+## The pause flag and the operator's exit
+
+```sh
+target/release/lpbot pause --reason "<why>"
+target/release/lpbot exit-all --reason "<why>"
+target/release/lpbot resume
+```
+
+`pause` holds new entries; `exit-all` also asks every position to be taken out; both write `data/pause.json`, and `resume` clears it. A flag that cannot be read counts as paused. Paper mode only reports it; the live executor, when it is built, acts on it at its next step.
+
+## The signer
+
+`lpbot signer --keystore <file> --roles-module <address>` is the keeper's signer: it asks for the keystore's password at its own terminal, holds the key in memory only, and on `data/signer/keeper.sock` (mode 0600) signs only calls to the roles module on chain 1, with no value, within `--max-gas` and `--max-fee-gwei`; every request is a line on its output, never key material. It is the owner's to start, in `tmux`, and only from M7 (`docs/PLAN.md`): nothing sends through it before then. Creating the keystore and typing its password are the owner's steps; a session never does either.
 
 ## When something is red
 

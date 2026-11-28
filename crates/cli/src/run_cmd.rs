@@ -645,9 +645,9 @@ fn policy_name(policy: &Policy) -> String {
 }
 
 /// A pool's stored history for a run, loaded once per sweep.
-struct History {
-    snapshot: StoredSnapshot,
-    events: Vec<TimedEvent>,
+pub(crate) struct History {
+    pub snapshot: StoredSnapshot,
+    pub events: Vec<TimedEvent>,
 }
 
 /// The pool a strategy names with `pool`, if it names one.
@@ -1039,9 +1039,7 @@ pub(crate) fn window(config: &Config) -> Result<(Day, Day)> {
 pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Result<()> {
     // A history depends on the pool, the window and how far back the run
     // looks; a pool on what `pool_key` holds. Runs share what they agree on.
-    let mut histories: HashMap<(Address, Day, Day, u32), Rc<History>> = HashMap::new();
-    let mut pools: HashMap<PoolKey, (Address, Vec<PoolRankRow>)> = HashMap::new();
-    let mut fee_cache = FeeCache::new();
+    let mut caches = Caches::default();
     let mut done = 0;
 
     println!(
@@ -1064,94 +1062,21 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         if config.mode != Mode::Backtest {
             bail!("only `mode: backtest` runs so far; paper and live runs are not built yet");
         }
-        let strategy = config
-            .strategies
-            .first()
-            .ok_or_else(|| anyhow!("the run has no strategy"))?;
-        if strategy.kind != "zone_round_trip" {
-            bail!("strategy kind `{}` is not built yet", strategy.kind);
-        }
-        let policy = policy(strategy)?;
-        let (from, end) = run_window(config)?;
-        let (_, tokens) = chain_addresses(config, chain)?;
-
-        let key = pool_key(strategy, from)?;
-        if !pools.contains_key(&key) {
-            let chosen = choose_pool(root, chain, &tokens, config, strategy, from)?;
-            pools.insert(key.clone(), chosen);
-        }
-        let (pool, rank_rows) = &pools[&key];
-        // A window open at the end runs as far as the pool is stored.
-        let to = match end {
-            Some(to) => to,
-            None => stored_end(root, chain, *pool)?,
-        };
-
-        let longest = history_days(strategy)?;
-        let history_key = (*pool, from, to, longest);
-        let history = match histories.get(&history_key) {
-            Some(history) => Rc::clone(history),
-            None => {
-                let loaded = Rc::new(load_history(root, chain, *pool, from, to, longest)?);
-                histories.insert(history_key, Rc::clone(&loaded));
-                loaded
-            }
-        };
-
-        let (mut settings, pool_name) =
-            settings(run, strategy, policy, &history, &tokens, from, to)?;
-        settings.agent_forward = end.is_none();
-        settings.block_fees = block_fees(
-            config,
-            root,
-            chain,
-            &history.events,
-            &settings,
-            from,
-            &mut fee_cache,
-        )?;
+        let RunSetup {
+            history,
+            settings,
+            info,
+            rank_rows,
+            pool_name,
+            strategy,
+            ..
+        } = setup(run, root, chain, &mut caches, "backtest")?;
+        let policy_text = info.patience.clone();
         let out = engine::run(history.snapshot.state.clone(), &history.events, &settings)
             .with_context(|| format!("run {} failed", run.run_id))?;
-
-        let info = RunInfo {
-            run_id: run.run_id.clone(),
-            experiment: run.experiment.clone(),
-            index: run.index,
-            config_hash: run.config_hash.clone(),
-            code_version: env!("CARGO_PKG_VERSION").to_string(),
-            mode: "backtest".to_string(),
-            window_from: from.to_string(),
-            window_to: to.to_string(),
-            capital_usd: config.run.capital_usd.unwrap_or_default(),
-            loss_limit_pct: config.run.loss_limit_pct.unwrap_or_default(),
-            autonomy: format!("{:?}", config.run.autonomy).to_lowercase(),
-            strategy: strategy.id.clone(),
-            patience: policy_name(&policy),
-            pool: pool_name.clone(),
-            value_token: strategy.value_token.clone(),
-            fee_pips: history.snapshot.state.fee_pips,
-            width_ticks: settings.width,
-            entry_shape: if settings.follow.is_some() {
-                "followed".to_string()
-            } else {
-                settings.shape.name().to_string()
-            },
-            gas_prices: if settings.block_fees.is_some() {
-                "chain".to_string()
-            } else {
-                "fixed".to_string()
-            },
-            sweep: run
-                .sweep_point
-                .iter()
-                .map(|(path, value)| format!("{path}={value}"))
-                .collect::<Vec<_>>()
-                .join("; "),
-            config_yaml: run.config_yaml.clone(),
-        };
-        write_run(results, &info, &out, rank_rows)?;
+        write_run(results, &info, &out, &rank_rows)?;
         // An agent run writes its looks and scores too, for the viewer.
-        if let Some(who) = crate::agent_log::identity(strategy)? {
+        if let Some(who) = crate::agent_log::identity(&strategy)? {
             let (looks, scores) = crate::agent_rows::rows(&who)?;
             lpbot_sim::agent_tables::write_agent(results, &run.run_id, &looks, &scores)?;
             println!(
@@ -1179,7 +1104,7 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
             "{:<44} {:<16} {:>8} {:>9.3} {:>8.3} {:>10.3} {:>9.5} {:>9.5} {:>6.3} {:>6} {:>7} {:>6.2}%{}",
             run.run_id,
             pool_name,
-            info.patience,
+            policy_text,
             s.result_pct,
             s.result_pct_usd,
             s.hold_value_pct_usd,
@@ -1210,6 +1135,139 @@ pub fn run(runs: &[ResolvedRun], root: &Path, results: &Path, chain: &str) -> Re
         bail!("the experiment has no runs");
     }
     Ok(())
+}
+
+/// What runs share while they are set up: histories, chosen pools and gas.
+#[derive(Default)]
+pub(crate) struct Caches {
+    histories: HashMap<(Address, Day, Day, u32), Rc<History>>,
+    pools: HashMap<PoolKey, (Address, Vec<PoolRankRow>)>,
+    fee_cache: FeeCache,
+}
+
+/// A run made ready: its history as stored now, its engine settings and
+/// the row the `runs` table gets.
+pub(crate) struct RunSetup {
+    pub history: Rc<History>,
+    pub settings: Settings,
+    pub info: RunInfo,
+    pub rank_rows: Vec<PoolRankRow>,
+    pub pool: Address,
+    pub pool_name: String,
+    pub strategy: StrategyConfig,
+    pub config: Config,
+    /// Whether the window is open at the end.
+    pub open: bool,
+}
+
+/// Reads a run's history as far as it is stored and works out its settings:
+/// what `lpbot run` replays and what `lpbot paper` follows from. `mode` is
+/// what the `runs` table records.
+pub(crate) fn setup(
+    run: &ResolvedRun,
+    root: &Path,
+    chain: &str,
+    caches: &mut Caches,
+    mode: &str,
+) -> Result<RunSetup> {
+    let config = &run.config;
+    let Caches {
+        histories,
+        pools,
+        fee_cache,
+    } = caches;
+    let strategy = config
+        .strategies
+        .first()
+        .ok_or_else(|| anyhow!("the run has no strategy"))?;
+    if strategy.kind != "zone_round_trip" {
+        bail!("strategy kind `{}` is not built yet", strategy.kind);
+    }
+    let policy = policy(strategy)?;
+    let (from, end) = run_window(config)?;
+    let (_, tokens) = chain_addresses(config, chain)?;
+
+    let key = pool_key(strategy, from)?;
+    if !pools.contains_key(&key) {
+        let chosen = choose_pool(root, chain, &tokens, config, strategy, from)?;
+        pools.insert(key.clone(), chosen);
+    }
+    let (pool, rank_rows) = &pools[&key];
+    // A window open at the end runs as far as the pool is stored.
+    let to = match end {
+        Some(to) => to,
+        None => stored_end(root, chain, *pool)?,
+    };
+
+    let longest = history_days(strategy)?;
+    let history_key = (*pool, from, to, longest);
+    let history = match histories.get(&history_key) {
+        Some(history) => Rc::clone(history),
+        None => {
+            let loaded = Rc::new(load_history(root, chain, *pool, from, to, longest)?);
+            histories.insert(history_key, Rc::clone(&loaded));
+            loaded
+        }
+    };
+
+    let (mut settings, pool_name) = settings(run, strategy, policy, &history, &tokens, from, to)?;
+    settings.agent_forward = end.is_none();
+    settings.block_fees = block_fees(
+        config,
+        root,
+        chain,
+        &history.events,
+        &settings,
+        from,
+        fee_cache,
+    )?;
+    let info = RunInfo {
+        run_id: run.run_id.clone(),
+        experiment: run.experiment.clone(),
+        index: run.index,
+        config_hash: run.config_hash.clone(),
+        code_version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: mode.to_string(),
+        window_from: from.to_string(),
+        window_to: to.to_string(),
+        capital_usd: config.run.capital_usd.unwrap_or_default(),
+        loss_limit_pct: config.run.loss_limit_pct.unwrap_or_default(),
+        autonomy: format!("{:?}", config.run.autonomy).to_lowercase(),
+        strategy: strategy.id.clone(),
+        patience: policy_name(&policy),
+        pool: pool_name.clone(),
+        value_token: strategy.value_token.clone(),
+        fee_pips: history.snapshot.state.fee_pips,
+        width_ticks: settings.width,
+        entry_shape: if settings.follow.is_some() {
+            "followed".to_string()
+        } else {
+            settings.shape.name().to_string()
+        },
+        gas_prices: if settings.block_fees.is_some() {
+            "chain".to_string()
+        } else {
+            "fixed".to_string()
+        },
+        sweep: run
+            .sweep_point
+            .iter()
+            .map(|(path, value)| format!("{path}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+        config_yaml: run.config_yaml.clone(),
+    };
+    Ok(RunSetup {
+        history,
+        settings,
+        info,
+        rank_rows: rank_rows.clone(),
+        pool: *pool,
+        pool_name,
+        strategy: strategy.clone(),
+        config: config.clone(),
+        open: end.is_none(),
+    })
 }
 
 /// The settings the calibrator tries for the adaptive decision.

@@ -1,9 +1,13 @@
 //! Limits and exit paths.
 //!
-//! Two limits exist so far. The loss limit is the hard backstop under every
+//! The pre-trade and infrastructure checks are in [`checks`], the pause
+//! flag in [`pause`]. Two limits are here: The loss limit is the hard backstop under every
 //! adaptive decision: a required run input, counted in the value token. The
 //! liquidity share cap shrinks a position to a share of the liquidity the
 //! pool has where it goes.
+
+pub mod checks;
+pub mod pause;
 
 /// Parts per million: how shares that decide token amounts are held, so
 /// the amounts themselves are exact integer math.

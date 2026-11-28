@@ -29,10 +29,12 @@ mod gates_cmd;
 mod load_cmd;
 mod load_looks_cmd;
 mod lp_positions_cmd;
+mod paper_cmd;
 mod pool_stats_cmd;
 mod rank_cmd;
 mod run_cmd;
 mod select_cmd;
+mod select_ops;
 mod supervisor_list;
 mod supervisor_procs;
 mod supervisor_status;
@@ -131,6 +133,20 @@ enum Command {
     /// positions.
     #[command(subcommand)]
     Select(SelectCommand),
+    /// Follow a forward experiment at the chain's head with virtual
+    /// positions: the same engine as a backtest, fed each block as it comes,
+    /// checked against a replay of the same blocks. Runs until stopped.
+    Paper(PaperArgs),
+    /// Hold new entries: set the pause flag. Open positions stay under their
+    /// own rules.
+    Pause(PauseArgs),
+    /// Take every position out and hold new entries: the operator's exit.
+    ExitAll(PauseArgs),
+    /// Clear the pause flag.
+    Resume(ResumeArgs),
+    /// The keeper's signer: opens the keystore with a password typed here,
+    /// then signs, over a local socket, only calls to the roles module.
+    Signer(SignerArgs),
 }
 
 #[derive(Subcommand)]
@@ -144,6 +160,44 @@ enum SelectCommand {
     /// each track's capital among those that pass. Writes the plan; sends
     /// nothing.
     Ladder(LadderArgs),
+    /// Every experiment file, rule or agent panel: forward or practice, its
+    /// agents, and with --plan where each of its runs stands.
+    List(ListArgs),
+    /// Record the owner's yes to a plan `ladder` wrote, with its SHA-256:
+    /// the trader takes only an approved plan whose bytes are unchanged.
+    /// The owner's step.
+    Approve(ApproveArgs),
+    /// Whether the trader would take a plan: approved, unchanged since, and
+    /// recent enough.
+    Check(CheckArgs),
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    /// The plan, such as data/selection/dollars.json.
+    plan: PathBuf,
+    /// The oldest plan the trader takes, as a duration.
+    #[arg(long, default_value = "36h")]
+    max_age: String,
+}
+
+#[derive(Args)]
+struct ListArgs {
+    /// Folder of experiment files.
+    #[arg(long, default_value = "experiments")]
+    experiments: PathBuf,
+    /// A plan `lpbot select ladder` wrote, such as data/selection/dollars.json.
+    #[arg(long)]
+    plan: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ApproveArgs {
+    /// The plan, such as data/selection/dollars.json.
+    plan: PathBuf,
+    /// Who approves, for the record.
+    #[arg(long)]
+    by: String,
 }
 
 #[derive(Args)]
@@ -772,6 +826,78 @@ struct RunArgs {
 }
 
 #[derive(Args)]
+struct PaperArgs {
+    #[command(flatten)]
+    experiment: ExperimentArgs,
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+    /// Data folder with the stored history. Defaults to LPBOT_DATA_DIR, then data/lake.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Node endpoint. Defaults to LPBOT_RPC, then the config's local endpoint.
+    #[arg(long)]
+    rpc: Option<String>,
+    /// Folder the result tables are written to. Defaults to runs/paper/<experiment>.
+    #[arg(long)]
+    results_dir: Option<PathBuf>,
+    /// How long to wait between steps. Each step holds the store's lock
+    /// while it catches up, which the agents and the nightly jobs share.
+    #[arg(long, default_value = "1m")]
+    every: String,
+    /// Steps between replays of the whole history against the paper run.
+    #[arg(long, default_value_t = 60)]
+    check_every: u32,
+    /// Stop after this many steps instead of running until stopped.
+    #[arg(long)]
+    steps: Option<u32>,
+    /// The pause flag.
+    #[arg(long, default_value = "data/pause.json")]
+    pause_flag: PathBuf,
+}
+
+#[derive(Args)]
+struct PauseArgs {
+    /// Why, for the record.
+    #[arg(long)]
+    reason: String,
+    /// Who, for the record.
+    #[arg(long, default_value = "owner")]
+    by: String,
+    /// The pause flag.
+    #[arg(long, default_value = "data/pause.json")]
+    pause_flag: PathBuf,
+}
+
+#[derive(Args)]
+struct ResumeArgs {
+    /// The pause flag.
+    #[arg(long, default_value = "data/pause.json")]
+    pause_flag: PathBuf,
+}
+
+#[derive(Args)]
+struct SignerArgs {
+    /// The keeper's encrypted keystore (Web3 Secret Storage v3).
+    #[arg(long)]
+    keystore: PathBuf,
+    /// The socket the trader asks on; created with mode 0600.
+    #[arg(long, default_value = "data/signer/keeper.sock")]
+    socket: PathBuf,
+    /// The chain id the signer signs for.
+    #[arg(long, default_value_t = 1)]
+    chain_id: u64,
+    /// The roles module: the only address the signer signs calls to.
+    #[arg(long)]
+    roles_module: String,
+    /// The most gas one transaction may use.
+    #[arg(long, default_value_t = 2_000_000)]
+    max_gas: u64,
+    /// The highest fee per gas, in gwei.
+    #[arg(long, default_value_t = 200.0)]
+    max_fee_gwei: f64,
+}
+
+#[derive(Args)]
 struct CalibrateArgs {
     #[command(flatten)]
     run: RunArgs,
@@ -800,6 +926,31 @@ struct IvArgs {
     /// Value sitting within 1% of the price, in the quote token.
     #[arg(long = "depth-1pct")]
     depth_1pct: f64,
+}
+
+/// `lpbot pause` and `lpbot exit-all`.
+fn pause(args: &PauseArgs, exit: bool) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    if args.reason.trim().is_empty() {
+        anyhow::bail!("--reason says why, for the record");
+    }
+    let flag = lpbot_risk::pause::PauseFlag::new(&args.pause_flag)
+        .set(exit, &args.reason, &args.by, now)
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", args.pause_flag.display()))?;
+    println!(
+        "{} set in {}: {}. The trader {} at its next step; `lpbot resume` clears it.",
+        if flag.exit { "Exit-all" } else { "Pause" },
+        args.pause_flag.display(),
+        flag.reason,
+        if flag.exit {
+            "takes every position out and holds new entries"
+        } else {
+            "holds new entries"
+        }
+    );
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -833,6 +984,75 @@ fn real_main() -> Result<()> {
                 &args.results_dir,
                 &args.chain,
             )
+        }
+        Command::Paper(args) => {
+            let runs = resolve(&args.experiment)?;
+            print_runs(&runs, args.experiment.show_config);
+            let experiment = runs
+                .first()
+                .map(|r| r.experiment.clone())
+                .ok_or_else(|| anyhow::anyhow!("the experiment has no runs"))?;
+            let every = run_cmd::parse_duration(&args.every)
+                .filter(|s| *s > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--every {}: give a duration such as 15s", args.every)
+                })?;
+            let results = args
+                .results_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("runs/paper").join(&experiment));
+            let journal = paper_cmd::journal_dir(std::path::Path::new("data"), &experiment);
+            let pause = lpbot_risk::pause::PauseFlag::new(&args.pause_flag);
+            let rpc = args
+                .rpc
+                .clone()
+                .or_else(|| std::env::var("LPBOT_RPC").ok().filter(|v| !v.is_empty()));
+            paper_cmd::follow(&paper_cmd::PaperArgs {
+                runs: &runs,
+                root: &backfill_cmd::data_dir(args.data_dir.as_deref()),
+                results: &results,
+                journal: &journal,
+                chain: &args.chain,
+                rpc: rpc.as_deref(),
+                every: std::time::Duration::from_secs(every),
+                check_every: args.check_every,
+                steps: args.steps,
+                pause: &pause,
+            })
+        }
+        Command::Pause(args) => pause(&args, false),
+        Command::ExitAll(args) => pause(&args, true),
+        Command::Resume(args) => {
+            lpbot_risk::pause::PauseFlag::new(&args.pause_flag)
+                .clear()
+                .map_err(|e| anyhow::anyhow!("clearing {}: {e}", args.pause_flag.display()))?;
+            println!("The pause flag {} is clear.", args.pause_flag.display());
+            Ok(())
+        }
+        Command::Signer(args) => {
+            let roles = chain_cmd::checked_address("roles module", &args.roles_module)?;
+            let text = std::fs::read_to_string(&args.keystore)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", args.keystore.display()))?;
+            let password = lpbot_signer::password::read_password("Keystore password: ")?;
+            let key = lpbot_signer::keystore::decrypt(&text, &password)?;
+            drop(password);
+            let policy = lpbot_signer::policy::Policy {
+                chain_id: args.chain_id,
+                roles_module: roles,
+                max_gas_limit: args.max_gas,
+                max_fee_per_gas: (args.max_fee_gwei * 1e9) as u128,
+            };
+            if let Some(parent) = args.socket.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            println!(
+                "Signing for {} on chain {}, calls to {roles:#x} only, on {}.",
+                key.address(),
+                args.chain_id,
+                args.socket.display()
+            );
+            lpbot_signer::server::serve(&args.socket, &key, &policy, &mut std::io::stdout())?;
+            Ok(())
         }
         Command::Calibrate(args) => {
             let _operations =
@@ -1405,6 +1625,63 @@ fn real_main() -> Result<()> {
                     by: args.by.as_deref(),
                     across_pools: args.across_pools,
                 })?
+            );
+            Ok(())
+        }
+        Command::Select(SelectCommand::List(args)) => {
+            let plan = args
+                .plan
+                .as_deref()
+                .map(|path| -> Result<select_cmd::Plan> {
+                    let bytes = std::fs::read(path)
+                        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+                    serde_json::from_slice(&bytes).map_err(|e| {
+                        anyhow::anyhow!(
+                            "{} is not a plan `lpbot select ladder` wrote: {e}",
+                            path.display()
+                        )
+                    })
+                })
+                .transpose()?;
+            let entries = select_ops::entries(&args.experiments, plan.as_ref())?;
+            print!("{}", select_ops::list_text(&entries, plan.as_ref()));
+            Ok(())
+        }
+        Command::Select(SelectCommand::Approve(args)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            let approval = select_ops::approve(&args.plan, &args.by, now)?;
+            println!(
+                "Approved ladder `{}` as of {} (sha256 {}) by {}, written to {}.",
+                approval.ladder,
+                approval.as_of,
+                approval.sha256,
+                approval.approved_by,
+                select_ops::approval_path(&args.plan).display()
+            );
+            Ok(())
+        }
+        Command::Select(SelectCommand::Check(args)) => {
+            let max_age = run_cmd::parse_duration(&args.max_age).ok_or_else(|| {
+                anyhow::anyhow!("--max-age {}: give a duration such as 36h", args.max_age)
+            })?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            let (plan, approval) = select_ops::approved_plan(&args.plan, max_age, now)?;
+            let taken: usize = plan
+                .tracks
+                .iter()
+                .map(|t| t.lines.iter().filter(|l| l.share > 0.0).count())
+                .sum();
+            println!(
+                "The trader takes {}: ladder `{}` as of {}, approved by {}, {taken} candidate(s) \
+                 with a share.",
+                args.plan.display(),
+                plan.ladder,
+                plan.as_of,
+                approval.approved_by
             );
             Ok(())
         }

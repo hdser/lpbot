@@ -9,6 +9,7 @@ members = [
     "crates/strategy",
     "crates/risk",
     "crates/exec",
+    "crates/signer",
     "crates/cli",
 ]
 
@@ -34,8 +35,8 @@ lpbot-data = { path = "crates/data" }
 lpbot-sim = { path = "crates/sim" }
 lpbot-strategy = { path = "crates/strategy" }
 lpbot-risk = { path = "crates/risk" }
-# lpbot-exec (crates/exec) joins here once a crate depends on it; listed unused,
-# newer cargo warns on every build (`unused_workspace_dependencies`).
+lpbot-exec = { path = "crates/exec" }
+lpbot-signer = { path = "crates/signer" }
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
 postgres = "0.19"
 arrow-array = "60"

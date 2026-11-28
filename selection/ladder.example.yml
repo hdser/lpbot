@@ -30,5 +30,5 @@ tracks:
     value_tokens: [USDC, USDT]
     capital_usd: 10000         # what the track shares out; leave it out for shares only
     results:
-      - runs/forward-regime    # lpbot run experiments/forward-regime-usdc.yml and -usdt.yml
+      - runs/forward-rules     # every frozen forward rule, replayed nightly by deploy/selection/nightly.sh
       - runs/mandates-forward  # lpbot run experiments/agent-mandates-forward.yml

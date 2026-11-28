@@ -7,10 +7,12 @@ pub mod config;
 pub mod experiment;
 pub mod metrics;
 pub mod ranking;
+pub mod steps;
 pub mod types;
 
 pub use config::{
     Autonomy, ChainConfig, Config, ConfigError, Mode, PatienceMode, RunInputs, TokenConfig,
 };
 pub use experiment::{resolve_experiment, ResolvedRun, RunOverrides};
+pub use steps::{Step, StepRecord};
 pub use types::{Campaign, EntrySide, Event, ExitReason, Intent, PoolId, RangeTarget, Tick};

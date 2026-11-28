@@ -784,7 +784,7 @@ pub fn parse_ladder(content: &str) -> Result<LadderFile> {
 }
 
 /// An agent's decisions scored over the gates' horizon.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AgentEvidence {
     pub decisions: usize,
     pub mean_edge_vs_cash_pct: Option<f64>,
@@ -826,7 +826,7 @@ pub fn agent_evidence(scores: &Table, horizon: &str) -> AgentEvidence {
 }
 
 /// Where a candidate stands on the ladder.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]
 pub enum Standing {
     /// A backtest: practice, never a reason for real positions.
@@ -971,7 +971,7 @@ pub fn shares(scores: &[f64], allocation: Allocation) -> Vec<f64> {
 }
 
 /// One candidate's line of the plan.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     pub run_id: String,
     pub experiment: String,
@@ -993,7 +993,7 @@ pub struct Line {
 }
 
 /// A track's candidates and how its capital is shared.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackPlan {
     pub track: String,
     pub capital_usd: Option<f64>,
@@ -1005,7 +1005,7 @@ pub struct TrackPlan {
 }
 
 /// The ladder as it stands: what `lpbot select ladder` writes.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub ladder: String,
     /// When it was worked out, in seconds since 1970.
